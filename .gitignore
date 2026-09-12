@@ -1,0 +1,26 @@
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.mdb
+*.bumbledb.tar.gz
+*.bak
+*.bak-*
+node_modules
+private/
+dist/
+coverage/
+.DS_Store
+.env.local
+tsconfig.tsbuildinfo
+
+# Credentials and private operational artifacts
+.env
+.env.*
+*.bundle
+*.zip
+*.tar.gz
+.claude/
+.cursor/

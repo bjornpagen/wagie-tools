@@ -1,0 +1,35 @@
+{
+	"name": "wagie-tools",
+	"version": "1.0.0",
+	"private": true,
+	"type": "module",
+	"packageManager": "pnpm@11.15.1",
+	"engines": {
+		"node": ">=24"
+	},
+	"scripts": {
+		"cli": "node src/cli.ts",
+		"typecheck": "tsc --noEmit",
+		"test": "node --test test/*.test.ts",
+		"lint": "biome check src test scripts migrations package.json tsconfig.json biome.json",
+		"format": "biome check --write src test scripts migrations package.json tsconfig.json biome.json",
+		"schema:generate": "bumbledb-log snapshot --schema src/schema.ts --export ledger --out migrations/0000-initial/schema.json && bumbledb-log bindings --snapshot migrations/0000-initial/schema.json --out migrations/0000-initial/schema.ts",
+		"schema:check": "node scripts/schema.ts",
+		"check": "pnpm typecheck && pnpm lint && pnpm test && pnpm schema:check"
+	},
+	"dependencies": {
+		"@bjornpagen/bumbledb": "1.3.1",
+		"@bjornpagen/bumbledb-log": "1.3.1",
+		"@effect/platform-node": "4.0.0-rc.112",
+		"effect": "4.0.0-rc.112",
+		"tar": "7.5.22",
+		"uuid": "14.0.1"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.8",
+		"@types/node": "26.2.0",
+		"typescript": "7.0.2"
+	},
+	"description": "Local payroll and bookkeeping for a single-owner S corporation.",
+	"license": "0BSD"
+}
