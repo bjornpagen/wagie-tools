@@ -18,6 +18,13 @@ schema mismatch needs investigation; never initialize over it. Commands accept
 `--binding PATH` when intentionally using another store. For build prerequisites,
 read [local runtime](docs/local-runtime.md).
 
+Read `private/provenance/README.md` when present for the operator handoff: company
+and plan IDs, the last completed transaction, pending evidence, and storage
+references. `private/README.md` may point there. Treat this as a dated lookup aid;
+the binding and live structured records decide current state. A copied draft
+evidence string saying "not posted" does not override a posted wage, funding link,
+Mercury ID, or committed command receipt.
+
 Use `pnpm cli db audit` to discover business IDs when unknown. Then select the
 relevant business and read only what the task needs:
 
@@ -122,6 +129,49 @@ New Roth deductions require applicable election timing and employee allowance.
 `recovery record` attributes money actually deducted; it cannot manufacture a
 recovery or change cash. See [payroll inputs](src/payroll.ts) and
 [recovery inputs](src/recoveries.ts) for evidenced tax revisions and recoveries.
+
+## Handle an employee Roth transfer
+
+Start with the private handoff, the selected year's report, and the relevant
+contribution's deduction, funding, and Mercury links. "Like the earlier one"
+means inspect that transaction's actual route. Employee Roth deferral and
+voluntary after-tax funding are different sources; use the requested source.
+
+| Current state | Next action |
+|---|---|
+| Roth deduction exists; remittance is unfunded | Record/reuse the actual Mercury movement and use `FundContribution`. Do not run another payroll or create a distribution. |
+| Deduction and funding already exist | Record only missing receipt evidence or confirmed provider receipt. Reuse the movement and contribution IDs. |
+| Requested new Roth deduction does not exist | Inspect current election, capacity and payroll readiness, then calculate the additional wage/deduction for review. A prior regular paycheck does not itself establish this deduction. |
+
+For a new deduction, let the native payroll calculation determine FICA and any
+prior FICA recovery. Federal income-tax withholding is an evidenced supplied
+input, not an automatic calculation here; never reuse a prior nominal amount as
+a default or infer it from estimated-tax payments. Withholding records a
+deduction/liability; sending a tax deposit is a separate action. Explain those
+two facts once. When the desired outcome is an exact Roth wire with zero cash
+pay, review gross, each deduction, Roth, cash, and taxes remaining payable
+together. Bank cash available today is not a gross-wage ceiling.
+
+Show the concrete command/payload and figures when the user requests a preview.
+Use existing authorization; do not restart approval after the same action is
+approved. Never invent a Mercury ID to post before a transfer. With zero cash
+pay, `payroll post` accepts the actual Roth wire as its bank settlement and
+creates the contribution **and funding link**; do not also call `FundContribution`.
+
+For an authorized Carry/Mercury wire, create or confirm the Carry contribution
+and obtain its current wire instructions first. Check the existing Mercury
+recipient against those instructions, including memo/reference and contribution
+year/source, then send once. If the user sends it, take the native Mercury ID,
+date and amount from their receipt and finish bookkeeping directly. Open the
+browser only for a necessary provider/bank action or missing information.
+Attach/archive the wire receipt; record Carry receipt only when confirmed.
+
+Finish with the affected records and relevant status. Report what was recorded
+and any evidence still pending. Do not expand a contribution into a database
+migration, folder cleanup, full-company link audit or fresh tax research unless
+requested or a concrete failure requires it. Use stored current policy and its
+sources; retrieve new guidance when coverage is missing, inconsistent or being
+refreshed, or when the user asks for research.
 
 ## Record a tax payment
 
@@ -298,6 +348,13 @@ from the selected ledger and private records. Use domain commands, never generic
 fact edits. Run `pnpm check` before publishing code and verify that private files
 remain untracked.
 
+Before a public push, review every outgoing commit as well as the staged diff.
+Check for real company/person names, tax/account identifiers, Mercury references,
+private Drive IDs, local personal paths and credentials; synthetic fixtures must
+not reuse live values. Stage explicit public paths only. Keep the operator
+handoff, receipts, request payloads, scan reports and database files under ignored
+`private/`; never force-add them. Verify the remote branch after pushing.
+
 ## Permanent documents and portable recovery
 
 Google Drive is the permanent document store for a ledger configured with
@@ -309,6 +366,22 @@ Every retained supporting document must have a registered SHA-256 and one
 verified Drive file-ID URL. Reuse a matching existing Drive file; organize it
 without changing its identity. Changed bytes are a different artifact. Retain
 public source citations and historical paths as provenance, not active locations.
+
+Decide what needs retention before archiving. Bank-export CSVs are disposable
+import inputs once their relevant transactions are recorded, reconciled, and
+tagged with native Mercury IDs. Preserve the transaction facts, source identifiers,
+and any already recorded import hashes; do not upload or bundle the raw export
+merely to preserve its bytes. An intentionally unretained import CSV is not a
+missing supporting document or a recovery gap. This rule does not apply to actual
+receipts, bank statements, filed returns, signed elections, or other substantive
+supporting records, and file extension alone does not decide retention.
+
+Existing registered imports require explicit retirement before deleting their
+stored copies: the current audit and backup implementation requires every
+registered artifact. Preserve artifact hashes and transaction/source associations
+when implementing retirement; do not leave broken active links or delete ledger
+facts to remove an import dependency. Historical backups are historical snapshots,
+not a reason to keep archiving disposable inputs into new backups.
 
 After `artifact record`, upload the exact bytes to the configured private company
 folder and call `artifact archive` with
