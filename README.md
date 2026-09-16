@@ -86,6 +86,15 @@ and evidence. Keep operational data out of Git. Native backup verification
 restores into an isolated history and compares every fact. Replacing a current
 backup also requires downloading and verifying the published bytes.
 
+Permanent evidence uses Google Drive file identities and SHA-256 hashes.
+`artifact archive` downloads and verifies each file before replacing its active
+locations; local copies become optional caches. `artifact audit --verify-drive`
+checks every registered document. Once configured with `private/storage.json`,
+backups require verified Drive documents and include their exact bytes and the
+application source. Restore checks all bundled document hashes and recreates
+the cache without depending on the original computer's paths. The live database
+continues to run locally. See the operating skill for archival and cleanup rules.
+
 `migrations/0000-initial/` is the canonical initial database baseline. BumbleDB
 Log 1.3.1 generates its native schema snapshot and TypeScript bindings. Fresh
 histories use that snapshot; the initial cutover copies existing facts through

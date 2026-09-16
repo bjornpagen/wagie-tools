@@ -21,6 +21,7 @@ import { auditLedger } from "./audit.ts"
 import { exists, io, privateDirectory, readBytes, readText, retainOnce } from "./core/files.ts"
 import { epochDay, nowUnixMilliseconds, today } from "./core/time.ts"
 import { EntityId, entityId, json, mintId, Refusal } from "./core/values.ts"
+import { collectDriveDocuments, inspectDocuments, loadStoragePolicy } from "./documents.ts"
 import {
 	currentSchemaPath,
 	Ledger,
@@ -50,6 +51,9 @@ const runtimeEvidence = io("capture code and runtime provenance", async () => {
 				"--",
 				"src",
 				"scripts",
+				"docs",
+				"test",
+				"README.md",
 				"migrations",
 				"package.json",
 				"pnpm-lock.yaml",
@@ -131,6 +135,20 @@ const retainExact = (file: string, bytes: string | Uint8Array) =>
 			)
 	})
 const operationId = (id: string) => Result.getOrThrow(OperationId.from(entityId(id)))
+
+export const verifyBundledDocuments = (snapshot: import("./runtime.ts").Snapshot, directory: string) =>
+	Effect.gen(function* () {
+		if (!(yield* loadStoragePolicy(directory))) return { enforced: false, verified: 0 }
+		const documents = yield* inspectDocuments(snapshot)
+		for (const document of documents) {
+			if (!document.archived || !/^[a-f0-9]{64}$/.test(document.sha256))
+				return yield* fail("DocumentsUnarchived", `Archive lacks a canonical Drive document: ${document.id}`)
+			const bytes = yield* readBytes(path.join(directory, "documents", document.sha256))
+			if (hash(bytes) !== document.sha256)
+				return yield* fail("ArtifactChanged", `Bundled document changed: ${document.id}`)
+		}
+		return { enforced: true, verified: documents.length }
+	})
 const fail = (code: string, message: string) => Effect.fail(new Refusal({ code, message }))
 const temporaryDirectory = Effect.acquireRelease(
 	io("create private verification directory", () =>
@@ -258,6 +276,20 @@ export const backupLedger = (input: { operation: string; output: string; provena
 				}
 			}
 			const snapshot = yield* latest
+			const configuredStorage = yield* loadStoragePolicy(path.dirname(recoveryDirectory))
+			const archivedDocuments = (yield* inspectDocuments(snapshot)).filter((document) => document.archived)
+			const storage =
+				configuredStorage ??
+				(archivedDocuments.length
+					? { version: 1 as const, required: "GoogleDrive" as const, remote: "gdrive:" }
+					: undefined)
+			if (storage) {
+				const documents = yield* collectDriveDocuments(snapshot, storage.remote)
+				yield* retainExact(path.join(bundle, "storage.json"), json(storage))
+				yield* privateDirectory(path.join(bundle, "documents"))
+				for (const document of documents)
+					yield* retainExact(path.join(bundle, "documents", document.sha256), document.bytes)
+			}
 			// Audit dates use UTC civil epoch days; the exact capture time uses epoch milliseconds.
 			const asOf = yield* today("UTC"),
 				recordedAt = yield* nowUnixMilliseconds
@@ -292,7 +324,16 @@ export const backupLedger = (input: { operation: string; output: string; provena
 			yield* retainExact(path.join(bundle, "schema", "current.json"), yield* readBytes(currentSchemaPath))
 			for (const name of ["package.json", "pnpm-lock.yaml"])
 				yield* retainExact(path.join(bundle, name), yield* readBytes(path.join(repositoryRoot, name)))
-			yield* retainExact(path.join(bundle, "runtime.json"), json(yield* runtimeEvidence))
+			const runtime = yield* runtimeEvidence
+			yield* retainExact(path.join(bundle, "runtime.json"), json(runtime))
+			for (const entry of runtime.source) {
+				const destination = path.join(bundle, "source", entry.path)
+				yield* privateDirectory(path.dirname(destination))
+				const bytes = yield* readBytes(path.join(repositoryRoot, entry.path))
+				if (hash(bytes) !== entry.sha256)
+					return yield* fail("SourceChanged", "Application source changed during backup")
+				yield* retainExact(destination, bytes)
+			}
 			const capture = parseStrict(
 				CaptureMetadata,
 				JSON.parse(yield* readText(path.join(bundle, "capture.json")))
@@ -370,12 +411,17 @@ export const verifyArchive = (archive: string) =>
 			)
 			if (audit.factsDigest !== manifest.factsDigest)
 				return yield* fail("RestoreFacts", "Restored fact inventory differs from the captured audit")
+			const documents = yield* verifyBundledDocuments(
+				yield* history.snapshot({ consistency: { kind: "latest" } }),
+				unpacked
+			)
 			return {
 				archive: path.resolve(archive),
 				sha256: hash(yield* readBytes(archive)),
 				source: verified,
 				restoredIdentity: history.identity,
-				audit
+				audit,
+				documents
 			}
 		})
 	)
@@ -441,6 +487,14 @@ export const restoreArchive = (input: {
 			)
 			if (audit.factsDigest !== manifest.factsDigest)
 				return yield* fail("RestoreFacts", "Restored facts differ from the archive's captured audit")
+			yield* verifyBundledDocuments(yield* history.snapshot({ consistency: { kind: "latest" } }), temporary)
+			if (yield* loadStoragePolicy(temporary)) {
+				yield* retainExact(
+					path.join(parent, "storage.json"),
+					yield* readBytes(path.join(temporary, "storage.json"))
+				)
+				yield* copyTree(path.join(temporary, "documents"), path.join(parent, "cache", "documents"))
+			}
 			const provenance = path.join(parent, "provenance")
 			yield* copyTree(path.join(temporary, "provenance"), provenance)
 			yield* copyTree(

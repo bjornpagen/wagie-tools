@@ -6,6 +6,7 @@ import { Effect, Schema } from "effect"
 import { businessCommand } from "./commands.ts"
 import { readBytes } from "./core/files.ts"
 import { entityId, mintId, Nonblank, Refusal } from "./core/values.ts"
+import { driveId } from "./documents.ts"
 import { relationRows } from "./queries.ts"
 import { parseStrict, type Snapshot } from "./runtime.ts"
 import { commandFields, Day, Id, inputFields } from "./schema/input.ts"
@@ -89,7 +90,10 @@ export const recordArtifact = (payload: unknown) =>
 					const knownLocation = (yield* relationRows(snapshot, S.ArtifactLocation)).find(
 						(row) => row.artifact === artifact && row.locator === locator
 					)
-					if (!knownLocation)
+					const archived = (yield* relationRows(snapshot, S.ArtifactLocation)).some(
+						(row) => row.artifact === artifact && driveId(row.locator)
+					)
+					if (!knownLocation && !archived)
 						yield* draft.insert(S.ArtifactLocation, [{ artifact, locator, evidence: input.evidence }])
 					return { artifact, sha256: measured.sha256, length: measured.length }
 				})
@@ -99,6 +103,13 @@ export const recordArtifact = (payload: unknown) =>
 export const locateArtifact = (payload: unknown) =>
 	Effect.gen(function* () {
 		const input = parseStrict(ArtifactLocateInput, payload)
+		if (driveId(input.locator))
+			return yield* Effect.fail(
+				new Refusal({
+					code: "DriveVerificationRequired",
+					message: "Use artifact archive to register a Drive identity after downloading and hashing its bytes"
+				})
+			)
 		const artifact = input.artifact
 		return yield* businessCommand({
 			request: input.request,
@@ -107,6 +118,17 @@ export const locateArtifact = (payload: unknown) =>
 			input: payload,
 			plan: ({ snapshot, draft }) =>
 				Effect.gen(function* () {
+					if (
+						(yield* relationRows(snapshot, S.ArtifactLocation)).some(
+							(row) => row.artifact === artifact && driveId(row.locator)
+						)
+					)
+						return yield* Effect.fail(
+							new Refusal({
+								code: "ArchivedLocation",
+								message: "Use artifact archive to replace a permanent Drive location after checking its bytes"
+							})
+						)
 					const existing = (yield* relationRows(snapshot, S.ArtifactLocation)).find(
 						(row) => row.artifact === artifact && row.locator === input.locator
 					)
@@ -154,7 +176,11 @@ export const verifyArtifact = (payload: unknown) =>
 						{ artifact, length: measured.length, verifiedAt: recordedAt }
 					])
 					const locator = pathToFileURL(resolve(input.file)).href
+					const archived = (yield* relationRows(snapshot, S.ArtifactLocation)).some(
+						(row) => row.artifact === artifact && driveId(row.locator)
+					)
 					if (
+						!archived &&
 						!(yield* relationRows(snapshot, S.ArtifactLocation)).some(
 							(row) => row.artifact === artifact && row.locator === locator
 						)

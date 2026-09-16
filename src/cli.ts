@@ -9,6 +9,7 @@ import { recordBookkeeping } from "./bookkeeping.ts"
 import { io, readText } from "./core/files.ts"
 import { civilDaySpan, parseCalendarDate, today } from "./core/time.ts"
 import { entityId, json, Refusal } from "./core/values.ts"
+import { archiveArtifact, attachBankArtifact, collectDriveDocuments, inspectDocuments } from "./documents.ts"
 import { locateArtifact, recordArtifact, recordMailing, verifyArtifact } from "./evidence.ts"
 import { ensureFilings, expectRetirementFiling } from "./filing-coverage.ts"
 import {
@@ -164,6 +165,34 @@ const payments = Command.make("payment").pipe(
 const artifacts = Command.make("artifact").pipe(
 	Command.withSubcommands([
 		mutation("record", recordArtifact),
+		mutation("archive", archiveArtifact),
+		mutation("attach-bank", attachBankArtifact),
+		Command.make(
+			"audit",
+			{
+				binding: bindingFlag,
+				verifyDrive: Flag.boolean("verify-drive"),
+				remote: Flag.string("remote").pipe(Flag.withDefault("gdrive:"))
+			},
+			(input) =>
+				Effect.gen(function* () {
+					const snapshot = yield* latest
+					const documents = yield* inspectDocuments(snapshot)
+					const verified = input.verifyDrive
+						? (yield* collectDriveDocuments(snapshot, input.remote)).map(({ bytes, ...document }) => ({
+								...document,
+								length: bytes.length
+							}))
+						: []
+					yield* output({
+						state: snapshot.stateStamp,
+						total: documents.length,
+						unarchived: documents.filter((d) => !d.archived).map((d) => d.id),
+						documents,
+						verified
+					})
+				}).pipe(Effect.scoped, Effect.provide(ledgerLayer(input.binding)))
+		),
 		mutation("locate", locateArtifact),
 		mutation("verify", verifyArtifact)
 	])

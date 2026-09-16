@@ -5,6 +5,7 @@ import { bookkeepingWork } from "./bookkeeping-work.ts"
 import { epochDay, periodSpan, toCalendarDate, type UnixEpochDay } from "./core/time.ts"
 import { Refusal } from "./core/values.ts"
 import { depositRegister, entryKey } from "./deposits.ts"
+import { inspectDocuments } from "./documents.ts"
 import { annualPolicyData, missingAnnualInputs } from "./policy/annual.ts"
 import { currentAssessments, currentRevisions, liabilityEntries, relationRows, rows } from "./queries.ts"
 import { paymentEquation } from "./reconciliation.ts"
@@ -464,6 +465,14 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 					detail: `${position.remaining} cents between current ${position.component} assessment and actual withholding/recoveries`
 				})
 		}
+		const documents = yield* inspectDocuments(snapshot)
+		if (documents.some((document) => document.archived))
+			for (const document of documents.filter((document) => !document.archived))
+				readiness.push({
+					id: document.id,
+					kind: "DocumentUnarchived",
+					detail: "Required evidence has no verified permanent Drive copy: artifact archive"
+				})
 		work.push(...(yield* bookkeepingWork(snapshot, business, asOf)))
 		work.sort((a, b) => (a.opensOn < b.opensOn ? -1 : a.opensOn > b.opensOn ? 1 : a.id.localeCompare(b.id)))
 		const blockers = work.filter(

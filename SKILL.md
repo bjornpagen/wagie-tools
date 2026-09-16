@@ -297,3 +297,47 @@ files, and operational notes out of this skill and tracked code. Discover them
 from the selected ledger and private records. Use domain commands, never generic
 fact edits. Run `pnpm check` before publishing code and verify that private files
 remain untracked.
+
+## Permanent documents and portable recovery
+
+Google Drive is the permanent document store for a ledger configured with
+`private/storage.json`: `{ "version": 1, "required": "GoogleDrive", "remote": "gdrive:" }`.
+The live database stays local. Local document files are disposable caches;
+never leave a required original dependent on a Downloads or workstation path.
+
+Every retained supporting document must have a registered SHA-256 and one
+verified Drive file-ID URL. Reuse a matching existing Drive file; organize it
+without changing its identity. Changed bytes are a different artifact. Retain
+public source citations and historical paths as provenance, not active locations.
+
+After `artifact record`, upload the exact bytes to the configured private company
+folder and call `artifact archive` with
+`{request,business,artifact,driveFileId,remote,evidence}`. This command downloads
+the Drive file by ID, checks its SHA-256, and replaces active locations while
+preserving their historical evidence. `artifact locate` cannot qualify a Drive
+copy. Recording or verifying a cached copy does not add machine-specific paths
+to an archived document. Authentication uses the existing local rclone remote;
+never place credentials in the ledger or archives.
+
+For an already sent bank payment, `artifact attach-bank` takes
+`{request,business,artifact,movement,evidence}` and links its receipt without
+creating another movement. Its evidence must establish that the payment was
+sent; this does not establish bank settlement or recipient receipt.
+
+Run `artifact audit --verify-drive` before declaring document work complete.
+Unarchived documents appear in readiness once Drive archival is in use.
+The configured backup command refuses unarchived or changed documents, downloads
+every document by ID, and bundles those verified bytes by hash. It also includes
+the storage policy and exact application source. Backup verification checks all
+bundled document hashes against the restored ledger; restore creates a disposable
+document cache and retains the storage policy. A complete recovery test also runs
+`artifact audit --verify-drive` against the restored binding.
+
+Preserve an independently verified baseline before cleanup. Keep an inventory
+mapping historical evidence to its Drive document or hashed recovery-archive
+member. Never rewrite immutable command inputs or fabricate missing originals.
+Remove duplicate local sources and inactive staging only after their recovery
+copies and the final restored database have been verified. Publish CURRENT by
+its existing Drive ID only after financial preservation, document checks and
+recovery pass; recheck its prior identity/version/hash before replacement, then
+download, byte-compare and independently restore the published archive.
