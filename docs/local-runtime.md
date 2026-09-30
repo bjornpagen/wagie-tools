@@ -18,10 +18,9 @@ package for macOS ARM64, Linux ARM64, or Linux x64. Local validation uses macOS
 ARM64. Update core and Log together and independently restore a backup before
 adopting a new runtime for a working ledger.
 
-Each backup's `runtime.json` records source hashes (including migration code
-and generated bindings), Node and package-manager versions, upstream package
-provenance, package file hashes, and the native binary hash. The archive also
-includes the canonical schema snapshot, retained requests, and private provenance.
+A backup (`db.backup`) is one `.tar.xz` holding `backup.json` (operation,
+facts digest), `binding.json` and the native backup. It is packed with the
+system `tar`: bsdtar on macOS, GNU tar plus `xz` on Linux.
 
 Fresh histories use native `LocalHistory.create` with
 `migrations/0000-initial/schema.json`. Ordinary startup checks the configured

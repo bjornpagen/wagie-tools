@@ -38,24 +38,6 @@ export const downloadDriveFile = (id: string, remote = "gdrive:") =>
 		}
 	})
 
-export const StoragePolicy = Schema.Struct({
-	version: Schema.Literal(1),
-	required: Schema.Literal("GoogleDrive"),
-	remote: Nonblank
-})
-export const loadStoragePolicy = (directory: string) =>
-	io("read document storage policy", async () => {
-		try {
-			return parseStrict(
-				StoragePolicy,
-				JSON.parse(await fs.readFile(path.join(directory, "storage.json"), "utf8"))
-			)
-		} catch (error) {
-			if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return undefined
-			throw error
-		}
-	})
-
 export const ArchiveInput = Schema.Struct({
 	...commandFields,
 	artifact: Id,

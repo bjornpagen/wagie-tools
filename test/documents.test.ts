@@ -4,7 +4,6 @@ import * as path from "node:path"
 import { test } from "node:test"
 import { ChangeSet } from "@bjornpagen/bumbledb"
 import { Effect } from "effect"
-import { verifyBundledDocuments } from "../src/backup.ts"
 import { io } from "../src/core/files.ts"
 import { mintId } from "../src/core/values.ts"
 import { archiveArtifact, collectDocuments, inspectDocuments } from "../src/documents.ts"
@@ -83,19 +82,6 @@ test("Drive archival refuses wrong bytes, preserves identity, survives loss of l
 			const recovered = yield* collectDocuments(archived, "fixture:", undefined, () => Effect.succeed(bytes))
 			assert.equal(recovered[0]?.artifact, document.id)
 			assert.deepEqual(recovered[0]?.bytes, bytes)
-			yield* io("stage portable archive fixture", async () => {
-				await fs.writeFile(
-					path.join(directory, "storage.json"),
-					JSON.stringify({ version: 1, required: "GoogleDrive", remote: "fixture:" })
-				)
-				await fs.mkdir(path.join(directory, "documents"))
-				await fs.writeFile(path.join(directory, "documents", document.sha256), bytes)
-			})
-			assert.deepEqual(yield* verifyBundledDocuments(archived, directory), { enforced: true, verified: 1 })
-			yield* io("damage bundled evidence", () =>
-				fs.writeFile(path.join(directory, "documents", document.sha256), "wrong")
-			)
-			assert.equal((yield* Effect.result(verifyBundledDocuments(archived, directory)))._tag, "Failure")
 			assert.equal(
 				(yield* Effect.result(
 					collectDocuments(archived, "fixture:", undefined, () => Effect.succeed(Buffer.from("replaced")))

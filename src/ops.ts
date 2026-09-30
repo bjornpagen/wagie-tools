@@ -5,7 +5,7 @@ import { auditLedger } from "./audit.ts"
 import { backupLedger, restoreArchive, verifyArchive } from "./backup.ts"
 import { BookkeepingInput, operations, recordBookkeeping } from "./bookkeeping.ts"
 import { civilDaySpan, today, type UnixEpochDay } from "./core/time.ts"
-import { EntityId, Nonblank, Refusal } from "./core/values.ts"
+import { Nonblank, Refusal } from "./core/values.ts"
 import {
 	ArchiveInput,
 	AttachBankInput,
@@ -86,11 +86,13 @@ import {
 	recordElection,
 	recordEmployee
 } from "./profiles.ts"
+import { relationRows } from "./queries.ts"
 import { AnswerInput, AskInput, answerQuestion, questions, recordQuestion } from "./questions.ts"
 import { RecoveryRecordInput, recordRecovery } from "./recoveries.ts"
 import { report } from "./reports.ts"
 import { type Ledger, latest, parseStrict, resolveRequest } from "./runtime.ts"
 import { commandFields, Day, DaySpan, Id, YearNumber } from "./schema/input.ts"
+import * as S from "./schema.ts"
 import { suggestGross } from "./suggestions.ts"
 import { workRegister } from "./work.ts"
 
@@ -434,6 +436,19 @@ export const reads = {
 	"command.resolve": read("Resolve a retained request's outcome", Schema.Struct({ request: Id }), (input) =>
 		resolveRequest(input.request)
 	),
+	businesses: read("Every business and its employees: ids and names", Schema.Struct({}), () =>
+		Effect.gen(function* () {
+			const snapshot = yield* latest
+			const employees = yield* relationRows(snapshot, S.Employee)
+			return (yield* relationRows(snapshot, S.Business)).map((business) => ({
+				id: business.id,
+				name: business.name,
+				employees: employees
+					.filter((employee) => employee.business === business.id)
+					.map((employee) => ({ id: employee.id, name: `${employee.firstName} ${employee.lastName}` }))
+			}))
+		})
+	),
 	"db.audit": read(
 		"Every fact digest, count and report projection",
 		Schema.Struct({ asOf: Schema.optional(Day) }),
@@ -462,21 +477,21 @@ const maintenanceOf = <S extends Schema.Top, Scope extends Op["scope"]>(
 ): Maintenance<Scope> => ({ summary, scope, input, run: (payload) => run(decodeInput(input, payload)) })
 const maintenance = {
 	"db.backup": maintenanceOf(
-		"Capture, verify and package a native backup of the open ledger",
+		"Back up the ledger to one new .tar.xz file (database only; documents stay in Drive)",
 		"ledger",
-		Schema.Struct({ operation: EntityId, output: Nonblank }),
+		Schema.Struct({ output: Nonblank }),
 		backupLedger
 	),
 	"db.verify-backup": maintenanceOf(
-		"Restore an archive in isolation and compare every fact",
+		"Restore a backup into a throwaway directory and check every fact",
 		"archive",
 		Schema.Struct({ archive: Nonblank }),
 		(input) => verifyArchive(input.archive)
 	),
 	"db.restore": maintenanceOf(
-		"Restore an archive into a new directory and binding",
+		"Restore a backup into a new, empty directory and write its binding",
 		"archive",
-		Schema.Struct({ operation: EntityId, archive: Nonblank, directory: Nonblank, bindingOutput: Nonblank }),
+		Schema.Struct({ archive: Nonblank, directory: Nonblank, bindingOutput: Nonblank }),
 		restoreArchive
 	)
 }

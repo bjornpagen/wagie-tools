@@ -95,19 +95,15 @@ Each write has a retained request identity, sealed command, and exact-state
 precondition. Resolve an interrupted request before retrying it. Reusing its
 identity for a different intent is refused.
 
-The ignored `private/` directory holds the database, command recovery, provenance,
-and evidence. Keep operational data out of Git. Native backup verification
-restores into an isolated history and compares every fact. Replacing a current
-backup also requires downloading and verifying the published bytes.
+The ignored `private/` directory holds the database (`private/binding.json`
+names it) and retained write requests. Keep operational data out of Git.
 
-Permanent evidence uses Google Drive file identities and SHA-256 hashes.
-`artifact archive` downloads and verifies each file before replacing its active
-locations; local copies become optional caches. `{"read": "artifact.audit", "verify": true}`
-checks every registered document. Once configured with `private/storage.json`,
-backups require verified Drive documents and include their exact bytes and the
-application source. Restore checks all bundled document hashes and recreates
-the cache without depending on the original computer's paths. The live database
-continues to run locally. See the operating skill for archival and cleanup rules.
+A backup is one `.tar.xz` with the database only: `{"op": "db.backup", "output": …}`,
+`db.verify-backup` and `db.restore` (see [SKILL.md](SKILL.md)). Verification
+restores into a throwaway directory and compares every fact. Documents live in
+Google Drive; the ledger keeps each one's Drive file id and SHA-256, and
+`{"read": "artifact.audit", "verify": true}` re-checks them with rclone. Source
+lives in Git. Neither is copied into a backup.
 
 `migrations/0002-typed/` is the current database baseline. `migrations/index.ts`
 is the table of every released step (source schema, target schema, cutover), and

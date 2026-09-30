@@ -42,7 +42,8 @@ Units come from field names and never vary: `amount`, `gross`, `roth`, `limit`,
 {"read": "status", "business": "BUSINESS_ID"}
 ```
 
-`pnpm cli read` with no business id: use `{"read": "db.audit"}` to discover ids.
+Don't know the business id? `{"read": "businesses"}` lists every business and
+its employees with their ids.
 
 `status` returns only what is open:
 
@@ -60,7 +61,7 @@ Units come from field names and never vary: `amount`, `gross`, `roth`, `limit`,
 Other reads: `report` (`year`, optional `quarter`), `business.inspect`,
 `questions`, `filings.inspect`, `policy.inspect`, `payroll.inspect`
 (`calculation`), `compensation.suggest`, `artifact.audit`, `command.resolve`
-(`request`), `db.audit`, `db.verify-backup` (`archive`).
+(`request`), `businesses`, `db.audit` (every fact digest; large).
 
 ## Writes
 
@@ -174,11 +175,12 @@ with evidence. Answer only from evidence that addresses the question.
 
 ### Documents
 
-`artifact.record` hashes a local file. Upload the same bytes to the company's
-Drive folder, then `artifact.archive` (`artifact`, `driveFileId`, `remote`,
-`evidence`) downloads them by id, checks the hash and records the copy. A
-document without a Drive copy shows in `readiness`; backups refuse until every
-document has one. `artifact.audit` with `verify: true` re-reads every document.
+Documents live in Google Drive, never in the database or its backups; the
+ledger keeps each one's Drive file id and SHA-256. `artifact.record` hashes a
+local file. Upload the same bytes to Drive, then `artifact.archive` (`artifact`,
+`driveFileId`, `remote`, `evidence`) downloads them by id with rclone, checks the
+hash and records the copy. A document without a Drive copy shows in
+`readiness`. `artifact.audit` with `verify: true` re-reads every document.
 
 ### Policy year
 
@@ -189,14 +191,21 @@ blocks payroll and says so in `status`.
 
 ### Backups
 
+A backup is one `.tar.xz` file holding the database and nothing else. All three
+are `apply` ops:
+
 ```json
-{"op": "db.backup", "operation": "UUIDv7", "output": "path.tar.gz"}
-{"read": "db.verify-backup", "archive": "path.tar.gz"}
-{"op": "db.restore", "operation": "UUIDv7", "archive": "…", "directory": "…", "bindingOutput": "…"}
+{"op": "db.backup", "output": "Wagie Tools - CURRENT.bumbledb.tar.xz"}
+{"op": "db.verify-backup", "archive": "Wagie Tools - CURRENT.bumbledb.tar.xz"}
+{"op": "db.restore", "archive": "Wagie Tools - CURRENT.bumbledb.tar.xz", "directory": "private/ledger", "bindingOutput": "private/binding.json"}
 ```
 
-Verification restores in isolation and compares every fact. Keep the same
-operation id when retrying. Publishing to Drive is outside the ledger.
+`db.backup` refuses an existing output path and refuses while a write is
+unresolved. `db.verify-backup` restores into a throwaway directory and checks
+every fact against the digest captured at backup time. `db.restore` needs a new,
+empty directory and a binding path that doesn't exist yet. The Drive copy is
+`Wagie Tools - CURRENT.bumbledb.tar.xz` in the Wagie Tools folder: replace it
+with a fresh `db.backup` after changes worth keeping.
 
 ## Rules
 

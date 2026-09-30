@@ -91,17 +91,11 @@ node scripts/migrate.ts --step 0002-typed … --activate
 ## Operator scripts
 
 - `scripts/migrate.ts --step NAME` runs one released cutover (below).
-- `scripts/native-backup.ts backup|restore` takes or restores a verified native
-  backup of the ledger behind a binding, on either side of a cutover, without
-  a document bundle or Drive.
 - `scripts/facts.ts --binding FILE --out FILE` dumps every fact as JSON, read
   with whichever released schema the binding names; use it to compare ledgers.
 
-The Drive copy of the ledger is `Wagie Tools - CURRENT.bumbledb.tar.xz`: the
-native backup, its binding, the private requests/provenance/evidence, and a
-`RESTORE.md`, compressed with `xz -9e`. It holds the database only: source is
-on GitHub, and documents live in Drive, referenced by Drive id and SHA-256 in
-the ledger.
+Take a `db.backup` before and after a cutover. To redo a cutover, `db.restore`
+the "before" backup into a fresh directory and run the step from that binding.
 
 ## Execute an authorized cutover
 

@@ -161,10 +161,7 @@ test("application backups preserve prior-incarnation command evidence without re
 				)
 			)
 			const refused = yield* Effect.result(
-				backupLedger({
-					operation: yield* mintId,
-					output: path.join(directory, "pending-must-refuse.tar.gz")
-				}).pipe(
+				backupLedger({ output: path.join(directory, "pending-must-refuse.tar.xz") }).pipe(
 					Effect.provideService(Ledger, { history: current, binding: currentBinding, recoveryDirectory })
 				)
 			)
@@ -175,12 +172,11 @@ test("application backups preserve prior-incarnation command evidence without re
 				(yield* current.submit(pending, { attempts: 2, backoff: { baseMillis: 1, capMillis: 10 } })).kind,
 				"decided"
 			)
-			const captured = yield* backupLedger({
-				operation: yield* mintId,
-				output: path.join(directory, "current.tar.gz")
-			}).pipe(Effect.provideService(Ledger, { history: current, binding: currentBinding, recoveryDirectory }))
+			const captured = yield* backupLedger({ output: path.join(directory, "current.tar.xz") }).pipe(
+				Effect.provideService(Ledger, { history: current, binding: currentBinding, recoveryDirectory })
+			)
 			const verified = yield* verifyArchive(captured.archive)
-			assert.equal(verified.audit.factsDigest, captured.factsDigest)
+			assert.equal(verified.factsDigest, captured.factsDigest)
 			assert.deepEqual(
 				yield* Effect.promise(() => fs.readFile(path.join(recoveryDirectory, `${oldRequest}.json`))),
 				originalEnvelope

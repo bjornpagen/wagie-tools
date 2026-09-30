@@ -1,22 +1,25 @@
 import assert from "node:assert/strict"
+import { execFile } from "node:child_process"
 import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
 import { test } from "node:test"
+import { promisify } from "node:util"
 import { ChangeSet, NativeRuntime } from "@bjornpagen/bumbledb"
 import { Effect, ManagedRuntime, Result } from "effect"
-import * as tar from "tar"
 import { auditLedger } from "../src/audit.ts"
 import { backupLedger, restoreArchive, verifyArchive } from "../src/backup.ts"
-import { io, privateDirectory, retain } from "../src/core/files.ts"
+import { retain } from "../src/core/files.ts"
 import { parseCalendarDate } from "../src/core/time.ts"
 import { json, mintId } from "../src/core/values.ts"
 import { createHistory, latest, ledgerLayer } from "../src/runtime.ts"
 import * as S from "../src/schema.ts"
 import { apply, atTime } from "./native-history.ts"
 
-test("packaged native backup restores facts, provenance and usable bindings; altered content refuses", async () => {
-	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "wagie-tools-packaged-"))
+const exec = promisify(execFile)
+
+test("a backup is one .tar.xz holding the database; it verifies, restores to a working ledger, and refuses tampering", async () => {
+	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "wagie-tools-backup-"))
 	const runtime = ManagedRuntime.make(NativeRuntime.layer())
 	try {
 		await runtime.runPromise(
@@ -43,71 +46,65 @@ test("packaged native backup restores facts, provenance and usable bindings; alt
 						)
 						const bindingFile = path.join(directory, "binding.json")
 						yield* retain(bindingFile, json(binding))
-						yield* privateDirectory(path.join(directory, "provenance"))
-						yield* retain(
-							path.join(directory, "provenance", "synthetic-map.json"),
-							json({ source: "synthetic", count: 1 })
+						const output = path.join(directory, "CURRENT.bumbledb.tar.xz")
+						const capture = yield* backupLedger({ output }).pipe(
+							Effect.scoped,
+							Effect.provide(ledgerLayer(bindingFile))
 						)
-						const output = path.join(directory, "CURRENT.bumbledb.tar.gz"),
-							operation = yield* mintId
-						const capture = yield* Effect.scoped(
-							backupLedger({ operation, output }).pipe(
-								Effect.scoped,
-								Effect.provide(ledgerLayer(bindingFile))
-							)
+						// One file, and exactly the database inside it.
+						const listed = (yield* Effect.promise(() => exec("tar", ["-tJf", output]))).stdout
+							.split("\n")
+							.filter((name) => name && !name.endsWith("/"))
+							.map((name) => name.replace(/^\.\//, ""))
+						assert.ok(listed.includes("backup.json") && listed.includes("binding.json"))
+						assert.ok(listed.filter((name) => !name.startsWith("native/")).length === 2, listed.join(", "))
+						// A second backup never overwrites the first.
+						const again = yield* Effect.result(
+							backupLedger({ output }).pipe(Effect.scoped, Effect.provide(ledgerLayer(bindingFile)))
 						)
-						const retry = yield* Effect.scoped(
-							backupLedger({ operation, output }).pipe(
-								Effect.scoped,
-								Effect.provide(ledgerLayer(bindingFile))
-							)
-						)
-						assert.deepEqual(retry, capture)
+						assert.ok(Result.isFailure(again))
+						assert.match(json(again.failure), /BackupOutputExists/)
+
 						const verified = yield* verifyArchive(output)
-						assert.equal(verified.audit.factsDigest, capture.factsDigest)
-						assert.equal(verified.audit.counts.Business, 1)
-						assert.notEqual(verified.restoredIdentity.incarnationId, binding.identity.incarnationId)
-						const restoreInput = {
-							operation: yield* mintId,
+						assert.equal(verified.factsDigest, capture.factsDigest)
+						assert.equal(verified.counts.Business, 1)
+
+						const restored = yield* restoreArchive({
 							archive: output,
 							directory: path.join(directory, "adopted", "store"),
 							bindingOutput: path.join(directory, "adopted", "binding.json")
-						}
-						const restored = yield* restoreArchive(restoreInput)
-						assert.equal(restored.audit.factsDigest, capture.factsDigest)
-						// Recovery after native completion but before binding adoption keeps the target identity.
-						yield* io("simulate interrupted adoption", () => fs.unlink(restoreInput.bindingOutput))
-						const resumed = yield* restoreArchive(restoreInput)
-						assert.deepEqual(resumed.binding, restored.binding)
-						const restoredAgain = yield* restoreArchive(restoreInput)
-						assert.deepEqual(restoredAgain.binding, restored.binding)
-						const readback = yield* Effect.scoped(
-							Effect.gen(function* () {
-								return yield* auditLedger(yield* latest, parseCalendarDate("2026-09-11"))
-							}).pipe(Effect.scoped, Effect.provide(ledgerLayer(restoreInput.bindingOutput)))
-						)
+						})
+						assert.equal(restored.factsDigest, capture.factsDigest)
+						const readback = yield* Effect.gen(function* () {
+							return yield* auditLedger(yield* latest, parseCalendarDate("2026-09-11"))
+						}).pipe(Effect.scoped, Effect.provide(ledgerLayer(restored.binding)))
 						assert.equal(readback.factsDigest, capture.factsDigest)
-						assert.deepEqual(
-							JSON.parse(
-								yield* io("read restored map", () =>
-									fs.readFile(path.join(directory, "adopted", "provenance", "synthetic-map.json"), "utf8")
-								)
-							),
-							{ source: "synthetic", count: 1 }
+						// Restoring over an existing binding refuses.
+						const over = yield* Effect.result(
+							restoreArchive({
+								archive: output,
+								directory: path.join(directory, "other"),
+								bindingOutput: restored.binding
+							})
 						)
+						assert.ok(Result.isFailure(over))
+						assert.match(json(over.failure), /BindingExists/)
+
+						// Tampering with the captured digest is caught by the fact comparison.
 						const corrupt = path.join(directory, "corrupt")
-						yield* privateDirectory(corrupt)
-						yield* io("extract synthetic archive", () => tar.extract({ file: output, cwd: corrupt }))
-						yield* io("alter source evidence", () =>
-							fs.writeFile(path.join(corrupt, "provenance", "synthetic-map.json"), "{}")
-						)
-						const corruptArchive = path.join(directory, "corrupt.tar.gz")
-						yield* io("pack altered archive", () =>
-							tar.create({ file: corruptArchive, gzip: true, cwd: corrupt }, ["."])
-						)
-						const refused = yield* Effect.result(verifyArchive(corruptArchive))
+						yield* Effect.promise(async () => {
+							await fs.mkdir(corrupt)
+							await exec("tar", ["-xJf", output, "-C", corrupt])
+							const manifest = JSON.parse(await fs.readFile(path.join(corrupt, "backup.json"), "utf8"))
+							await fs.writeFile(
+								path.join(corrupt, "backup.json"),
+								json({ ...manifest, factsDigest: "0".repeat(64) })
+							)
+							await exec("tar", ["-cJf", path.join(directory, "corrupt.tar.xz"), "-C", corrupt, "."])
+						})
+						const refused = yield* Effect.result(verifyArchive(path.join(directory, "corrupt.tar.xz")))
 						assert.ok(Result.isFailure(refused))
-						assert.match(json(refused.failure), /ArchiveHash/)
+						assert.match(json(refused.failure), /RestoreFacts/)
 					})
 				)
 			)
