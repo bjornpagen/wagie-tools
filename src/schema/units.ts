@@ -38,6 +38,7 @@ export const unitOf = {
 	outstanding: "Money",
 	remaining: "Money",
 	deducted: "Money",
+	recovery: "Money",
 	principal: "Money",
 	// Money ranges: half-open cent intervals on the wage axis.
 	earning: "MoneyRange",

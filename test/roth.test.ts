@@ -8,7 +8,7 @@ import { parseCalendarDate, periodSpan } from "../src/core/time.ts"
 import { mintId, Refusal } from "../src/core/values.ts"
 import { attachBankArtifact } from "../src/documents.ts"
 import { recordArtifact } from "../src/evidence.ts"
-import { calculatePayroll, inspectCalculation, postPayroll } from "../src/payroll.ts"
+import { calculatePayroll, inspectCalculation, payrollReadback, postPayroll } from "../src/payroll.ts"
 import { relationRows } from "../src/queries.ts"
 import { Ledger, latest } from "../src/runtime.ts"
 import * as S from "../src/schema.ts"
@@ -178,6 +178,15 @@ test("RothOnly solves the gross for exactly zero cash, and a sent Mercury receip
 					evidence
 				})
 				const calculation = resultId(calculated, "calculation")
+				// Every figure the CLI prints must cross the boundary: encode the real readback.
+				const texts = new Map(
+					(yield* relationRows(yield* latest, S.Statement)).map((row) => [row.id as string, row.text])
+				)
+				const printed = encodeOutput(yield* payrollReadback(calculated), texts) as {
+					figures: { paycheck: { cash: string; roth: string; recovery: string } }
+				}
+				assert.equal(printed.figures.paycheck.cash, "0.00")
+				assert.equal(printed.figures.paycheck.roth, "8000.00")
 				const figures = yield* inspectCalculation(yield* latest, business, calculation)
 				assert.ok(figures.paycheck)
 				assert.equal(figures.paycheck.cash, 0n, "the solved gross leaves exactly zero cash")
@@ -190,13 +199,14 @@ test("RothOnly solves the gross for exactly zero cash, and a sent Mercury receip
 
 				// Posting a zero-cash Roth wire takes the wire as the settlement.
 				const reference = yield* mintId
-				yield* postPayroll({
+				const posted_ = yield* postPayroll({
 					request: yield* mintId,
 					business,
 					calculation,
 					evidence: "Owner approved the $8,000.00 Roth wire; Mercury sent it today",
 					settlement: { kind: "Bank", reference, paidOn: "2026-09-16", amount: "8000.00" }
 				})
+				encodeOutput(yield* payrollReadback(posted_), texts)
 				let register = yield* workRegister(yield* latest, business, day)
 				const remittance = register.blockers.find((item) => item.rule === "roth-remittance")
 				assert.ok(remittance, "funded but unreceipted Roth still blocks payroll")
