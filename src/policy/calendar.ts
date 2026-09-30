@@ -1,5 +1,6 @@
 import { ALLEN, type Fact, query, type Uuid, v } from "@bjornpagen/bumbledb"
 import { Effect, Schema } from "effect"
+import type { Note } from "../commands.ts"
 import {
 	addCalendarDays,
 	calendarDays,
@@ -108,7 +109,7 @@ export function expandCalendar(payload: unknown) {
 					ordinal: BigInt(ordinal),
 					span: periodSpan(year, kind, ordinal)
 				})
-	const days: Pick<Fact<typeof S.BusinessDay>, "span" | "eligible" | "evidence">[] = []
+	const days: (Pick<Fact<typeof S.BusinessDay>, "span" | "eligible"> & { evidence: string })[] = []
 	for (let day = span.start; day < span.end; day = epochDay(day + 1n)) {
 		const holiday = holidays.get(day)
 		days.push({
@@ -121,7 +122,7 @@ export function expandCalendar(payload: unknown) {
 }
 
 /** Used by explicit policy installation, within its single retained command. */
-export const installCalendarFacts = (draft: Draft, release: Uuid, payload: unknown) =>
+export const installCalendarFacts = (draft: Draft, note: Note, release: Uuid, payload: unknown) =>
 	Effect.gen(function* () {
 		const calendar = expandCalendar(payload)
 		const { authority, span, evidence } = calendar
@@ -133,11 +134,13 @@ export const installCalendarFacts = (draft: Draft, release: Uuid, payload: unkno
 			periods.push(fact)
 			yield* draft.insert(S.CalendarPeriod, [fact])
 		}
-		yield* draft.insert(S.BusinessDayCoverage, [{ release, authority, span, evidence }])
-		yield* draft.insert(
-			S.BusinessDay,
-			calendar.days.map((day) => ({ release, authority, ...day }))
-		)
+		yield* draft.insert(S.BusinessDayCoverage, [
+			{ release, authority, span, evidence: yield* note(evidence) }
+		])
+		for (const day of calendar.days)
+			yield* draft.insert(S.BusinessDay, [
+				{ release, authority, ...day, evidence: yield* note(day.evidence) }
+			])
 		return { ...calendar, periods }
 	})
 

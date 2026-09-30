@@ -48,8 +48,7 @@ test("two planners using one request dispatch only the atomically retained winne
 								name: "Concurrent",
 								ein: "00-0000088",
 								state: "TX",
-								timeZone: "UTC",
-								recordedAt: 0n
+								timeZone: "UTC"
 							}
 						])
 						planned++
@@ -87,7 +86,7 @@ test("retained commands preserve identities across retries and refuse stale stat
 						planned++
 						const business = yield* mintId
 						yield* draft.insert(S.Business, [
-							{ id: business, name: "First", ein: "00-0000011", state: "TX", timeZone: "UTC", recordedAt: 0n }
+							{ id: business, name: "First", ein: "00-0000011", state: "TX", timeZone: "UTC" }
 						])
 						return { business }
 					})
@@ -128,8 +127,7 @@ test("retained commands preserve identities across retries and refuse stale stat
 					name: "Recovered",
 					ein: "00-0000012",
 					state: "TX",
-					timeZone: "UTC",
-					recordedAt: 0n
+					timeZone: "UTC"
 				}
 			])
 			const command = yield* Command.seal({

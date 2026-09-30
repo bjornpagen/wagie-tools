@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import type { Fact } from "@bjornpagen/bumbledb"
 import { v7 } from "uuid"
+import { statementId } from "../src/commands.ts"
 import { civilDayPoint, parseCalendarDate, periodSpan } from "../src/core/time.ts"
 import { entityId, MAX_U64 } from "../src/core/values.ts"
 import { type EntryPayment, type LiabilityEntry, projectDeposits } from "../src/deposits.ts"
@@ -27,7 +28,7 @@ test("deposit checkpoints retain historical triggers, carry exactly $500, and cl
 			kind: quarter === 4 ? "Terminal" : "Interim",
 			opensOn: span.end,
 			dueOn: span.end + 30n,
-			evidence: "Synthetic"
+			evidence: statementId("Synthetic")
 		}
 	})
 	const triggers: Fact<typeof S.DepositTrigger>[] = [

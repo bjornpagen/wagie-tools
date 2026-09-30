@@ -21,7 +21,7 @@ import { auditLedger } from "./audit.ts"
 import { exists, io, privateDirectory, readBytes, readText, retainOnce } from "./core/files.ts"
 import { epochDay, nowUnixMilliseconds, today } from "./core/time.ts"
 import { EntityId, entityId, json, mintId, Refusal } from "./core/values.ts"
-import { collectDriveDocuments, inspectDocuments, loadStoragePolicy } from "./documents.ts"
+import { collectDocuments, inspectDocuments, loadStoragePolicy } from "./documents.ts"
 import {
 	currentSchemaPath,
 	Ledger,
@@ -284,7 +284,11 @@ export const backupLedger = (input: { operation: string; output: string; provena
 					? { version: 1 as const, required: "GoogleDrive" as const, remote: "gdrive:" }
 					: undefined)
 			if (storage) {
-				const documents = yield* collectDriveDocuments(snapshot, storage.remote)
+				const documents = yield* collectDocuments(
+					snapshot,
+					storage.remote,
+					path.join(path.dirname(recoveryDirectory), "cache", "documents")
+				)
 				yield* retainExact(path.join(bundle, "storage.json"), json(storage))
 				yield* privateDirectory(path.join(bundle, "documents"))
 				for (const document of documents)

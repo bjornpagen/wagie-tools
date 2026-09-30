@@ -6,6 +6,7 @@ import { mintId } from "../src/core/values.ts"
 import type { Draft } from "../src/runtime.ts"
 import { componentPolicy, components } from "../src/schema/vocabulary.ts"
 import * as S from "../src/schema.ts"
+import { say } from "./native-history.ts"
 import { evidence, type PayrollFixture as Fixture } from "./payroll-fixture.ts"
 export const candidate = (
 	draft: Draft,
@@ -37,7 +38,7 @@ export const candidate = (
 				sourceStamp: "synthetic",
 				recordingDay: paidOn.start,
 				contextHash: "synthetic",
-				evidence
+				evidence: say(evidence)
 			}
 		])
 		yield* draft.insert(
@@ -61,7 +62,7 @@ export const candidate = (
 				depositor: fixture.depositor,
 				span: periodSpan(2026, "Month", 9),
 				roth: 0n,
-				evidence
+				evidence: say(evidence)
 			}
 		])
 		const capturedScopes = new Set<Uuid>()
@@ -70,7 +71,7 @@ export const candidate = (
 				{ set, component, origin: "Calculated", method: componentPolicy[component].method }
 			])
 			if (component === "FIT") {
-				yield* draft.insert(S.ObservedAssessment, [{ set, component, amount: 0n, evidence }])
+				yield* draft.insert(S.ObservedAssessment, [{ set, component, amount: 0n, evidence: say(evidence) }])
 				continue
 			}
 			const rule = rules.get(component)

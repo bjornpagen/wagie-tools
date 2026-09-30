@@ -3,6 +3,7 @@ import * as path from "node:path"
 import { test } from "node:test"
 import { ChangeSet } from "@bjornpagen/bumbledb"
 import { Effect } from "effect"
+import { formatDollars } from "../src/core/boundary.ts"
 import { epochDay, formatCalendarDate, parseCalendarDate, periodSpan } from "../src/core/time.ts"
 import { MAX_U64, mintId } from "../src/core/values.ts"
 import {
@@ -21,7 +22,7 @@ import { annualRequirements } from "../src/schema/vocabulary.ts"
 import * as S from "../src/schema.ts"
 import { workRegister } from "../src/work.ts"
 import { resultId as id, assertRefusal as refusal } from "./assertions.ts"
-import { apply, atTime, withHistory } from "./native-history.ts"
+import { apply, atTime, say, withHistory } from "./native-history.ts"
 import { setupPayroll } from "./payroll-fixture.ts"
 
 const evidence = "Synthetic annual refresh qualification"
@@ -35,7 +36,7 @@ test("annual policy stores verified public data without employer defaults and re
 					{ business, release } = fixture
 				const draft = yield* ChangeSet.builder(S.ledger)
 				yield* draft.delete(S.AnnualApproval, fixture.annual.policies)
-				yield* draft.insert(S.PolicyBinding, [{ business, release, evidence }])
+				yield* draft.insert(S.PolicyBinding, [{ business, release, evidence: say(evidence) }])
 				assert.equal((yield* apply(history, yield* draft.finish())).outcome.kind, "committed")
 				const day = parseCalendarDate("2026-09-11")
 				refusal(
@@ -62,20 +63,26 @@ test("annual policy stores verified public data without employer defaults and re
 								bands: source.bands
 									.filter((b) => b.schedule === row.schedule)
 									.map((b) => ({
-										start: String(b.span.start),
-										end: b.span.end === MAX_U64 ? "Infinity" : String(b.span.end),
+										wages: {
+											start: formatDollars(b.wages.start),
+											end: b.wages.end === MAX_U64 ? "Infinity" : formatDollars(b.wages.end)
+										},
 										numerator: String(b.numerator),
 										role: b.role
 									}))
 							})),
 						limits: source.limits
 							.filter((row) => row.annual === policy.id)
-							.map((row) => ({ kind: row.kind, cents: String(row.cents), artifact: row.artifact, evidence })),
+							.map((row) => ({
+								kind: row.kind,
+								cents: formatDollars(row.cents),
+								artifact: row.artifact,
+								evidence
+							})),
 						...(policy.authority === "FederalDC"
 							? {
 									lookback: {
-										start: "2024-07-01",
-										endExclusive: "2025-07-01",
+										span: { start: "2024-07-01", endExclusive: "2025-07-01" },
 										artifact: fixture.annual.artifact,
 										evidence
 									}
@@ -117,13 +124,13 @@ test("annual policy stores verified public data without employer defaults and re
 					"AnnualPolicyRefreshRequired"
 				)
 				const current = yield* workRegister(yield* latest, business, day)
-				assert.equal(current.blockers.filter((row) => row.kind === "PolicyRefresh").length, 0)
+				assert.equal(current.blockers.filter((row) => row.rule === "policy-refresh").length, 0)
 				assert.equal(
-					current.work.filter((row) => row.kind === "PolicyRefresh" && row.completion === "Open").length,
+					current.work.filter((row) => row.rule === "policy-refresh" && row.status === "Open").length,
 					2
 				)
 				const next = yield* workRegister(yield* latest, business, parseCalendarDate("2027-01-01"))
-				assert.equal(next.blockers.filter((row) => row.kind === "PolicyRefresh").length, 2)
+				assert.equal(next.blockers.filter((row) => row.rule === "policy-refresh").length, 2)
 				const reported = yield* report(yield* latest, business, 2026, undefined, day)
 				assert.deepEqual(reported.register, current)
 				const invalid = yield* ChangeSet.builder(S.ledger),
@@ -137,7 +144,9 @@ test("annual policy stores verified public data without employer defaults and re
 						valid: { start: original.valid.start, end: periodSpan(2027, "Year").end }
 					}
 				])
-				yield* invalid.insert(S.AnnualSource, [{ annual, artifact: fixture.annual.artifact, evidence }])
+				yield* invalid.insert(S.AnnualSource, [
+					{ annual, artifact: fixture.annual.artifact, evidence: say(evidence) }
+				])
 				assert.equal((yield* apply(history, yield* invalid.finish())).outcome.kind, "invariant-rejected")
 				assert.equal(formatCalendarDate(epochDay(original.valid.end)), "2027-01-01")
 			}).pipe(
@@ -165,7 +174,12 @@ test("updated election documents explicitly replace the current document without
 					signedOn: "2026-09-09",
 					artifact: annual.artifact,
 					evidence,
-					amounts: { Roth: "1000", Traditional: "0", OptionalAfterTax: "2000", EmployerProfitSharing: "0" }
+					amounts: {
+						Roth: "10.00",
+						Traditional: "0.00",
+						OptionalAfterTax: "20.00",
+						EmployerProfitSharing: "0.00"
+					}
 				}
 				const predecessor = id(yield* recordElectionDocument(input), "document")
 				const nextArtifact = yield* mintId,
@@ -173,14 +187,14 @@ test("updated election documents explicitly replace the current document without
 				yield* draft.insert(S.Artifact, [
 					{ id: nextArtifact, sha256: "synthetic-replacement", mediaType: "text/plain" }
 				])
-				yield* draft.insert(S.VerifiedArtifact, [{ artifact: nextArtifact, length: 2n, verifiedAt: 0n }])
+				yield* draft.insert(S.VerifiedArtifact, [{ artifact: nextArtifact, length: 2n }])
 				assert.equal((yield* apply(history, yield* draft.finish())).outcome.kind, "committed")
 				const replacement = {
 					...input,
 					request: yield* mintId,
 					signedOn: "2026-09-10",
 					artifact: nextArtifact,
-					amounts: { ...input.amounts, Roth: "3000" }
+					amounts: { ...input.amounts, Roth: "30.00" }
 				}
 				refusal(yield* Effect.result(recordElectionDocument(replacement)), "ElectionPredecessorRequired")
 				const receipt = yield* recordElectionDocument({

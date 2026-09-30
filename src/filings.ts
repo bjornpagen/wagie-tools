@@ -1,7 +1,7 @@
 import type { Fact, Uuid } from "@bjornpagen/bumbledb"
 import { Effect, Schema } from "effect"
 import { retirementActivity, retirementFilingDigest } from "./bookkeeping.ts"
-import { businessCommand } from "./commands.ts"
+import { businessCommand, type Note } from "./commands.ts"
 import { civilDaySpan, epochDay, toCalendarDate, type UnixEpochDay } from "./core/time.ts"
 import { json, mintId, Nonblank, Refusal } from "./core/values.ts"
 import { verifyDocument } from "./evidence.ts"
@@ -66,7 +66,7 @@ export const prepareFiling = (payload: unknown) =>
 			business,
 			action: "filings prepare",
 			input: payload,
-			plan: ({ snapshot, draft, recordingDay, recordedAt }) =>
+			plan: ({ snapshot, draft, recordingDay, note }) =>
 				Effect.gen(function* () {
 					const filing = (yield* relationRows(snapshot, S.Filing)).find(
 						(row) => row.id === input.filing && row.business === business
@@ -76,7 +76,7 @@ export const prepareFiling = (payload: unknown) =>
 							new Refusal({ code: "FilingMissing", message: `No matching filing ${input.filing}` })
 						)
 					const register = yield* workRegister(snapshot, business, recordingDay)
-					if (register.work.some((row) => row.id === filing.id && row.completion === "Complete"))
+					if (register.work.some((row) => row.id === filing.id && row.status === "Complete"))
 						return yield* Effect.fail(
 							new Refusal({
 								code: "AlreadySubmitted",
@@ -130,8 +130,7 @@ export const prepareFiling = (payload: unknown) =>
 							release: binding.release,
 							sequence: (previous?.sequence ?? 0n) + 1n,
 							origin: "Prepared",
-							evidence: input.evidence,
-							recordedAt
+							evidence: yield* note(input.evidence)
 						}
 					])
 					yield* draft.insert(S.PreparedVersion, [
@@ -194,7 +193,7 @@ const MethodInput = Schema.Union([
 	}),
 	Schema.Struct({
 		kind: Schema.Literal("Digital"),
-		...inputFields(S.DigitalSubmission, ["submittedOn", "evidence"], { submittedOn: Day }),
+		...inputFields(S.DigitalSubmission, ["submittedOn", "evidence"]),
 		reference: Schema.optional(Schema.Struct(inputFields(S.DigitalReference, ["value", "sourceText"])))
 	}),
 	Schema.Struct({
@@ -219,7 +218,7 @@ export const submitFiling = (payload: unknown) =>
 			business,
 			action: "filings submit",
 			input: payload,
-			plan: ({ snapshot, draft, recordingDay, recordedAt }) =>
+			plan: ({ snapshot, draft, recordingDay, note }) =>
 				Effect.gen(function* () {
 					const allVersions = yield* relationRows(snapshot, S.FilingVersion)
 					const version = allVersions.find((row) => row.id === input.version && row.business === business)
@@ -304,7 +303,7 @@ export const submitFiling = (payload: unknown) =>
 						)
 					const register = yield* workRegister(snapshot, business, recordingDay)
 					const work = register.work.find((row) => row.id === version.filing)
-					if (work?.action === "filings prepare")
+					if (work?.next.op === "filings.prepare")
 						return yield* Effect.fail(
 							new Refusal({
 								code: "FilingBasisChanged",
@@ -343,14 +342,18 @@ export const submitFiling = (payload: unknown) =>
 							release: version.release,
 							policy: policy.id,
 							method: method.kind,
-							requiredCount: policy.requiredCount,
-							recordedAt
+							requiredCount: policy.requiredCount
 						}
 					])
 					switch (method.kind) {
 						case "Grandfathered":
 							yield* draft.insert(S.GrandfatheredSubmission, [
-								{ submission, version: version.id, filing: version.filing, evidence: method.evidence }
+								{
+									submission,
+									version: version.id,
+									filing: version.filing,
+									evidence: yield* note(method.evidence)
+								}
 							])
 							break
 						case "Digital": {
@@ -363,7 +366,7 @@ export const submitFiling = (payload: unknown) =>
 									})
 								)
 							yield* draft.insert(S.DigitalSubmission, [
-								{ submission, submittedOn, evidence: method.evidence }
+								{ submission, submittedOn, evidence: yield* note(method.evidence) }
 							])
 							if (method.reference)
 								yield* draft.insert(S.DigitalReference, [
@@ -396,7 +399,7 @@ export const rejectFiling = (payload: unknown) =>
 			business,
 			action: "filings reject",
 			input: payload,
-			plan: ({ snapshot, draft, recordedAt }) =>
+			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
 					const submission = (yield* relationRows(snapshot, S.Submission)).find(
 						(row) => row.id === input.submission && row.business === business
@@ -410,7 +413,7 @@ export const rejectFiling = (payload: unknown) =>
 						)
 					if (!(yield* relationRows(snapshot, S.Rejection)).some((row) => row.submission === submission.id))
 						yield* draft.insert(S.Rejection, [
-							{ submission: submission.id, evidence: input.evidence, recordedAt }
+							{ id: yield* mintId, submission: submission.id, evidence: yield* note(input.evidence) }
 						])
 					return { submission: submission.id, version: submission.version }
 				})
@@ -419,7 +422,7 @@ export const rejectFiling = (payload: unknown) =>
 
 export const FilingDeadlineInput = Schema.Struct({
 	...common,
-	...inputFields(S.DeadlineRevision, ["filing", "dueOn", "evidence"], { dueOn: Day })
+	...inputFields(S.DeadlineRevision, ["filing", "dueOn", "evidence"])
 })
 export const reviseDeadline = (payload: unknown) =>
 	Effect.gen(function* () {
@@ -430,7 +433,7 @@ export const reviseDeadline = (payload: unknown) =>
 			business,
 			action: "filings deadline",
 			input: payload,
-			plan: ({ snapshot, draft, recordedAt }) =>
+			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
 					const filing = (yield* relationRows(snapshot, S.Filing)).find(
 						(row) => row.id === input.filing && row.business === business
@@ -450,8 +453,7 @@ export const reviseDeadline = (payload: unknown) =>
 							filing: filing.id,
 							sequence,
 							dueOn: input.dueOn,
-							evidence: input.evidence,
-							recordedAt
+							evidence: yield* note(input.evidence)
 						}
 					])
 					return { filing: filing.id, deadline }
@@ -480,7 +482,7 @@ export const amendFiling = (payload: unknown) =>
 			business,
 			action: "filings amend",
 			input: payload,
-			plan: ({ snapshot, draft, recordingDay }) =>
+			plan: ({ snapshot, draft, recordingDay, note }) =>
 				Effect.gen(function* () {
 					const parent = (yield* relationRows(snapshot, S.Filing)).find(
 						(row) => row.id === input.parent && row.business === business
@@ -500,7 +502,7 @@ export const amendFiling = (payload: unknown) =>
 							})
 						)
 					const register = yield* workRegister(snapshot, business, recordingDay)
-					if (!register.work.some((row) => row.id === parent.id && row.completion === "Complete"))
+					if (!register.work.some((row) => row.id === parent.id && row.status === "Complete"))
 						return yield* Effect.fail(
 							new Refusal({
 								code: "ParentNotSubmitted",
@@ -530,7 +532,7 @@ export const amendFiling = (payload: unknown) =>
 						parent,
 						discoveredOn,
 						dueOn: input.dueOn,
-						evidence: input.evidence,
+						evidence: yield* note(input.evidence),
 						selected,
 						accounts
 					})
@@ -546,7 +548,7 @@ const createCorrectionFacts = (
 		parent: Fact<typeof S.Filing>
 		discoveredOn: UnixEpochDay
 		dueOn: UnixEpochDay
-		evidence: string
+		evidence: Uuid
 		selected: readonly Fact<typeof S.AssessmentRevision>[]
 		accounts: readonly Fact<typeof S.RevisionAccount>[]
 	}
@@ -642,7 +644,8 @@ export const revisionFilingFacts = (
 		revision: Fact<typeof S.AssessmentRevision>
 		accounts: readonly Fact<typeof S.RevisionAccount>[]
 		recordingDay: UnixEpochDay
-		evidence: string
+		evidence: Uuid
+		note: Note
 		deadlines: readonly (typeof AmendmentDeadlineInput.Type)[]
 	}
 ) =>
@@ -664,7 +667,7 @@ export const revisionFilingFacts = (
 					))
 		)
 		const submitted = affected.filter((row) =>
-			register.work.some((item) => item.id === row.id && item.completion === "Complete")
+			register.work.some((item) => item.id === row.id && item.status === "Complete")
 		)
 		if (
 			new Set(options.deadlines.map((row) => row.parent)).size !== options.deadlines.length ||
@@ -698,7 +701,7 @@ export const revisionFilingFacts = (
 				parent,
 				discoveredOn: recordingDay,
 				dueOn: deadline.dueOn,
-				evidence: deadline.evidence,
+				evidence: yield* options.note(deadline.evidence),
 				selected: [revision],
 				accounts
 			})

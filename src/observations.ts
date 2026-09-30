@@ -1,8 +1,9 @@
 import type { Fact } from "@bjornpagen/bumbledb"
 import { Effect, Schema } from "effect"
+import type { Note } from "./commands.ts"
 import { Nonblank, Refusal } from "./core/values.ts"
 import type { Draft } from "./runtime.ts"
-import { inputField, inputFields } from "./schema/input.ts"
+import { inputFields, money } from "./schema/input.ts"
 import { components } from "./schema/vocabulary.ts"
 import * as S from "./schema.ts"
 
@@ -10,14 +11,11 @@ import * as S from "./schema.ts"
  * substitute calculation mode for new payroll or an inferred rate schedule.
  */
 export const ObservedAssessmentInput = Schema.Struct({
-	amounts: Schema.Record(
-		Schema.Literals(S.Component.handles),
-		inputField(S.ObservedAssessment.fields.amount)
-	),
+	amounts: Schema.Record(Schema.Literals(S.Component.handles), money(S.ObservedAssessment.fields.amount)),
 	taxableWages: Schema.Array(
 		Schema.Struct({
-			...inputFields(S.TaxableWages, ["program", "evidence"]),
-			cents: inputField(S.TaxableWages.fields.amount)
+			...inputFields(S.TaxableWages, ["program", "amount"]),
+			evidence: Nonblank
 		})
 	),
 	evidence: Nonblank
@@ -25,6 +23,7 @@ export const ObservedAssessmentInput = Schema.Struct({
 
 export const observedSetFacts = (
 	draft: Draft,
+	note: Note,
 	set: Fact<typeof S.AssessmentSet>,
 	input: typeof ObservedAssessmentInput.Type
 ) =>
@@ -44,23 +43,19 @@ export const observedSetFacts = (
 				})
 			)
 		yield* draft.insert(S.AssessmentSet, [set])
-		yield* draft.insert(S.ObservedSet, [{ set: set.id, evidence: input.evidence }])
+		const evidence = yield* note(input.evidence)
+		yield* draft.insert(S.ObservedSet, [{ set: set.id, evidence }])
 		for (const component of components) {
 			yield* draft.insert(S.Assessment, [
 				{ set: set.id, component, origin: "Observed", method: "SuppliedAmount" }
 			])
 			yield* draft.insert(S.ObservedAssessment, [
-				{ set: set.id, component, amount: input.amounts[component], evidence: input.evidence }
+				{ set: set.id, component, amount: input.amounts[component], evidence }
 			])
 		}
-		yield* draft.insert(
-			S.TaxableWages,
-			input.taxableWages.map((row) => ({
-				set: set.id,
-				program: row.program,
-				amount: row.cents,
-				evidence: row.evidence
-			}))
-		)
+		for (const row of input.taxableWages)
+			yield* draft.insert(S.TaxableWages, [
+				{ set: set.id, program: row.program, amount: row.amount, evidence: yield* note(row.evidence) }
+			])
 		return set
 	})

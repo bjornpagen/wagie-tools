@@ -4,6 +4,8 @@ import { test } from "node:test"
 import { ChangeSet, query, v } from "@bjornpagen/bumbledb"
 import { Clock, Effect } from "effect"
 import { netCash } from "../src/calculations.ts"
+import { statementWriter } from "../src/commands.ts"
+import { formatDollars } from "../src/core/boundary.ts"
 import { civilDayPoint, parseCalendarDate, periodSpan } from "../src/core/time.ts"
 import { MAX_U64, mintId } from "../src/core/values.ts"
 import { ensureFilings } from "../src/filing-coverage.ts"
@@ -19,13 +21,13 @@ import {
 import { installCalendarFacts } from "../src/policy/calendar.ts"
 import { currentRevisions, liabilityEntries, relationRows, rows } from "../src/queries.ts"
 import { recordRecovery, settlePaycheck } from "../src/recoveries.ts"
-import { Ledger, type LedgerHistory, latest, parseStrict } from "../src/runtime.ts"
-import { components, formPolicy, forms } from "../src/schema/vocabulary.ts"
+import { Ledger, latest, parseStrict } from "../src/runtime.ts"
+import { components } from "../src/schema/vocabulary.ts"
 import * as S from "../src/schema.ts"
 import { workRegister } from "../src/work.ts"
 import { assertRefusal as refusal, resultId } from "./assertions.ts"
-import { apply, atTime, bankForWage, withHistory } from "./native-history.ts"
-import { evidence, setupPayroll } from "./payroll-fixture.ts"
+import { apply, atTime, bankForWage, say, withHistory } from "./native-history.ts"
+import { evidence, readyPayroll as ready } from "./payroll-fixture.ts"
 
 const wageFacts = query(S.ledger).rule((r) => {
 	const row = v(S.Wage)
@@ -60,87 +62,6 @@ const recoveryRows = query(S.ledger).rule((r) => {
 	return r.match(S.Recovery, row).find(row)
 })
 
-const ready = (history: LedgerHistory) =>
-	Effect.gen(function* () {
-		const fixture = yield* setupPayroll(history)
-		const draft = yield* ChangeSet.builder(S.ledger)
-		const { business, employee, release } = fixture
-		yield* draft.insert(S.PolicyBinding, [{ business, release, evidence }])
-		yield* draft.insert(S.AnnualBudget, [
-			{ id: yield* mintId, employee, year: 2026n, limit: 20000000n, evidence }
-		])
-		const accounts = []
-		for (const family of S.AccountFamily.handles) {
-			const account = yield* mintId,
-				policy = yield* mintId
-			const periodKind = family === "Federal941" ? "Month" : "Quarter"
-			const authority = family === "TexasUnemployment" ? "Texas" : "FederalDC"
-			const calendar = authority === "Texas" ? fixture.texas : fixture.federal
-			accounts.push({ id: account, business, family, evidence })
-			yield* draft.insert(S.TaxAccount, [{ id: account, business, family, evidence }])
-			yield* draft.insert(S.DepositPolicy, [
-				{
-					id: policy,
-					release,
-					business,
-					account,
-					family,
-					periodKind,
-					authority,
-					dueRule: "FollowingMonthEnd",
-					valid: periodSpan(2026, "Year"),
-					evidence
-				}
-			])
-			for (const kind of S.CheckpointKind.handles)
-				yield* draft.insert(S.DepositTrigger, [
-					{
-						policy,
-						kind,
-						actionable: { start: family === "Federal940" && kind === "Interim" ? 50001n : 1n, end: MAX_U64 }
-					}
-				])
-			for (const period of calendar.periods.filter((row) => row.kind === periodKind && row.year === 2026n)) {
-				yield* draft.insert(S.DepositCheckpoint, [
-					{
-						id: yield* mintId,
-						policy,
-						business,
-						account,
-						calendar: period.id,
-						periodKind,
-						span: period.span,
-						year: 2026n,
-						kind: period.ordinal === (periodKind === "Month" ? 12n : 4n) ? "Terminal" : "Interim",
-						opensOn: period.span.end,
-						dueOn: period.span.end + 15n,
-						evidence
-					}
-				])
-			}
-		}
-		for (const form of forms.filter((form) => formPolicy[form].due !== "RecordedEvent"))
-			yield* draft.insert(S.FilingRule, [
-				{
-					id: yield* mintId,
-					release,
-					form,
-					authority: formPolicy[form].authority,
-					periodKind: formPolicy[form].period,
-					dueRule: "FollowingMonthEnd",
-					evidence
-				}
-			])
-		assert.equal((yield* apply(history, yield* draft.finish())).outcome.kind, "committed")
-		yield* ensureFilings({
-			request: yield* mintId,
-			business,
-			throughYear: 2026,
-			enrollment: { startsOn: "2026-09-01", evidence }
-		})
-		return { ...fixture, accounts }
-	})
-
 test("public payroll commands gate fresh posting, atomically cover W-2s, and revise tax without rewriting money", async () => {
 	await withHistory((history, binding, directory) =>
 		Effect.gen(function* () {
@@ -169,11 +90,11 @@ test("public payroll commands gate fresh posting, atomically cover W-2s, and rev
 					purpose: {
 						kind: "NewWage",
 						paidOn: "2026-09-11",
-						grossCents: "100000",
-						rothCents: "0",
+						gross: "1000.00",
+						roth: "0.00",
 						work: { start: "2026-09-01", endExclusive: "2026-09-11" }
 					},
-					fit: { cents: "10000", evidence },
+					fit: { amount: "100.00", evidence },
 					evidence
 				}
 				const calculate = yield* calculatePayroll(input),
@@ -191,7 +112,8 @@ test("public payroll commands gate fresh posting, atomically cover W-2s, and rev
 					[]
 				)
 				const postInput = {
-					settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "82350" },
+					evidence: "Synthetic posting approval and Mercury payment",
+					settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "823.50" },
 					request: yield* mintId,
 					business,
 					calculation
@@ -218,7 +140,7 @@ test("public payroll commands gate fresh posting, atomically cover W-2s, and rev
 					request: yield* mintId,
 					business,
 					account: account.id,
-					amount: "25300",
+					amount: "253.00",
 					sentOn: "2026-09-11",
 					evidence,
 					references: [{ issuer: "SYNTHETIC", scope: "payroll", value: "once", sourceText: evidence }],
@@ -231,7 +153,7 @@ test("public payroll commands gate fresh posting, atomically cover W-2s, and rev
 					payments: [
 						{
 							payment,
-							period: { start: "2026-09-01", end: "2026-10-01" },
+							period: { start: "2026-09-01", endExclusive: "2026-10-01" },
 							entries: [{ revision }],
 							adjustments: [],
 							evidence
@@ -246,7 +168,7 @@ test("public payroll commands gate fresh posting, atomically cover W-2s, and rev
 					...input,
 					request: yield* mintId,
 					purpose: { kind: "TaxRevision", wage, predecessor: revision, sameDayBefore: [] },
-					fit: { cents: "12500", evidence }
+					fit: { amount: "125.00", evidence }
 				})
 				yield* revisePayrollTax({
 					request: yield* mintId,
@@ -285,7 +207,7 @@ test("public payroll commands gate fresh posting, atomically cover W-2s, and rev
 							amounts: Object.fromEntries(
 								correctedFigures.amounts.map((row) => [
 									row.component,
-									(row.component === "FIT" ? 13000n : row.amount).toString()
+									formatDollars(row.component === "FIT" ? 13000n : row.amount)
 								])
 							),
 							taxableWages: [],
@@ -302,14 +224,17 @@ test("public payroll commands gate fresh posting, atomically cover W-2s, and rev
 				}
 				const beforeMutation = yield* calculatePayroll(nextInput)
 				const update = yield* ChangeSet.builder(S.ledger)
-				yield* update.insert(S.Review, [
-					{ id: yield* mintId, employee, year: 2026n, topic: "Synthetic", detail: evidence }
+				const question = yield* mintId
+				yield* update.insert(S.Question, [{ id: question, business, kind: "Review", detail: evidence }])
+				yield* update.insert(S.EmployeeQuestion, [
+					{ question, business, employee, year: 2026n, topic: "Synthetic" }
 				])
 				yield* apply(history, yield* update.finish())
 				refusal(
 					yield* Effect.result(
 						postPayroll({
-							settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "82350" },
+							evidence: "Synthetic posting approval and Mercury payment",
+							settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "823.50" },
 							request: yield* mintId,
 							business,
 							calculation: resultId(beforeMutation, "calculation")
@@ -322,7 +247,8 @@ test("public payroll commands gate fresh posting, atomically cover W-2s, and rev
 				refusal(
 					yield* Effect.result(
 						postPayroll({
-							settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "82350" },
+							evidence: "Synthetic posting approval and Mercury payment",
+							settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "823.50" },
 							request: yield* mintId,
 							business,
 							calculation: resultId(beforeMidnight, "calculation")
@@ -340,7 +266,8 @@ test("public payroll commands gate fresh posting, atomically cover W-2s, and rev
 				refusal(
 					yield* Effect.result(
 						postPayroll({
-							settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "82350" },
+							evidence: "Synthetic posting approval and Mercury payment",
+							settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "823.50" },
 							request: yield* mintId,
 							business,
 							calculation: resultId(backdated, "calculation")
@@ -358,7 +285,9 @@ test("public payroll commands gate fresh posting, atomically cover W-2s, and rev
 				])
 				assert.equal((yield* apply(history, yield* inconsistent.finish())).outcome.kind, "committed")
 				const invalidRegister = yield* workRegister(yield* latest, business, parseCalendarDate("2026-10-02"))
-				assert.ok(invalidRegister.blockers.some((row) => row.id === payment && row.kind === "Reconciliation"))
+				assert.ok(
+					invalidRegister.blockers.some((row) => row.subject === payment && row.kind === "Reconciliation")
+				)
 				assert.ok(
 					invalidRegister.work.some(
 						(row) => row.kind === "Payment" && row.label.startsWith("Federal941") && row.amount === 28300n
@@ -385,16 +314,17 @@ test("automatic recovery collects the ledger debt and preserves actual historica
 					purpose: {
 						kind: "NewWage",
 						paidOn: "2026-09-11",
-						grossCents: "100000",
-						rothCents: "0",
+						gross: "1000.00",
+						roth: "0.00",
 						work: { start: "2026-09-01", endExclusive: "2026-09-05" }
 					},
-					fit: { cents: "0", evidence },
+					fit: { amount: "0.00", evidence },
 					evidence
 				}
 				const wage = resultId(
 					yield* postPayroll({
-						settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "92350" },
+						evidence: "Synthetic posting approval and Mercury payment",
+						settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "923.50" },
 						request: yield* mintId,
 						business,
 						calculation: resultId(yield* calculatePayroll(input), "calculation")
@@ -410,7 +340,7 @@ test("automatic recovery collects the ledger debt and preserves actual historica
 				yield* observed.delete(S.Deduction, [original])
 				yield* observed.insert(S.Deduction, [{ ...original, amount: original.amount - 1000n }])
 				assert.equal((yield* apply(history, yield* observed.finish())).outcome.kind, "committed")
-				const recovery = { owedOnWage: wage, component: "EmployeeSS", amount: "1000", evidence }
+				const recovery = { owedOnWage: wage, component: "EmployeeSS", amount: "10.00", evidence }
 				const next = {
 					...input,
 					request: yield* mintId,
@@ -429,7 +359,8 @@ test("automatic recovery collects the ledger debt and preserves actual historica
 				)
 				const collecting = resultId(
 					yield* postPayroll({
-						settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "91350" },
+						evidence: "Synthetic posting approval and Mercury payment",
+						settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "913.50" },
 						request: yield* mintId,
 						business,
 						calculation
@@ -474,7 +405,7 @@ test("automatic recovery collects the ledger debt and preserves actual historica
 							request: yield* mintId,
 							business,
 							wage: collecting,
-							recoveries: [{ ...recovery, amount: "999" }],
+							recoveries: [{ ...recovery, amount: "9.99" }],
 							evidence
 						})
 					),
@@ -511,10 +442,18 @@ test("native payroll admission rejects mismatched days, years, deductions, overl
 					allowance = yield* mintId,
 					election = yield* mintId
 				yield* rules.insert(S.DeferralPolicy, [
-					{ id: policy, release, year: 2026n, limit: 2400000n, evidence }
+					{ id: policy, release, year: 2026n, limit: 2400000n, evidence: say(evidence) }
 				])
 				yield* rules.insert(S.EmployeeAllowance, [
-					{ id: allowance, employee, year: 2026n, policy, maximum: 2400000n, limit: 2000000n, evidence }
+					{
+						id: allowance,
+						employee,
+						year: 2026n,
+						policy,
+						maximum: 2400000n,
+						limit: 2000000n,
+						evidence: say(evidence)
+					}
 				])
 				yield* rules.insert(S.Election, [
 					{
@@ -527,7 +466,7 @@ test("native payroll admission rejects mismatched days, years, deductions, overl
 						signedOn: parseCalendarDate("2026-09-01"),
 						effective: periodSpan(2026, "Year"),
 						limit: 2000000n,
-						evidence
+						evidence: say(evidence)
 					}
 				])
 
@@ -535,7 +474,7 @@ test("native payroll admission rejects mismatched days, years, deductions, overl
 					document = yield* mintId,
 					artifact = yield* mintId,
 					annual = yield* mintId
-				yield* rules.insert(S.Owner, [{ business, employee, evidence }])
+				yield* rules.insert(S.Owner, [{ business, employee, evidence: say(evidence) }])
 				yield* rules.insert(S.RetirementPlan, [
 					{
 						id: plan,
@@ -543,8 +482,7 @@ test("native payroll admission rejects mismatched days, years, deductions, overl
 						employee,
 						name: "Synthetic Plan",
 						ein: "00-0000020",
-						evidence,
-						recordedAt: 0n
+						evidence: say(evidence)
 					}
 				])
 				yield* rules.insert(S.RetirementAnnual, [
@@ -561,14 +499,13 @@ test("native payroll admission rejects mismatched days, years, deductions, overl
 						outsideAdditions: 0n,
 						otherPlans: false,
 						outsideAssets: false,
-						evidence,
-						recordedAt: 0n
+						evidence: say(evidence)
 					}
 				])
 				yield* rules.insert(S.Artifact, [
 					{ id: artifact, sha256: "synthetic-election", mediaType: "application/pdf" }
 				])
-				yield* rules.insert(S.VerifiedArtifact, [{ artifact, length: 1n, verifiedAt: 0n }])
+				yield* rules.insert(S.VerifiedArtifact, [{ artifact, length: 1n }])
 				yield* rules.insert(S.ElectionDocument, [
 					{
 						id: document,
@@ -576,8 +513,7 @@ test("native payroll admission rejects mismatched days, years, deductions, overl
 						year: 2026n,
 						signedOn: parseCalendarDate("2026-09-01"),
 						artifact,
-						evidence,
-						recordedAt: 0n
+						evidence: say(evidence)
 					}
 				])
 				yield* rules.insert(S.ElectionDocumentAmount, [
@@ -606,16 +542,17 @@ test("native payroll admission rejects mismatched days, years, deductions, overl
 					purpose: {
 						kind: "NewWage",
 						paidOn: "2026-09-11",
-						grossCents: "1000000",
-						rothCents: "100000",
+						gross: "10000.00",
+						roth: "1000.00",
 						work: { start: "2026-09-01", endExclusive: "2026-09-11" }
 					},
-					fit: { cents: "0", evidence },
+					fit: { amount: "0.00", evidence },
 					evidence
 				}
 				const calculated = yield* calculatePayroll(input)
 				yield* postPayroll({
-					settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "823500" },
+					evidence: "Synthetic posting approval and Mercury payment",
+					settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "8235.00" },
 					request: yield* mintId,
 					business,
 					calculation: resultId(calculated, "calculation")
@@ -659,7 +596,7 @@ test("native payroll admission rejects mismatched days, years, deductions, overl
 				}
 
 				const pending = yield* workRegister(yield* latest, business, parseCalendarDate("2026-09-11"))
-				assert.ok(pending.blockers.some((r) => r.id.startsWith("roth-receipt/")))
+				assert.ok(pending.blockers.some((r) => r.id.startsWith("roth-remittance/")))
 				const receiptDraft = yield* ChangeSet.builder(S.ledger),
 					account = yield* mintId,
 					operation = yield* mintId,
@@ -669,10 +606,17 @@ test("native payroll admission rejects mismatched days, years, deductions, overl
 				const contribution = (yield* relationRows(yield* latest, S.RetirementContribution))[0]
 				assert.ok(contribution)
 				yield* receiptDraft.insert(S.PlanAccount, [
-					{ id: account, plan, kind: "Roth", provider: "Synthetic", reference: "roth-paid", evidence }
+					{
+						id: account,
+						plan,
+						kind: "Roth",
+						provider: "Synthetic",
+						reference: "roth-paid",
+						evidence: say(evidence)
+					}
 				])
 				yield* receiptDraft.insert(S.ProviderOperation, [
-					{ id: operation, plan, provider: "Synthetic", reference: "receipt-paid", evidence, recordedAt: 0n }
+					{ id: operation, plan, provider: "Synthetic", reference: "receipt-paid", evidence: say(evidence) }
 				])
 				yield* receiptDraft.insert(S.BankMovement, [
 					{
@@ -681,15 +625,41 @@ test("native payroll admission rejects mismatched days, years, deductions, overl
 						direction: "Outflow",
 						paidOn: parseCalendarDate("2026-09-11"),
 						amount: 100000n,
-						evidence,
-						recordedAt: 0n
+						evidence: say(evidence)
 					}
 				])
 				yield* receiptDraft.insert(S.MercuryTransaction, [
 					{ movement, reference: "synthetic-roth-remittance" }
 				])
+				// Option B: the withheld Roth has left the business once its Mercury
+				// receipt is attached; the provider's confirmation is only a reminder.
+				const receiptArtifact = yield* mintId,
+					observation = yield* mintId
+				yield* receiptDraft.insert(S.Artifact, [
+					{ id: receiptArtifact, sha256: "1".repeat(64), mediaType: "application/pdf" }
+				])
+				yield* receiptDraft.insert(S.BankObservation, [
+					{
+						id: observation,
+						business,
+						artifact: receiptArtifact,
+						row: 1n,
+						status: "Sent",
+						observedOn: parseCalendarDate("2026-09-11"),
+						amount: 100000n,
+						evidence: say(evidence)
+					}
+				])
+				yield* receiptDraft.insert(S.BankSource, [{ movement, observation, business }])
 				yield* receiptDraft.insert(S.CashAllocation, [
-					{ id: allocation, movement, business, purpose: "RothRemittance", amount: 100000n, evidence }
+					{
+						id: allocation,
+						movement,
+						business,
+						purpose: "RothRemittance",
+						amount: 100000n,
+						evidence: say(evidence)
+					}
 				])
 				yield* receiptDraft.insert(S.ContributionFunding, [
 					{
@@ -710,8 +680,7 @@ test("native payroll admission rejects mismatched days, years, deductions, overl
 						year: 2026n,
 						observedOn: parseCalendarDate("2026-09-11"),
 						amount: 100000n,
-						evidence,
-						recordedAt: 0n
+						evidence: say(evidence)
 					}
 				])
 				yield* receiptDraft.insert(S.ReceiptAllocation, [
@@ -722,7 +691,8 @@ test("native payroll admission rejects mismatched days, years, deductions, overl
 				refusal(
 					yield* Effect.result(
 						postPayroll({
-							settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "823500" },
+							evidence: "Synthetic posting approval and Mercury payment",
+							settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "8235.00" },
 							request: yield* mintId,
 							business,
 							calculation: resultId(overlap, "calculation")
@@ -735,15 +705,16 @@ test("native payroll admission rejects mismatched days, years, deductions, overl
 					request: yield* mintId,
 					purpose: {
 						...input.purpose,
-						grossCents: "3000000",
-						rothCents: "2000000",
+						gross: "30000.00",
+						roth: "20000.00",
 						work: { start: "2026-09-11", endExclusive: "2026-09-12" }
 					}
 				})
 				refusal(
 					yield* Effect.result(
 						postPayroll({
-							settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "823500" },
+							evidence: "Synthetic posting approval and Mercury payment",
+							settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "8235.00" },
 							request: yield* mintId,
 							business,
 							calculation: resultId(excess, "calculation")
@@ -756,16 +727,17 @@ test("native payroll admission rejects mismatched days, years, deductions, overl
 					request: yield* mintId,
 					purpose: {
 						...input.purpose,
-						grossCents: "10000000",
-						rothCents: "0",
+						gross: "100000.00",
+						roth: "0.00",
 						work: { start: "2026-09-11", endExclusive: "2026-09-12" }
 					},
-					fit: { cents: "9000000", evidence }
+					fit: { amount: "90000.00", evidence }
 				})
 				refusal(
 					yield* Effect.result(
 						postPayroll({
-							settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "823500" },
+							evidence: "Synthetic posting approval and Mercury payment",
+							settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "8235.00" },
 							request: yield* mintId,
 							business,
 							calculation: resultId(trigger, "calculation")
@@ -778,7 +750,7 @@ test("native payroll admission rejects mismatched days, years, deductions, overl
 						calculatePayroll({
 							...input,
 							request: yield* mintId,
-							purpose: { ...input.purpose, grossCents: "20000000" }
+							purpose: { ...input.purpose, gross: "200000.00" }
 						})
 					),
 					"WageRangeUnsupported"
@@ -804,7 +776,7 @@ test("a settled earlier-month or prior-year federal trigger survives a later tax
 					assert.ok(federal)
 					let calendar = fixture.calendar
 					if (historicalYear === 2025) {
-						const expansion = yield* installCalendarFacts(draft, release, {
+						const expansion = yield* installCalendarFacts(draft, statementWriter(draft), release, {
 							authority: "FederalDC",
 							fromYear: 2025,
 							throughYear: 2025,
@@ -827,7 +799,7 @@ test("a settled earlier-month or prior-year federal trigger survives a later tax
 								authority: "FederalDC",
 								dueRule: "FollowingMonth15",
 								valid: month.span,
-								evidence
+								evidence: say(evidence)
 							}
 						])
 						yield* draft.insert(
@@ -851,7 +823,7 @@ test("a settled earlier-month or prior-year federal trigger survives a later tax
 								kind: "Interim",
 								opensOn: month.span.end,
 								dueOn: month.span.end + 14n,
-								evidence
+								evidence: say(evidence)
 							}
 						])
 					}
@@ -867,7 +839,7 @@ test("a settled earlier-month or prior-year federal trigger survives a later tax
 							year: BigInt(historicalYear),
 							amount: 10000000n,
 							origin: "Regular",
-							evidence
+							evidence: say(evidence)
 						}
 					])
 					yield* draft.insert(S.RegularCommitment, [{ commitment, wage }])
@@ -880,6 +852,7 @@ test("a settled earlier-month or prior-year federal trigger survives a later tax
 					}
 					yield* observedSetFacts(
 						draft,
+						statementWriter(draft),
 						{ id: set, business, employee, paidOn, gross: 10000000n, origin: "Observed" },
 						{
 							amounts: {
@@ -907,8 +880,7 @@ test("a settled earlier-month or prior-year federal trigger survives a later tax
 							paidOn,
 							commitment,
 							gross: 10000000n,
-							initialRevision: revision,
-							recordedAt: 0n
+							initialRevision: revision
 						}
 					])
 					yield* draft.insert(S.RegularWork, [{ wage, employee, span: paidOn }])
@@ -921,8 +893,7 @@ test("a settled earlier-month or prior-year federal trigger survives a later tax
 							employee,
 							paidOn,
 							gross: 10000000n,
-							kind: "Initial",
-							recordedAt: 0n
+							kind: "Initial"
 						}
 					])
 					yield* draft.insert(
@@ -943,8 +914,7 @@ test("a settled earlier-month or prior-year federal trigger survives a later tax
 							account: federal.id,
 							sentOn: paidOn.start + 1n,
 							amount: 10000000n,
-							evidence,
-							recordedAt: 0n
+							evidence: say(evidence)
 						}
 					])
 					yield* draft.insert(S.PaymentReconciliation, [
@@ -954,8 +924,7 @@ test("a settled earlier-month or prior-year federal trigger survives a later tax
 							business,
 							account: federal.id,
 							period: periodSpan(historicalYear, "Year"),
-							evidence,
-							recordedAt: 0n
+							evidence: say(evidence)
 						}
 					])
 					yield* draft.insert(S.PaymentAllocation, [
@@ -971,7 +940,7 @@ test("a settled earlier-month or prior-year federal trigger survives a later tax
 							wage,
 							predecessor: revision,
 							figures: {
-								amounts: Object.fromEntries(components.map((component) => [component, "0"])),
+								amounts: Object.fromEntries(components.map((component) => [component, "0.00"])),
 								taxableWages: [],
 								evidence
 							}
@@ -996,17 +965,23 @@ test("a settled earlier-month or prior-year federal trigger survives a later tax
 						purpose: {
 							kind: "NewWage",
 							paidOn: "2026-09-11",
-							grossCents: "100000",
-							rothCents: "0",
+							gross: "1000.00",
+							roth: "0.00",
 							work: { start: "2026-09-01", endExclusive: "2026-09-11" }
 						},
-						fit: { cents: "0", evidence },
+						fit: { amount: "0.00", evidence },
 						evidence
 					})
 					refusal(
 						yield* Effect.result(
 							postPayroll({
-								settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "82350" },
+								evidence: "Synthetic posting approval and Mercury payment",
+								settlement: {
+									kind: "Bank",
+									reference: yield* mintId,
+									paidOn: "2026-09-11",
+									amount: "823.50"
+								},
 								request: yield* mintId,
 								business,
 								calculation: resultId(calculated, "calculation")
@@ -1038,19 +1013,20 @@ test("partial automatic FICA recovery posts a true zero-transfer wage and never 
 					purpose: {
 						kind: "NewWage",
 						paidOn: "2026-09-11",
-						grossCents: "100000",
-						rothCents: "0",
+						gross: "1000.00",
+						roth: "0.00",
 						work: { start: "2026-09-01", endExclusive: "2026-09-02" }
 					},
-					fit: { cents: "0", evidence },
+					fit: { amount: "0.00", evidence },
 					evidence
 				}
 				const originalWage = resultId(
 					yield* postPayroll({
+						evidence: "Synthetic posting approval and Mercury payment",
 						request: yield* mintId,
 						business,
 						calculation: resultId(yield* calculatePayroll(input), "calculation"),
-						settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "92350" }
+						settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "923.50" }
 					}),
 					"wage"
 				)
@@ -1070,7 +1046,7 @@ test("partial automatic FICA recovery posts a true zero-transfer wage and never 
 					request: yield* mintId,
 					purpose: {
 						...input.purpose,
-						grossCents: "1000",
+						gross: "10.00",
 						work: { start: "2026-09-02", endExclusive: "2026-09-03" }
 					}
 				}
@@ -1086,7 +1062,13 @@ test("partial automatic FICA recovery posts a true zero-transfer wage and never 
 				assert.throws(() =>
 					parseStrict(CalculateInput, { ...small, purpose: { ...small.purpose, recoveries: [] } })
 				)
-				const post = { request: yield* mintId, business, calculation, settlement: { kind: "NoTransfer" } }
+				const post = {
+					request: yield* mintId,
+					business,
+					calculation,
+					evidence: "Synthetic zero-transfer posting",
+					settlement: { kind: "NoTransfer" }
+				}
 				const receipt = yield* postPayroll(post)
 				const wage = resultId(receipt, "wage")
 				assert.deepEqual(yield* postPayroll(post), receipt)
@@ -1116,6 +1098,7 @@ test("partial automatic FICA recovery posts a true zero-transfer wage and never 
 				refusal(
 					yield* Effect.result(
 						postPayroll({
+							evidence: "Synthetic posting approval and Mercury payment",
 							request: yield* mintId,
 							business,
 							calculation: nextCalc,
@@ -1125,10 +1108,11 @@ test("partial automatic FICA recovery posts a true zero-transfer wage and never 
 					"PayrollTransferRequired"
 				)
 				yield* postPayroll({
+					evidence: "Synthetic posting approval and Mercury payment",
 					request: yield* mintId,
 					business,
 					calculation: nextCalc,
-					settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "92273" }
+					settlement: { kind: "Bank", reference: yield* mintId, paidOn: "2026-09-11", amount: "922.73" }
 				})
 				const finalCalc = resultId(
 					yield* calculatePayroll({

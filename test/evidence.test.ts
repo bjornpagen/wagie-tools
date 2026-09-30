@@ -33,7 +33,7 @@ test("document identities survive moves; changed bytes refuse, and repeated cert
 				evidence = "Synthetic evidence qualification"
 			const seed = yield* ChangeSet.builder(S.ledger)
 			yield* seed.insert(S.Business, [
-				{ id: business, name: "Synthetic", ein: "00-0000086", state: "TX", timeZone: "UTC", recordedAt: 0n }
+				{ id: business, name: "Synthetic", ein: "00-0000086", state: "TX", timeZone: "UTC" }
 			])
 			assert.equal((yield* apply(history, yield* seed.finish())).outcome.kind, "committed")
 			const firstFile = path.join(directory, "receipt #1.txt"),

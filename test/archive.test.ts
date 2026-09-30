@@ -34,8 +34,7 @@ test("packaged native backup restores facts, provenance and usable bindings; alt
 										name: "Synthetic archived business",
 										ein: "00-0000011",
 										state: "TX",
-										timeZone: "America/Chicago",
-										recordedAt: 1789146000000n
+										timeZone: "America/Chicago"
 									}
 								])
 								assert.equal((yield* apply(created.history, yield* draft.finish())).outcome.kind, "committed")

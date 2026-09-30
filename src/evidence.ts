@@ -9,7 +9,7 @@ import { entityId, mintId, Nonblank, Refusal } from "./core/values.ts"
 import { driveId } from "./documents.ts"
 import { relationRows } from "./queries.ts"
 import { parseStrict, type Snapshot } from "./runtime.ts"
-import { commandFields, Day, Id, inputFields } from "./schema/input.ts"
+import { commandFields, Id, inputFields } from "./schema/input.ts"
 import * as S from "./schema.ts"
 
 export const ArtifactRecordInput = Schema.Struct({
@@ -20,11 +20,13 @@ export const ArtifactRecordInput = Schema.Struct({
 })
 export const ArtifactLocateInput = Schema.Struct({
 	...commandFields,
-	...inputFields(S.ArtifactLocation, ["artifact", "locator", "evidence"])
+	...inputFields(S.ArtifactLocation, ["artifact", "locator"]),
+	evidence: Nonblank
 })
 export const ArtifactVerifyInput = Schema.Struct({
 	...commandFields,
-	...inputFields(S.ArtifactLocation, ["artifact", "evidence"]),
+	...inputFields(S.ArtifactLocation, ["artifact"]),
+	evidence: Nonblank,
 	file: Nonblank
 })
 
@@ -61,7 +63,7 @@ export const recordArtifact = (payload: unknown) =>
 			business: input.business,
 			action: "artifact record",
 			input: payload,
-			plan: ({ snapshot, draft, recordedAt }) =>
+			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
 					const measured = yield* content(input.file)
 					const existing = (yield* relationRows(snapshot, S.Artifact)).find(
@@ -83,18 +85,18 @@ export const recordArtifact = (payload: unknown) =>
 						(row) => row.artifact === artifact
 					)
 					if (verified) yield* draft.delete(S.VerifiedArtifact, [verified])
-					yield* draft.insert(S.VerifiedArtifact, [
-						{ artifact, length: measured.length, verifiedAt: recordedAt }
-					])
+					yield* draft.insert(S.VerifiedArtifact, [{ artifact, length: measured.length }])
 					const locator = pathToFileURL(resolve(input.file)).href
 					const knownLocation = (yield* relationRows(snapshot, S.ArtifactLocation)).find(
 						(row) => row.artifact === artifact && row.locator === locator
 					)
-					const archived = (yield* relationRows(snapshot, S.ArtifactLocation)).some(
-						(row) => row.artifact === artifact && driveId(row.locator)
+					const archived = (yield* relationRows(snapshot, S.DriveCopy)).some(
+						(row) => row.artifact === artifact
 					)
 					if (!knownLocation && !archived)
-						yield* draft.insert(S.ArtifactLocation, [{ artifact, locator, evidence: input.evidence }])
+						yield* draft.insert(S.ArtifactLocation, [
+							{ artifact, locator, evidence: yield* note(input.evidence) }
+						])
 					return { artifact, sha256: measured.sha256, length: measured.length }
 				})
 		})
@@ -116,13 +118,9 @@ export const locateArtifact = (payload: unknown) =>
 			business: input.business,
 			action: "artifact locate",
 			input: payload,
-			plan: ({ snapshot, draft }) =>
+			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
-					if (
-						(yield* relationRows(snapshot, S.ArtifactLocation)).some(
-							(row) => row.artifact === artifact && driveId(row.locator)
-						)
-					)
+					if ((yield* relationRows(snapshot, S.DriveCopy)).some((row) => row.artifact === artifact))
 						return yield* Effect.fail(
 							new Refusal({
 								code: "ArchivedLocation",
@@ -134,7 +132,7 @@ export const locateArtifact = (payload: unknown) =>
 					)
 					if (!existing)
 						yield* draft.insert(S.ArtifactLocation, [
-							{ artifact, locator: input.locator, evidence: input.evidence }
+							{ artifact, locator: input.locator, evidence: yield* note(input.evidence) }
 						])
 					return { artifact, locator: input.locator }
 				})
@@ -153,7 +151,7 @@ export const verifyArtifact = (payload: unknown) =>
 			business: input.business,
 			action: "artifact verify",
 			input: payload,
-			plan: ({ snapshot, draft, recordedAt }) =>
+			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
 					const expected = (yield* relationRows(snapshot, S.Artifact)).find((row) => row.id === artifact)
 					if (!expected)
@@ -172,12 +170,10 @@ export const verifyArtifact = (payload: unknown) =>
 						(row) => row.artifact === artifact
 					)
 					if (previous) yield* draft.delete(S.VerifiedArtifact, [previous])
-					yield* draft.insert(S.VerifiedArtifact, [
-						{ artifact, length: measured.length, verifiedAt: recordedAt }
-					])
+					yield* draft.insert(S.VerifiedArtifact, [{ artifact, length: measured.length }])
 					const locator = pathToFileURL(resolve(input.file)).href
-					const archived = (yield* relationRows(snapshot, S.ArtifactLocation)).some(
-						(row) => row.artifact === artifact && driveId(row.locator)
+					const archived = (yield* relationRows(snapshot, S.DriveCopy)).some(
+						(row) => row.artifact === artifact
 					)
 					if (
 						!archived &&
@@ -185,7 +181,9 @@ export const verifyArtifact = (payload: unknown) =>
 							(row) => row.artifact === artifact && row.locator === locator
 						)
 					)
-						yield* draft.insert(S.ArtifactLocation, [{ artifact, locator, evidence: input.evidence }])
+						yield* draft.insert(S.ArtifactLocation, [
+							{ artifact, locator, evidence: yield* note(input.evidence) }
+						])
 					return { artifact, sha256: measured.sha256, length: measured.length }
 				})
 		})
@@ -193,10 +191,10 @@ export const verifyArtifact = (payload: unknown) =>
 
 export const MailingRecordInput = Schema.Struct({
 	...commandFields,
-	...inputFields(S.CertifiedMailing, ["carrier", "number", "mailedOn", "receipt", "evidence"], {
-		carrier: Schema.Literal("USPS"),
-		mailedOn: Day
+	...inputFields(S.CertifiedMailing, ["carrier", "number", "mailedOn", "receipt"], {
+		carrier: Schema.Literal("USPS")
 	}),
+	evidence: Nonblank,
 	artifacts: Schema.Array(Id)
 })
 
@@ -212,7 +210,7 @@ export const recordMailing = (payload: unknown) =>
 			business,
 			action: "mailing record",
 			input: payload,
-			plan: ({ snapshot, draft, recordingDay }) =>
+			plan: ({ snapshot, draft, recordingDay, note }) =>
 				Effect.gen(function* () {
 					if (mailedOn > recordingDay)
 						return yield* Effect.fail(
@@ -241,7 +239,7 @@ export const recordMailing = (payload: unknown) =>
 								number,
 								mailedOn,
 								receipt: input.receipt,
-								evidence: input.evidence
+								evidence: yield* note(input.evidence)
 							}
 						])
 					const artifacts = new Set([input.receipt, ...input.artifacts])

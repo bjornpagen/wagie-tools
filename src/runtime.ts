@@ -34,7 +34,7 @@ export type Draft = Effect.Success<ReturnType<typeof ChangeSet.builder<typeof le
 export const repositoryRoot = fileURLToPath(new URL("../", import.meta.url))
 export const defaultBindingPath = path.join(repositoryRoot, "private", "binding.json")
 export const currentSchemaPath = fileURLToPath(
-	new URL("../migrations/0000-initial/schema.json", import.meta.url)
+	new URL("../migrations/0001-statements/schema.json", import.meta.url)
 )
 const BindingData = Schema.Struct({
 	kind: Schema.Literal("local"),
@@ -46,10 +46,21 @@ const BindingData = Schema.Struct({
 	})
 })
 
+/** Decode a boundary input exactly. Every problem is reported with its path,
+ * as one Refusal, so a caller can fix the whole payload in one pass. */
 export const parseStrict = <S extends Schema.ConstraintDecoder<unknown>>(
 	shape: S,
 	input: unknown
-): S["Type"] => Schema.decodeUnknownSync(shape, { onExcessProperty: "error" })(input)
+): S["Type"] => {
+	try {
+		return Schema.decodeUnknownSync(shape, { onExcessProperty: "error", errors: "all" })(input)
+	} catch (error) {
+		throw new Refusal({
+			code: "InvalidInput",
+			message: error instanceof Error ? error.message : String(error)
+		})
+	}
+}
 export const fingerprint = (value: unknown): string => createHash("sha256").update(json(value)).digest("hex")
 
 /** Admin reads the recorded binding before applying the current-schema gate. */

@@ -1,6 +1,6 @@
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { epochDay, periodSpan, toCalendarDate, type UnixEpochDay } from "./core/time.ts"
-import { entityId, json } from "./core/values.ts"
+import { json, StoredId } from "./core/values.ts"
 import { entryKey } from "./deposits.ts"
 import { liabilityEntries, relationRows, rows } from "./queries.ts"
 import { paymentEquation } from "./reconciliation.ts"
@@ -19,7 +19,7 @@ export const inventory = (snapshot: Snapshot) =>
 			for (const fact of facts) {
 				for (const [name, field] of Object.entries(relation.fields)) {
 					const value: unknown = Object.entries(fact).find(([key]) => key === name)?.[1]
-					if (field.kind === "uuid") entityId(String(value))
+					if (field.kind === "uuid") Schema.decodeUnknownSync(StoredId)(value)
 				}
 			}
 			result[relation.name] = [...facts].sort((a, b) => json(a).localeCompare(json(b)))

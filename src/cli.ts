@@ -1,375 +1,188 @@
-import { NativeRuntime, query, v } from "@bjornpagen/bumbledb"
-import type { TerminalReceipt } from "@bjornpagen/bumbledb-log"
+import { NativeRuntime } from "@bjornpagen/bumbledb"
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
-import { Console, Effect, Option, type Scope } from "effect"
-import { CliConfig, Command, Flag, GlobalFlag } from "effect/unstable/cli"
-import { auditLedger } from "./audit.ts"
-import { backupLedger, restoreArchive, verifyArchive } from "./backup.ts"
-import { recordBookkeeping } from "./bookkeeping.ts"
+import { type Cause, Console, Effect, Schema } from "effect"
+import { businessFacts } from "./commands.ts"
+import { encodeOutput } from "./core/boundary.ts"
 import { io, readText } from "./core/files.ts"
-import { civilDaySpan, parseCalendarDate, today } from "./core/time.ts"
-import { entityId, json, Refusal } from "./core/values.ts"
-import { archiveArtifact, attachBankArtifact, collectDriveDocuments, inspectDocuments } from "./documents.ts"
-import { locateArtifact, recordArtifact, recordMailing, verifyArtifact } from "./evidence.ts"
-import { ensureFilings, expectRetirementFiling } from "./filing-coverage.ts"
-import {
-	amendFiling,
-	inspectFilings,
-	prepareFiling,
-	rejectFiling,
-	reviseDeadline,
-	submitFiling
-} from "./filings.ts"
-import { disposeLiability, reconcilePayments, recordPayment } from "./payments.ts"
-import {
-	calculatePayroll,
-	inspectCalculation,
-	payrollReadback,
-	postPayroll,
-	revisePayrollTax
-} from "./payroll.ts"
-import {
-	recordAnnualEvidence,
-	recordAnnualPolicy,
-	recordElectionDocument,
-	refreshPolicy
-} from "./policy/annual.ts"
-import { activatePolicy, inspectPolicy, installPolicy } from "./policy/install.ts"
-import {
-	assignCompensation,
-	configureBusiness,
-	inspectProfiles,
-	listReviews,
-	recordBudget,
-	recordElection,
-	recordEmployee,
-	resolveReview
-} from "./profiles.ts"
-import { rows } from "./queries.ts"
-import { recordRecovery } from "./recoveries.ts"
-import { report } from "./reports.ts"
-import { defaultBindingPath, type Ledger, latest, ledgerLayer, resolveRequest } from "./runtime.ts"
+import { entityId, json, mintId, Refusal } from "./core/values.ts"
+import { archives, backups, decodeInput, readAsOf, reads, refuseUnknown, writes } from "./ops.ts"
+import { relationRows, rows } from "./queries.ts"
+import { defaultBindingPath, latest, ledgerLayer } from "./runtime.ts"
 import * as S from "./schema.ts"
-import { suggestGross } from "./suggestions.ts"
-import { workRegister } from "./work.ts"
 
-const businessFlag = Flag.string("business").pipe(Flag.map(entityId))
-const bindingFlag = Flag.string("binding").pipe(Flag.withDefault(defaultBindingPath))
-const readFlags = {
-	business: businessFlag,
-	binding: bindingFlag,
-	asOf: Flag.string("as-of").pipe(Flag.optional)
-}
-const businessClock = query(S.ledger).rule((r) => {
-	const { timeZone } = v(S.Business)
-	return r.match(S.Business, { id: r.param("business"), timeZone }).find({ timeZone })
-})
-const output = (value: unknown) => Console.log(json(value))
-
-const inspect = (input: {
-	business: ReturnType<typeof entityId>
-	binding: string
-	asOf: Option.Option<string>
-}) =>
-	Effect.gen(function* () {
-		const snapshot = yield* latest
-		const company = (yield* rows(snapshot, businessClock, { business: input.business }))[0]
-		if (!company)
-			return yield* Effect.fail(
-				new Refusal({ code: "BusinessMissing", message: `No business ${input.business}` })
-			)
-		const asOf = Option.isSome(input.asOf)
-			? parseCalendarDate(input.asOf.value)
-			: yield* today(company.timeZone)
-		return { snapshot, asOf }
+/**
+ * wagie apply  [--input FILE|-] [--binding FILE]   one write:  {"op": "payroll.post", ...}
+ * wagie read   [--input FILE|-] [--binding FILE]   one read:   {"read": "status", "business": ...}
+ * wagie schema [NAME]                               JSON Schema of every op and read, or one
+ * wagie id                                          a fresh UUIDv7 for a request or operation
+ *
+ * Input is one JSON object. Money is dollars with two decimals ("8000.00"),
+ * dates are "YYYY-MM-DD", spans are {"start", "endExclusive"}. Output is JSON
+ * in the same units; evidence ids resolve to their text.
+ */
+/** One readable failure per cause: a Refusal's code and message, or an
+ * unexpected error's name, message and stack. Never an empty object. */
+const describeCause = (cause: Cause.Cause<unknown>) =>
+	cause.reasons.map((reason) => {
+		const error: unknown =
+			reason._tag === "Fail" ? reason.error : reason._tag === "Die" ? reason.defect : reason
+		if (error instanceof Refusal) return { kind: "Refusal", code: error.code, message: error.message }
+		if (error instanceof Error)
+			return { kind: error.name, message: error.message, stack: error.stack?.split("\n").slice(0, 8) }
+		return { kind: reason._tag, detail: error }
 	})
 
-const status = Command.make("status", readFlags, (input) =>
+const usage = `usage: wagie <apply|read|schema|id> [--input FILE|-] [--binding FILE]`
+
+const flag = (args: readonly string[], name: string) => {
+	const index = args.indexOf(`--${name}`)
+	return index === -1 ? undefined : args[index + 1]
+}
+
+const readPayload = (source: string | undefined) =>
 	Effect.gen(function* () {
-		const { snapshot, asOf } = yield* inspect(input)
-		yield* output(yield* workRegister(snapshot, input.business, asOf))
-	}).pipe(Effect.scoped, Effect.provide(ledgerLayer(input.binding)))
-)
+		const text =
+			source === undefined || source === "-"
+				? yield* io("read JSON from stdin", async () => {
+						const chunks: Buffer[] = []
+						for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk))
+						return Buffer.concat(chunks).toString("utf8")
+					})
+				: yield* readText(source)
+		const value: unknown = JSON.parse(text)
+		if (typeof value !== "object" || value === null || Array.isArray(value))
+			return yield* Effect.fail(new Refusal({ code: "InvalidInput", message: "Supply one JSON object" }))
+		return value as Record<string, unknown>
+	})
 
-const deadlines = Command.make("deadlines", readFlags, (input) =>
+/** Statement text for evidence ids, read once per output. */
+const statements = Effect.gen(function* () {
+	const snapshot = yield* latest
+	return new Map((yield* relationRows(snapshot, S.Statement)).map((row) => [row.id as string, row.text]))
+})
+
+const print = (value: unknown, texts: ReadonlyMap<string, string>) =>
+	Console.log(json(encodeOutput(value, texts)))
+
+const apply = (args: readonly string[]) =>
 	Effect.gen(function* () {
-		const { snapshot, asOf } = yield* inspect(input)
-		const register = yield* workRegister(snapshot, input.business, asOf)
-		yield* output({ ...register, work: register.work.filter((row) => row.completion !== "Complete") })
-	}).pipe(Effect.scoped, Effect.provide(ledgerLayer(input.binding)))
-)
-
-const yearReport = Command.make("year", { ...readFlags, year: Flag.integer("year") }, (input) =>
-	Effect.gen(function* () {
-		const { snapshot, asOf } = yield* inspect(input)
-		yield* output(yield* report(snapshot, input.business, input.year, undefined, asOf))
-	}).pipe(Effect.scoped, Effect.provide(ledgerLayer(input.binding)))
-)
-const quarterReport = Command.make(
-	"quarter",
-	{ ...readFlags, year: Flag.integer("year"), quarter: Flag.integer("quarter") },
-	(input) =>
-		Effect.gen(function* () {
-			const { snapshot, asOf } = yield* inspect(input)
-			yield* output(yield* report(snapshot, input.business, input.year, input.quarter, asOf))
-		}).pipe(Effect.scoped, Effect.provide(ledgerLayer(input.binding)))
-)
-const reports = Command.make("report").pipe(Command.withSubcommands([yearReport, quarterReport]))
-
-const resolve = Command.make(
-	"resolve",
-	{ binding: bindingFlag, request: Flag.string("request").pipe(Flag.map(entityId)) },
-	(input) =>
-		Effect.gen(function* () {
-			const result = yield* resolveRequest(input.request)
-			yield* output(result)
-			if (result.kind !== "found" || !["committed", "no-change"].includes(result.receipt.outcome.kind))
-				process.exitCode = 1
-		}).pipe(Effect.scoped, Effect.provide(ledgerLayer(input.binding)))
-)
-const commands = Command.make("command").pipe(Command.withSubcommands([resolve]))
-
-const mutation = <E, E2 = never>(
-	name: string,
-	run: (payload: unknown) => Effect.Effect<TerminalReceipt, E, Ledger | NativeRuntime | Scope.Scope>,
-	readback?: (receipt: TerminalReceipt) => Effect.Effect<unknown, E2, Ledger | NativeRuntime | Scope.Scope>
-) =>
-	Command.make(name, { binding: bindingFlag, input: Flag.string("input") }, (input) =>
-		Effect.gen(function* () {
-			const text =
-				input.input === "-"
-					? yield* io("read JSON from stdin", async () => {
-							const chunks: Buffer[] = []
-							for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk))
-							return Buffer.concat(chunks).toString("utf8")
-						})
-					: yield* readText(input.input)
-			const receipt = yield* run(JSON.parse(text))
-			yield* output(readback ? yield* readback(receipt) : receipt)
+		const { op, ...payload } = yield* readPayload(flag(args, "input"))
+		const binding = flag(args, "binding") ?? defaultBindingPath
+		if (typeof op !== "string")
+			return yield* Effect.fail(new Refusal({ code: "InvalidInput", message: 'Name the write in "op"' }))
+		if (op === "db.backup") {
+			const input = decodeInput(backups["db.backup"].input, payload)
+			return yield* Effect.gen(function* () {
+				yield* print(yield* backups["db.backup"].run(input), yield* statements)
+			}).pipe(Effect.scoped, Effect.provide(ledgerLayer(binding)))
+		}
+		if (op === "db.verify-backup")
+			return yield* print(
+				yield* archives["db.verify-backup"].run(decodeInput(archives["db.verify-backup"].input, payload)),
+				new Map()
+			)
+		if (op === "db.restore")
+			return yield* print(
+				yield* archives["db.restore"].run(decodeInput(archives["db.restore"].input, payload)),
+				new Map()
+			)
+		if (!(op in writes))
+			return yield* refuseUnknown("write", op, [
+				...Object.keys(writes),
+				...Object.keys(backups),
+				...Object.keys(archives)
+			])
+		const write = writes[op as keyof typeof writes]
+		return yield* Effect.gen(function* () {
+			const receipt = yield* write.run(payload)
+			const result = "readback" in write ? yield* write.readback(receipt) : receipt
+			yield* print(result, yield* statements)
 			if (
 				(receipt.outcome.kind === "committed" || receipt.outcome.kind === "no-change") &&
 				receipt.outcome.result.kind === "ReconciliationRequired"
 			)
 				process.exitCode = 1
-		}).pipe(Effect.scoped, Effect.provide(ledgerLayer(input.binding)))
-	)
+		}).pipe(Effect.scoped, Effect.provide(ledgerLayer(binding)))
+	})
 
-const payments = Command.make("payment").pipe(
-	Command.withSubcommands([
-		mutation("record", recordPayment),
-		mutation("reconcile", reconcilePayments),
-		mutation("dispose", disposeLiability)
-	])
-)
+const read = (args: readonly string[]) =>
+	Effect.gen(function* () {
+		const { read: name, ...payload } = yield* readPayload(flag(args, "input"))
+		const binding = flag(args, "binding") ?? defaultBindingPath
+		if (typeof name !== "string")
+			return yield* Effect.fail(new Refusal({ code: "InvalidInput", message: 'Name the read in "read"' }))
+		if (!(name in reads)) return yield* refuseUnknown("read", name, Object.keys(reads))
+		const entry = reads[name as keyof typeof reads]
+		const input = decodeInput(entry.input, payload) as { business?: string; asOf?: bigint }
+		return yield* Effect.gen(function* () {
+			const company =
+				input.business === undefined
+					? undefined
+					: (yield* rows(yield* latest, businessFacts, {})).find((row) => row.id === input.business)
+			if (input.business !== undefined && !company)
+				return yield* Effect.fail(
+					new Refusal({ code: "BusinessMissing", message: `No business ${input.business}` })
+				)
+			const asOf = yield* readAsOf(input.asOf as never, company?.timeZone ?? "UTC")
+			yield* print(yield* entry.run(input as never, { asOf }), yield* statements)
+		}).pipe(Effect.scoped, Effect.provide(ledgerLayer(binding)))
+	})
 
-const artifacts = Command.make("artifact").pipe(
-	Command.withSubcommands([
-		mutation("record", recordArtifact),
-		mutation("archive", archiveArtifact),
-		mutation("attach-bank", attachBankArtifact),
-		Command.make(
-			"audit",
-			{
-				binding: bindingFlag,
-				verifyDrive: Flag.boolean("verify-drive"),
-				remote: Flag.string("remote").pipe(Flag.withDefault("gdrive:"))
-			},
-			(input) =>
-				Effect.gen(function* () {
-					const snapshot = yield* latest
-					const documents = yield* inspectDocuments(snapshot)
-					const verified = input.verifyDrive
-						? (yield* collectDriveDocuments(snapshot, input.remote)).map(({ bytes, ...document }) => ({
-								...document,
-								length: bytes.length
-							}))
-						: []
-					yield* output({
-						state: snapshot.stateStamp,
-						total: documents.length,
-						unarchived: documents.filter((d) => !d.archived).map((d) => d.id),
-						documents,
-						verified
-					})
-				}).pipe(Effect.scoped, Effect.provide(ledgerLayer(input.binding)))
-		),
-		mutation("locate", locateArtifact),
-		mutation("verify", verifyArtifact)
-	])
-)
-const mailings = Command.make("mailing").pipe(Command.withSubcommands([mutation("record", recordMailing)]))
-const filings = Command.make("filings").pipe(
-	Command.withSubcommands([
-		mutation("ensure", ensureFilings),
-		mutation("expect-retirement", expectRetirementFiling),
-		Command.make("inspect", readFlags, (input) =>
-			Effect.gen(function* () {
-				const { snapshot, asOf } = yield* inspect(input)
-				yield* output(yield* inspectFilings(snapshot, input.business, asOf))
-			}).pipe(Effect.scoped, Effect.provide(ledgerLayer(input.binding)))
-		),
-		mutation("prepare", prepareFiling),
-		mutation("submit", submitFiling),
-		mutation("reject", rejectFiling),
-		mutation("deadline", reviseDeadline),
-		mutation("amend", amendFiling)
-	])
-)
-
-const payroll = Command.make("payroll").pipe(
-	Command.withSubcommands([
-		mutation("calculate", calculatePayroll, payrollReadback),
-		mutation("post", postPayroll, payrollReadback),
-		mutation("revise-tax", revisePayrollTax, payrollReadback),
-		Command.make(
-			"inspect",
-			{
-				business: businessFlag,
-				binding: bindingFlag,
-				calculation: Flag.string("calculation").pipe(Flag.map(entityId))
-			},
-			(input) =>
-				Effect.gen(function* () {
-					yield* output(yield* inspectCalculation(yield* latest, input.business, input.calculation))
-				}).pipe(Effect.scoped, Effect.provide(ledgerLayer(input.binding)))
+const schema = (args: readonly string[]) =>
+	Effect.gen(function* () {
+		const name = args[0]
+		const all = {
+			...Object.fromEntries(Object.entries(writes).map(([key, value]) => [key, { kind: "write", ...value }])),
+			...Object.fromEntries(
+				[...Object.entries(backups), ...Object.entries(archives)].map(([key, value]) => [
+					key,
+					{ kind: "write", ...value }
+				])
+			),
+			...Object.fromEntries(Object.entries(reads).map(([key, value]) => [key, { kind: "read", ...value }]))
+		}
+		const describe = (key: string) => {
+			const entry = all[key]
+			if (!entry) throw new Refusal({ code: "UnknownOperation", message: `No op or read "${key}"` })
+			return {
+				name: key,
+				kind: entry.kind,
+				summary: entry.summary,
+				input: Schema.toJsonSchemaDocument(Schema.toEncoded(entry.input))
+			}
+		}
+		yield* Console.log(
+			JSON.stringify(
+				name
+					? describe(name)
+					: Object.keys(all).map((key) => ({ name: key, kind: all[key]?.kind, summary: all[key]?.summary })),
+				null,
+				2
+			)
 		)
-	])
-)
+	})
 
-const profileRead = (
-	name: string,
-	read: typeof inspectProfiles | typeof listReviews | typeof inspectPolicy
-) =>
-	Command.make(name, { business: businessFlag, binding: bindingFlag }, (input) =>
-		Effect.gen(function* () {
-			yield* output(yield* read(yield* latest, input.business))
-		}).pipe(Effect.scoped, Effect.provide(ledgerLayer(input.binding)))
-	)
-const businessCommands = Command.make("business").pipe(
-	Command.withSubcommands([mutation("configure", configureBusiness), profileRead("inspect", inspectProfiles)])
-)
-const employeeCommands = Command.make("employee").pipe(
-	Command.withSubcommands([mutation("record", recordEmployee), profileRead("list", inspectProfiles)])
-)
-const compensation = Command.make("compensation").pipe(
-	Command.withSubcommands([
-		mutation("budget", recordBudget),
-		mutation("assign", assignCompensation),
-		profileRead("inspect", inspectProfiles),
-		Command.make(
-			"suggest",
-			{
-				business: businessFlag,
-				binding: bindingFlag,
-				employee: Flag.string("employee").pipe(Flag.map(entityId)),
-				paidOn: Flag.string("paid-on").pipe(Flag.map(parseCalendarDate)),
-				start: Flag.string("work-start").pipe(Flag.map(parseCalendarDate)),
-				end: Flag.string("work-end-exclusive").pipe(Flag.map(parseCalendarDate))
-			},
-			(input) =>
-				Effect.gen(function* () {
-					const { snapshot, asOf } = yield* inspect({ ...input, asOf: Option.none() })
-					yield* output(
-						yield* suggestGross(
-							snapshot,
-							input.business,
-							input.employee,
-							civilDaySpan(input.start, input.end),
-							input.paidOn,
-							asOf
-						)
-					)
-				}).pipe(Effect.scoped, Effect.provide(ledgerLayer(input.binding)))
-		)
-	])
-)
-const election = Command.make("election").pipe(
-	Command.withSubcommands([mutation("record", recordElection), mutation("document", recordElectionDocument)])
-)
-const recovery = Command.make("recovery").pipe(Command.withSubcommands([mutation("record", recordRecovery)]))
-const review = Command.make("review").pipe(
-	Command.withSubcommands([mutation("resolve", resolveReview), profileRead("list", listReviews)])
-)
-const policy = Command.make("policy").pipe(
-	Command.withSubcommands([
-		mutation("install", installPolicy),
-		mutation("annual", recordAnnualPolicy),
-		mutation("evidence", recordAnnualEvidence),
-		mutation("refresh", refreshPolicy),
-		mutation("activate", activatePolicy),
-		profileRead("inspect", inspectPolicy)
-	])
-)
-const operationFlag = Flag.string("operation").pipe(Flag.map(entityId))
-const db = Command.make("db").pipe(
-	Command.withSubcommands([
-		Command.make("audit", { binding: bindingFlag, asOf: Flag.string("as-of").pipe(Flag.optional) }, (input) =>
-			Effect.gen(function* () {
-				const asOf = Option.isSome(input.asOf) ? parseCalendarDate(input.asOf.value) : yield* today("UTC")
-				yield* output(yield* auditLedger(yield* latest, asOf))
-			}).pipe(Effect.scoped, Effect.provide(ledgerLayer(input.binding)))
-		),
-		Command.make(
-			"backup",
-			{ binding: bindingFlag, operation: operationFlag, output: Flag.string("output") },
-			(input) =>
-				Effect.gen(function* () {
-					yield* output(yield* backupLedger(input))
-				}).pipe(Effect.scoped, Effect.provide(ledgerLayer(input.binding)))
-		),
-		Command.make("verify-backup", { archive: Flag.string("archive") }, (input) =>
-			Effect.gen(function* () {
-				yield* output(yield* verifyArchive(input.archive))
-			})
-		),
-		Command.make(
-			"restore",
-			{
-				operation: operationFlag,
-				archive: Flag.string("archive"),
-				directory: Flag.string("directory"),
-				bindingOutput: Flag.string("binding-output")
-			},
-			(input) =>
-				Effect.gen(function* () {
-					yield* output(yield* restoreArchive(input))
-				})
-		)
-	])
-)
-
-export const cli = Command.make("wagie-tools").pipe(
-	Command.withSubcommands([
-		status,
-		deadlines,
-		reports,
-		commands,
-		mutation("bookkeeping", recordBookkeeping),
-		payments,
-		artifacts,
-		mailings,
-		filings,
-		payroll,
-		businessCommands,
-		employeeCommands,
-		compensation,
-		election,
-		recovery,
-		review,
-		policy,
-		db
-	])
-)
-
-const main = Command.run(cli, { version: "1.0.0", renderErrors: false }).pipe(
-	Effect.provide(
-		CliConfig.layer({ builtIns: [GlobalFlag.Help, GlobalFlag.Version, GlobalFlag.Completions] })
-	),
+const main = Effect.gen(function* () {
+	const [verb, ...args] = process.argv.slice(2)
+	switch (verb) {
+		case "apply":
+			return yield* apply(args)
+		case "read":
+			return yield* read(args)
+		case "schema":
+			return yield* schema(args)
+		case "id":
+			return yield* Console.log(entityId(yield* mintId))
+		default:
+			yield* Console.error(usage)
+			process.exitCode = 2
+	}
+}).pipe(
 	Effect.provide(NodeServices.layer),
 	Effect.provide(NativeRuntime.layer()),
 	Effect.catchCause((cause) =>
 		Effect.gen(function* () {
-			yield* Console.error(json(cause))
+			yield* Console.error(json(describeCause(cause)))
 			process.exitCode = 1
 		})
 	)

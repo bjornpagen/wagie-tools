@@ -16,7 +16,7 @@ import { suggestGross } from "../src/suggestions.ts"
 import { workRegister } from "../src/work.ts"
 import { seedAnnualPolicies } from "./annual-fixture.ts"
 import { resultId as id, refusalCode as refusal } from "./assertions.ts"
-import { apply, atTime, withHistory } from "./native-history.ts"
+import { apply, atTime, say, withHistory } from "./native-history.ts"
 
 const evidence = "Synthetic full command qualification; not legal policy evidence"
 const year = { start: "2026-01-01", endExclusive: "2027-01-01" }
@@ -56,7 +56,7 @@ test("public setup installs immutable policies and records signed elections", as
 					business,
 					employee,
 					year: 2026,
-					limit: "2000000",
+					limit: "20000.00",
 					evidence
 				})
 				const policyInput = {
@@ -81,43 +81,43 @@ test("public setup installs immutable policies and records signed elections", as
 						authority: family === "TexasUnemployment" ? "Texas" : "FederalDC",
 						dueRule: family === "Federal941" ? "FollowingMonth15" : "FollowingMonthEnd",
 						triggers: {
-							Interim: { start: family === "Federal940" ? "50001" : "1", end: "Infinity" },
-							Terminal: { start: "1", end: "Infinity" }
+							Interim: { start: family === "Federal940" ? "500.01" : "0.01", end: "Infinity" },
+							Terminal: { start: "0.01", end: "Infinity" }
 						},
 						evidence
 					})),
 					payroll: {
 						valid: year,
-						federalDepositLimit: "10000000",
+						federalDepositLimit: "100000.00",
 						evidence,
 						programs: ["SocialSecurity", "Medicare", "FederalUnemployment", "StateUnemployment"].map(
 							(program) => ({
 								program,
-								eligible: { start: "0", end: program === "Medicare" ? "20000000" : "Infinity" },
+								eligible: { start: "0.00", end: program === "Medicare" ? "200000.00" : "Infinity" },
 								evidence
 							})
 						),
 						rates: [
-							{ component: "EmployeeSS", cap: "18450000", numerator: "620" },
-							{ component: "EmployerSS", cap: "18450000", numerator: "620" },
+							{ component: "EmployeeSS", cap: "184500.00", numerator: "620" },
+							{ component: "EmployerSS", cap: "184500.00", numerator: "620" },
 							{ component: "EmployeeMedicare", cap: "Infinity", numerator: "145" },
 							{ component: "EmployerMedicare", cap: "Infinity", numerator: "145" },
-							{ component: "FUTA", cap: "700000", numerator: "60", futaBasis: evidence },
-							{ component: "SUTA", cap: "900000", numerator: "270", employerNotice: evidence }
+							{ component: "FUTA", cap: "7000.00", numerator: "60", futaBasis: evidence },
+							{ component: "SUTA", cap: "9000.00", numerator: "270", employerNotice: evidence }
 						].map(({ component, cap, numerator, ...basis }) => ({
 							component,
 							valid: year,
 							denominator: "10000",
 							bands: [
-								{ start: "0", end: cap, numerator, role: "WithinBase" },
+								{ wages: { start: "0.00", end: cap }, numerator, role: "WithinBase" },
 								...(cap === "Infinity"
 									? []
-									: [{ start: cap, end: "Infinity", numerator: "0", role: "Excess" }])
+									: [{ wages: { start: cap, end: "Infinity" }, numerator: "0", role: "Excess" }])
 							],
 							evidence,
 							...basis
 						})),
-						deferrals: [{ year: 2026, limit: "2400000", evidence }],
+						deferrals: [{ year: 2026, limit: "24000.00", evidence }],
 						monthlyDepositor: { valid: year, evidence },
 						grossSuggestion: { method: "RemainingBudgetDays", evidence }
 					}
@@ -144,11 +144,11 @@ test("public setup installs immutable policies and records signed elections", as
 					purpose: {
 						kind: "NewWage",
 						paidOn: "2026-09-11",
-						grossCents: "100000",
-						rothCents: "0",
+						gross: "1000.00",
+						roth: "0.00",
 						work: { start: "2026-09-01", endExclusive: "2026-09-11" }
 					},
-					fit: { cents: "0", evidence },
+					fit: { amount: "0.00", evidence },
 					evidence
 				}
 				const suggestion = yield* suggestGross(
@@ -241,7 +241,7 @@ test("public setup installs immutable policies and records signed elections", as
 					artifact = yield* mintId,
 					plan = yield* mintId
 				const electionSetup = yield* ChangeSet.builder(S.ledger)
-				yield* electionSetup.insert(S.Owner, [{ business, employee, evidence }])
+				yield* electionSetup.insert(S.Owner, [{ business, employee, evidence: say(evidence) }])
 				yield* electionSetup.insert(S.RetirementPlan, [
 					{
 						id: plan,
@@ -249,8 +249,7 @@ test("public setup installs immutable policies and records signed elections", as
 						employee,
 						name: "Synthetic Plan",
 						ein: "00-0000020",
-						evidence,
-						recordedAt: 0n
+						evidence: say(evidence)
 					}
 				])
 				yield* electionSetup.insert(S.RetirementAnnual, [
@@ -267,14 +266,13 @@ test("public setup installs immutable policies and records signed elections", as
 						outsideAdditions: 0n,
 						otherPlans: false,
 						outsideAssets: false,
-						evidence,
-						recordedAt: 0n
+						evidence: say(evidence)
 					}
 				])
 				yield* electionSetup.insert(S.Artifact, [
 					{ id: artifact, sha256: "synthetic-signed-election", mediaType: "text/plain" }
 				])
-				yield* electionSetup.insert(S.VerifiedArtifact, [{ artifact, length: 1n, verifiedAt: 0n }])
+				yield* electionSetup.insert(S.VerifiedArtifact, [{ artifact, length: 1n }])
 				yield* electionSetup.insert(S.ElectionDocument, [
 					{
 						id: document,
@@ -282,8 +280,7 @@ test("public setup installs immutable policies and records signed elections", as
 						year: 2026n,
 						signedOn: parseCalendarDate("2026-09-11"),
 						artifact,
-						evidence,
-						recordedAt: 0n
+						evidence: say(evidence)
 					}
 				])
 				yield* electionSetup.insert(

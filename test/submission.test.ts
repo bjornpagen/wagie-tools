@@ -15,7 +15,7 @@ import { type Draft, Ledger, latest } from "../src/runtime.ts"
 import { components } from "../src/schema/vocabulary.ts"
 import * as S from "../src/schema.ts"
 import { workRegister } from "../src/work.ts"
-import { apply, bankForWage, withHistory } from "./native-history.ts"
+import { apply, bankForWage, say, withHistory } from "./native-history.ts"
 
 const packet = (draft: Draft, invalid?: "receipt" | "slot" | "role" | "scope" | "version" | "unsubmitted") =>
 	Effect.gen(function* () {
@@ -38,8 +38,7 @@ const packet = (draft: Draft, invalid?: "receipt" | "slot" | "role" | "scope" | 
 				name: "Mailing Test",
 				ein: "00-0000002",
 				state: "TX",
-				timeZone: "America/Chicago",
-				recordedAt: 0n
+				timeZone: "America/Chicago"
 			}
 		])
 		yield* draft.insert(S.Employee, [
@@ -50,14 +49,13 @@ const packet = (draft: Draft, invalid?: "receipt" | "slot" | "role" | "scope" | 
 				lastName: "Only",
 				ssn: "000-00-0000",
 				address: "Synthetic",
-				filingStatus: "Single",
-				recordedAt: 0n
+				filingStatus: "Single"
 			}
 		])
 		yield* draft.insert(S.FilingSubject, [{ id: subject, business, kind: "Employee" }])
 		yield* draft.insert(S.EmployeeSubject, [{ subject, employee, business }])
 		yield* draft.insert(S.PolicyRelease, [
-			{ id: release, sha256: "packet-policy", title: evidence, evidence, recordedAt: 0n }
+			{ id: release, sha256: "packet-policy", title: evidence, evidence: say(evidence) }
 		])
 		yield* draft.insert(S.CalendarCoverage, [{ release, authority: "FederalDC", kind: "Year", span: period }])
 		yield* draft.insert(S.CalendarPeriod, [
@@ -79,7 +77,7 @@ const packet = (draft: Draft, invalid?: "receipt" | "slot" | "role" | "scope" | 
 				number: "SYNTHETIC-ONE-PACKET",
 				mailedOn: period.end,
 				receipt,
-				evidence
+				evidence: say(evidence)
 			}
 		])
 		yield* draft.insert(S.MailingEvidence, [{ mailing, artifact: receipt }])
@@ -97,7 +95,14 @@ const packet = (draft: Draft, invalid?: "receipt" | "slot" | "role" | "scope" | 
 			assert.ok(version)
 			const slots = form === "W2SSA" ? (["Return", "Transmittal"] as const) : (["Return"] as const)
 			yield* draft.insert(S.FilingRequirement, [
-				{ id: requirement, business, form, subjectKind: "Employee", startsOn: period.start, evidence }
+				{
+					id: requirement,
+					business,
+					form,
+					subjectKind: "Employee",
+					startsOn: period.start,
+					evidence: say(evidence)
+				}
 			])
 			yield* draft.insert(S.FilingScope, [
 				{ id: scope, requirement, subject, business, form, kind: "Year", span: period }
@@ -113,7 +118,7 @@ const packet = (draft: Draft, invalid?: "receipt" | "slot" | "role" | "scope" | 
 					kind: "Original",
 					opensOn: period.end,
 					dueOn: period.end + 30n,
-					evidence
+					evidence: say(evidence)
 				}
 			])
 			yield* draft.insert(S.OriginalFiling, [
@@ -138,8 +143,7 @@ const packet = (draft: Draft, invalid?: "receipt" | "slot" | "role" | "scope" | 
 					release,
 					sequence: 1n,
 					origin: "Prepared",
-					evidence,
-					recordedAt: 0n
+					evidence: say(evidence)
 				}
 			])
 			yield* draft.insert(S.PreparedVersion, [{ version, snapshot: "{}" }])
@@ -154,8 +158,7 @@ const packet = (draft: Draft, invalid?: "receipt" | "slot" | "role" | "scope" | 
 				release,
 				policy,
 				method: "CertifiedMail",
-				requiredCount: BigInt(slots.length),
-				recordedAt: 0n
+				requiredCount: BigInt(slots.length)
 			})
 			if (invalid !== "receipt") sidecars.push({ submission, version, business, mailing })
 			for (const slot of slots) {
@@ -205,7 +208,7 @@ test("filing commands capture immutable figures, resolve digital acknowledgement
 			const fixture = yield* packet(seed, "unsubmitted")
 			const { business, employee, release, document, period } = fixture
 			const evidence = "Synthetic filing command qualification"
-			yield* seed.insert(S.PolicyBinding, [{ business, release, evidence }])
+			yield* seed.insert(S.PolicyBinding, [{ business, release, evidence: say(evidence) }])
 			const policy = yield* mintId
 			yield* seed.insert(S.FormMethodPolicy, [
 				{ id: policy, release, form: "W2Employee", method: "Digital", requiredCount: 1n }
@@ -244,7 +247,7 @@ test("filing commands capture immutable figures, resolve digital acknowledgement
 			assert.ok(version)
 			assert.equal(
 				(yield* workRegister(snapshot, business, fixture.asOf)).work.find((row) => row.id === filing.id)
-					?.completion,
+					?.status,
 				"Open"
 			)
 			const submitInput = {
@@ -297,7 +300,7 @@ test("filing commands capture immutable figures, resolve digital acknowledgement
 				set = yield* mintId
 			const paidOn = civilDayPoint(epochDay(period.start + 14n))
 			yield* added.insert(S.BudgetCommitment, [
-				{ id: commitment, employee, year: 2026n, amount: 10000n, origin: "Regular", evidence }
+				{ id: commitment, employee, year: 2026n, amount: 10000n, origin: "Regular", evidence: say(evidence) }
 			])
 			yield* added.insert(S.RegularCommitment, [{ commitment, wage }])
 			yield* added.insert(S.RegularWork, [{ wage, employee, span: periodSpan(2026, "Month", 1) }])
@@ -313,14 +316,13 @@ test("filing commands capture immutable figures, resolve digital acknowledgement
 					commitment,
 					paidOn,
 					gross: 10000n,
-					initialRevision: revision,
-					recordedAt: 0n
+					initialRevision: revision
 				}
 			])
 			yield* added.insert(S.AssessmentSet, [
 				{ id: set, business, employee, paidOn, gross: 10000n, origin: "Observed" }
 			])
-			yield* added.insert(S.ObservedSet, [{ set, evidence }])
+			yield* added.insert(S.ObservedSet, [{ set, evidence: say(evidence) }])
 			yield* added.insert(S.AssessmentRevision, [
 				{
 					id: revision,
@@ -330,27 +332,28 @@ test("filing commands capture immutable figures, resolve digital acknowledgement
 					employee,
 					paidOn,
 					gross: 10000n,
-					kind: "Initial",
-					recordedAt: 0n
+					kind: "Initial"
 				}
 			])
 			for (const family of S.AccountFamily.handles) {
 				const account = yield* mintId
-				yield* added.insert(S.TaxAccount, [{ id: account, business, family, evidence }])
+				yield* added.insert(S.TaxAccount, [{ id: account, business, family, evidence: say(evidence) }])
 				yield* added.insert(S.RevisionAccount, [{ revision, account, business, family }])
 			}
 			for (const component of components) {
 				yield* added.insert(S.Assessment, [{ set, component, origin: "Observed", method: "SuppliedAmount" }])
-				yield* added.insert(S.ObservedAssessment, [{ set, component, amount: 0n, evidence }])
+				yield* added.insert(S.ObservedAssessment, [{ set, component, amount: 0n, evidence: say(evidence) }])
 			}
 			assert.equal((yield* apply(history, yield* added.finish())).outcome.kind, "committed")
 			snapshot = yield* history.snapshot({ consistency: { kind: "latest" } })
 			const changed = yield* workRegister(snapshot, business, fixture.asOf)
 			assert.ok(
-				changed.work.some((row) => row.id === `correction/${filing.id}` && row.action === "filings amend")
+				changed.work.some(
+					(row) => row.id === `filing-correction/${filing.id}` && row.next.op === "filings.amend"
+				)
 			)
 			assert.equal(
-				changed.work.find((row) => row.id === filing.id)?.completion,
+				changed.work.find((row) => row.id === filing.id)?.status,
 				"Complete",
 				"original submission remains an observed fact"
 			)
@@ -375,8 +378,8 @@ test("filing commands capture immutable figures, resolve digital acknowledgement
 			})
 			snapshot = yield* history.snapshot({ consistency: { kind: "latest" } })
 			const updated = yield* workRegister(snapshot, business, fixture.asOf)
-			assert.equal(updated.work.find((row) => row.id === filing.id)?.action, "filings submit")
-			const adjustment = { id: yield* mintId, filing: filing.id, amount: 1n, evidence }
+			assert.equal(updated.work.find((row) => row.id === filing.id)?.next.op, "filings.submit")
+			const adjustment = { id: yield* mintId, filing: filing.id, amount: 1n, evidence: say(evidence) }
 			const adjust = yield* ChangeSet.builder(S.ledger)
 			yield* adjust.insert(S.FormAdjustment, [adjustment])
 			yield* apply(history, yield* adjust.finish())
@@ -386,8 +389,8 @@ test("filing commands capture immutable figures, resolve digital acknowledgement
 				fixture.asOf
 			)
 			assert.equal(
-				staleFigures.work.find((row) => row.id === filing.id)?.action,
-				"filings prepare",
+				staleFigures.work.find((row) => row.id === filing.id)?.next.op,
+				"filings.prepare",
 				"a new return adjustment invalidates preparation even if revisions are unchanged"
 			)
 			const undo = yield* ChangeSet.builder(S.ledger)
@@ -443,7 +446,7 @@ test("filing commands capture immutable figures, resolve digital acknowledgement
 					wage,
 					predecessor: revision,
 					figures: {
-						amounts: Object.fromEntries(components.map((component) => [component, "0"])),
+						amounts: Object.fromEntries(components.map((component) => [component, "0.00"])),
 						taxableWages: [],
 						evidence
 					}
@@ -474,7 +477,7 @@ test("filing commands capture immutable figures, resolve digital acknowledgement
 					wage,
 					predecessor: revised.outcome.result.revision,
 					figures: {
-						amounts: Object.fromEntries(components.map((component) => [component, "0"])),
+						amounts: Object.fromEntries(components.map((component) => [component, "0.00"])),
 						taxableWages: [],
 						evidence
 					}
@@ -544,7 +547,7 @@ test("a shared certified mailing requires each form's matching scope, method evi
 			)
 			assert.equal(complete.blockers.filter((row) => row.kind === "Filing").length, 0)
 			assert.equal(
-				complete.work.filter((row) => row.kind === "Filing" && row.completion === "Complete").length,
+				complete.work.filter((row) => row.kind === "Filing" && row.status === "Complete").length,
 				2
 			)
 			assert.deepEqual(
@@ -556,7 +559,11 @@ test("a shared certified mailing requires each form's matching scope, method evi
 			assert.ok(firstSubmission)
 			const reject = yield* ChangeSet.builder(S.ledger)
 			yield* reject.insert(S.Rejection, [
-				{ submission: firstSubmission.submission, evidence: "Synthetic agency rejection", recordedAt: 1n }
+				{
+					id: yield* mintId,
+					submission: firstSubmission.submission,
+					evidence: say("Synthetic agency rejection")
+				}
 			])
 			assert.equal((yield* apply(history, yield* reject.finish())).outcome.kind, "committed")
 			const reopened = yield* workRegister(

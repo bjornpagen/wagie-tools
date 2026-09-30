@@ -3,12 +3,15 @@ import { Effect } from "effect"
 import { distributionPosition, receiptDiscrepancies, retirementPosition } from "./bookkeeping.ts"
 import { epochDay, parseCalendarDate, periodSpan, toCalendarDate, type UnixEpochDay } from "./core/time.ts"
 import { relationRows } from "./queries.ts"
+import { questions } from "./questions.ts"
 import type { Snapshot } from "./runtime.ts"
 import * as S from "./schema.ts"
-import type { WorkItem } from "./work.ts"
+import { type WorkItem, workItem } from "./work-rules.ts"
 
-/** Advisory opportunities and conversion follow-ups share the register with
- * required work, but only unresolved withheld Roth funds block payroll. */
+/** Retirement work. Withheld Roth blocks payroll only until it has left the
+ * business: fully funded by Mercury movements whose sent receipts are attached.
+ * Carry's own confirmation is tracked as a reminder and never gates payroll.
+ */
 export const bookkeepingWork = (snapshot: Snapshot, business: Uuid, asOf: UnixEpochDay) =>
 	Effect.gen(function* () {
 		const work: WorkItem[] = [],
@@ -19,6 +22,8 @@ export const bookkeepingWork = (snapshot: Snapshot, business: Uuid, asOf: UnixEp
 			(yield* relationRows(snapshot, S.ContributionCancellation)).map((r) => r.contribution)
 		)
 		const funding = yield* relationRows(snapshot, S.ContributionFunding)
+		const cashAllocations = yield* relationRows(snapshot, S.CashAllocation)
+		const receiptSources = new Set((yield* relationRows(snapshot, S.BankSource)).map((r) => r.movement))
 		const contributions = (yield* relationRows(snapshot, S.RetirementContribution)).filter(
 				(r) => !cancelled.has(r.id)
 			),
@@ -29,61 +34,90 @@ export const bookkeepingWork = (snapshot: Snapshot, business: Uuid, asOf: UnixEp
 			allocations = yield* relationRows(snapshot, S.ReceiptAllocation),
 			conversions = yield* relationRows(snapshot, S.ConversionReceipt)
 		const reported = yield* relationRows(snapshot, S.ReportedReceiptConversion)
-		const resolved = new Set((yield* relationRows(snapshot, S.RetirementSetupResolution)).map((r) => r.setup))
-		for (const setup of yield* relationRows(snapshot, S.RetirementSetup))
-			if (plans.some((p) => p.id === setup.plan))
-				work.push({
-					kind: "Retirement",
-					blocks: "RetirementFunding",
-					id: setup.id,
-					label: setup.detail,
+		for (const question of (yield* questions(snapshot, business)).filter(
+			(q) => q.kind === "PlanSetup" || q.kind === "Bookkeeping"
+		))
+			work.push(
+				workItem({
+					rule: question.kind === "PlanSetup" ? "plan-setup-question" : "bookkeeping-question",
+					subject: question.id,
+					label: question.detail,
 					opensOn: asOf,
-					completion: resolved.has(setup.id) ? "Complete" : "Open",
-					action: "bookkeeping ResolveSetup",
-					evidence: setup.evidence
+					complete: question.answer !== undefined,
+					evidence: question.evidence,
+					next: { op: "question.answer", input: { question: question.id } }
 				})
+			)
 		for (const plan of plans) {
 			const position = yield* retirementPosition(snapshot, plan.id, year)
 			if (!position.annual)
-				work.push({
-					kind: "PolicyRefresh",
-					blocks: "RetirementFunding",
-					id: `retirement-annual/${plan.id}/${year}`,
-					label: "Refresh retirement annual limits and owner attestations",
-					opensOn: span.start,
-					completion: "Open",
-					action: "bookkeeping Annual"
-				})
+				work.push(
+					workItem({
+						rule: "retirement-annual",
+						subject: `${plan.id}/${year}`,
+						label: `Record the ${year} retirement limits and owner attestations`,
+						opensOn: span.start,
+						complete: false,
+						next: { op: "retirement.annual", input: { plan: plan.id, year } }
+					})
+				)
 			if (
 				position.statutory &&
 				(position.statutory.additionsRemaining < 0n || position.statutory.deferralsRemaining < 0n)
 			)
-				work.push({
-					kind: "Retirement",
-					blocks: "RetirementFunding",
-					id: `retirement-capacity/${plan.id}/${year}`,
-					label: "Recorded contributions exceed current supported annual capacity",
-					opensOn: span.start,
-					completion: "Open",
-					action: "report year"
-				})
+				work.push(
+					workItem({
+						rule: "retirement-over-capacity",
+						subject: `${plan.id}/${year}`,
+						label: "Recorded contributions exceed current supported annual capacity",
+						opensOn: span.start,
+						complete: false,
+						next: { op: "report", input: { year } }
+					})
+				)
 			if (position.remainingAfterTaxTarget !== undefined && position.remainingAfterTaxTarget > 0n)
-				work.push({
-					kind: "Retirement",
-					blocks: "None",
-					id: `target/${plan.id}/${year}`,
-					label: "Unused current-year after-tax target",
-					opensOn: parseCalendarDate(`${year}-12-01`),
-					dueOn: epochDay(span.end - 1n),
-					completion: "Open",
-					amount: position.remainingAfterTaxTarget,
-					action: "bookkeeping AuthorizeAfterTax"
-				})
+				work.push(
+					workItem({
+						rule: "after-tax-target",
+						subject: `${plan.id}/${year}`,
+						label: "Unused current-year after-tax target",
+						opensOn: parseCalendarDate(`${year}-12-01`),
+						dueOn: epochDay(span.end - 1n),
+						complete: false,
+						amount: position.remainingAfterTaxTarget,
+						next: { op: "retirement.authorize-after-tax", input: { plan: plan.id } }
+					})
+				)
 			for (const deduction of deductions.filter(
 				(r) => r.employee === plan.employee && r.kind === "Roth" && r.amount > 0n
 			)) {
+				const paidOn = wages.find((r) => r.id === deduction.wage)?.paidOn.start
+				if (paidOn === undefined) continue
 				const contribution = contributions.find((r) =>
 					deductionLinks.some((l) => l.wage === deduction.wage && l.contribution === r.id)
+				)
+				const fundedBy = funding.filter((r) => r.contribution === contribution?.id)
+				const funded = fundedBy.reduce((n, r) => n + r.amount, 0n)
+				const sent = fundedBy.every((r) => {
+					const movement = cashAllocations.find((a) => a.id === r.allocation)?.movement
+					return movement !== undefined && receiptSources.has(movement)
+				})
+				work.push(
+					workItem({
+						rule: "roth-remittance",
+						subject: deduction.wage,
+						label:
+							funded === deduction.amount && !sent
+								? "Attach the Mercury receipt for the withheld Roth wire"
+								: "Send withheld Roth to the plan",
+						opensOn: epochDay(paidOn),
+						complete: funded === deduction.amount && sent,
+						amount: deduction.amount - funded,
+						next:
+							funded === deduction.amount
+								? { op: "artifact.attach-bank", input: {} }
+								: { op: "retirement.fund", input: { contribution: contribution?.id } }
+					})
 				)
 				const received = allocations
 					.filter(
@@ -97,65 +131,67 @@ export const bookkeepingWork = (snapshot: Snapshot, business: Uuid, asOf: UnixEp
 							)
 					)
 					.reduce((n, r) => n + r.amount, 0n)
-				const funded = funding
-					.filter((r) => r.contribution === contribution?.id)
-					.reduce((n, r) => n + r.amount, 0n)
-				const paidOn = wages.find((r) => r.id === deduction.wage)?.paidOn.start
-				if (paidOn !== undefined)
-					work.push({
-						kind: "Retirement",
-						blocks: "Payroll",
-						id: `roth-receipt/${deduction.wage}`,
-						label: "Withheld Roth awaiting confirmed plan receipt",
+				work.push(
+					workItem({
+						rule: "roth-plan-receipt",
+						subject: deduction.wage,
+						label: "Carry has not yet confirmed this withheld Roth",
 						opensOn: epochDay(paidOn),
-						completion: received === deduction.amount && funded === deduction.amount ? "Complete" : "Open",
+						complete: received === deduction.amount,
 						amount: deduction.amount - received,
-						action: "bookkeeping ProviderReceipt"
+						next: {
+							op: "retirement.receipt",
+							input: { plan: plan.id, source: "EmployeeRothDeferral", year: Number(deduction.year) }
+						}
 					})
+				)
 			}
 			for (const contribution of contributions.filter(
 				(r) => r.plan === plan.id && r.source === "EmployeeAfterTax"
 			)) {
-				const matched = allocations.filter(
-					(r) =>
-						r.contribution === contribution.id &&
-						receipts.some(
-							(receipt) =>
-								receipt.id === r.receipt &&
-								receipt.source === contribution.source &&
-								receipt.year === contribution.year
-						)
+				const received = allocations
+					.filter(
+						(r) =>
+							r.contribution === contribution.id &&
+							receipts.some(
+								(receipt) =>
+									receipt.id === r.receipt &&
+									receipt.source === contribution.source &&
+									receipt.year === contribution.year
+							)
+					)
+					.reduce((n, r) => n + r.amount, 0n)
+				work.push(
+					workItem({
+						rule: "after-tax-plan-receipt",
+						subject: contribution.id,
+						label: "After-tax contribution awaiting plan receipt",
+						opensOn: periodSpan(Number(contribution.year), "Year").start,
+						dueOn: epochDay(periodSpan(Number(contribution.year), "Year").end - 1n),
+						complete: received === contribution.amount,
+						amount: contribution.amount - received,
+						next: {
+							op: "retirement.receipt",
+							input: { plan: plan.id, source: "EmployeeAfterTax", year: Number(contribution.year) }
+						}
+					})
 				)
-				const received = matched.reduce((n, r) => n + r.amount, 0n)
-				work.push({
-					kind: "Retirement",
-					blocks: "None",
-					id: `after-tax-receipt/${contribution.id}`,
-					label: "After-tax contribution awaiting plan receipt",
-					opensOn: periodSpan(Number(contribution.year), "Year").start,
-					dueOn: epochDay(periodSpan(Number(contribution.year), "Year").end - 1n),
-					completion: received === contribution.amount ? "Complete" : "Open",
-					amount: contribution.amount - received,
-					action: "bookkeeping ProviderReceipt"
-				})
 			}
 			for (const receipt of receipts.filter((r) => r.plan === plan.id && r.source === "EmployeeAfterTax")) {
 				const converted = conversions
 					.filter((r) => r.receipt === receipt.id)
 					.reduce((n, r) => n + r.amount, 0n)
-				work.push({
-					kind: "Retirement",
-					blocks: "None",
-					id: `conversion/${receipt.id}`,
-					label: "After-tax receipt awaiting conversion confirmation",
-					opensOn: epochDay(receipt.observedOn),
-					completion:
-						converted === receipt.amount || reported.some((r) => r.receipt === receipt.id)
-							? "Complete"
-							: "Open",
-					amount: receipt.amount - converted,
-					action: "bookkeeping Conversion"
-				})
+				work.push(
+					workItem({
+						rule: "after-tax-conversion",
+						subject: receipt.id,
+						label: "After-tax receipt awaiting conversion confirmation",
+						opensOn: epochDay(receipt.observedOn),
+						complete: converted === receipt.amount || reported.some((r) => r.receipt === receipt.id),
+						amount: receipt.amount - converted,
+						next: { op: "retirement.conversion", input: { plan: plan.id } }
+					})
+				)
 			}
 		}
 		const converted = yield* relationRows(snapshot, S.RothConversion),
@@ -171,44 +207,33 @@ export const bookkeepingWork = (snapshot: Snapshot, business: Uuid, asOf: UnixEp
 					if (
 						!filings.some((r) => r.subject === subject && r.form === form && r.period.start === period.start)
 					)
-						work.push({
-							kind: "Setup",
-							blocks: "Payroll",
-							id: `retirement-filing/${plan.id}/${reportingYear}/${form}`,
-							label: `Record the ${reportingYear} ${form} filing expectation and reviewed deadline`,
-							opensOn: period.end,
-							completion: "Open",
-							action: "filings expect-retirement"
-						})
+						work.push(
+							workItem({
+								rule: "retirement-filing-expectation",
+								subject: `${plan.id}/${reportingYear}/${form}`,
+								label: `Record the ${reportingYear} ${form} filing expectation and reviewed deadline`,
+								opensOn: period.end,
+								complete: false,
+								next: {
+									op: "filings.expect-retirement",
+									input: { plan: plan.id, form, year: reportingYear }
+								}
+							})
+						)
 			}
-		const resolvedIssues = new Set(
-			(yield* relationRows(snapshot, S.BookkeepingResolution)).map((r) => r.issue)
-		)
-		for (const issue of (yield* relationRows(snapshot, S.BookkeepingIssue)).filter(
-			(r) => r.business === business
-		))
-			work.push({
-				kind: "Reconciliation",
-				blocks: "RetirementFunding",
-				id: issue.id,
-				label: issue.detail,
-				opensOn: asOf,
-				completion: resolvedIssues.has(issue.id) ? "Complete" : "Open",
-				action: "bookkeeping ResolveIssue",
-				evidence: issue.evidence
-			})
 		for (const plan of plans)
 			for (const issue of yield* receiptDiscrepancies(snapshot, plan.id))
-				work.push({
-					kind: "Reconciliation",
-					blocks: "RetirementFunding",
-					id: `receipt/${issue.receipt.id}`,
-					label: issue.detail,
-					opensOn: epochDay(issue.receipt.observedOn),
-					completion: "Open",
-					action: "report year",
-					evidence: issue.receipt.evidence
-				})
+				work.push(
+					workItem({
+						rule: "receipt-discrepancy",
+						subject: issue.receipt.id,
+						label: issue.detail,
+						opensOn: epochDay(issue.receipt.observedOn),
+						complete: false,
+						evidence: issue.receipt.evidence,
+						next: { op: "retirement.allocate-receipt", input: { receipt: issue.receipt.id } }
+					})
+				)
 
 		const distributionYears = new Set(
 			(yield* relationRows(snapshot, S.OwnerDistribution))
@@ -217,15 +242,16 @@ export const bookkeepingWork = (snapshot: Snapshot, business: Uuid, asOf: UnixEp
 		)
 		for (const distributionYear of distributionYears) {
 			const position = yield* distributionPosition(snapshot, business, distributionYear)
-			work.push({
-				kind: "DistributionReview",
-				blocks: "None",
-				id: `distribution-review/${business}/${distributionYear}`,
-				label: `${distributionYear} owner-distribution records for annual tax handoff`,
-				opensOn: periodSpan(distributionYear, "Year").end,
-				completion: position.reviewed ? "Complete" : "Open",
-				action: "bookkeeping DistributionReview"
-			})
+			work.push(
+				workItem({
+					rule: "distribution-review",
+					subject: `${business}/${distributionYear}`,
+					label: `${distributionYear} owner-distribution records for annual tax handoff`,
+					opensOn: periodSpan(distributionYear, "Year").end,
+					complete: position.reviewed,
+					next: { op: "bank.distribution-review", input: { year: distributionYear } }
+				})
+			)
 		}
 		return work
 	})

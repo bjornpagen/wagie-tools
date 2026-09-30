@@ -43,7 +43,6 @@ import {
 	DueRule,
 	ElectionContributionKind,
 	FilingKind,
-	FinancialScope,
 	Form,
 	formPolicy,
 	forms,
@@ -56,6 +55,7 @@ import {
 	Program,
 	PublishedRateKind,
 	payrollForms,
+	QuestionKind,
 	RevisionKind,
 	State,
 	SubjectKind,
@@ -84,7 +84,6 @@ export {
 	DueRule,
 	ElectionContributionKind,
 	FilingKind,
-	FinancialScope,
 	Form,
 	GrossSuggestionMethod,
 	Payer,
@@ -94,6 +93,7 @@ export {
 	PolicyLimitKind,
 	Program,
 	PublishedRateKind,
+	QuestionKind,
 	RevisionKind,
 	State,
 	SubjectKind,
@@ -109,8 +109,7 @@ export const BankMovement = relation("BankMovement", {
 	direction: closedId(CashDirection),
 	paidOn: i64,
 	amount: u64,
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const MercuryTransaction = relation("MercuryTransaction", { movement: uuid, reference: str })
 export const PayrollTransaction = relation("PayrollTransaction", {
@@ -118,7 +117,7 @@ export const PayrollTransaction = relation("PayrollTransaction", {
 	movement: uuid,
 	business: uuid
 })
-export const PlanReceiptDate = relation("PlanReceiptDate", { receipt: uuid, day: i64, evidence: str })
+export const PlanReceiptDate = relation("PlanReceiptDate", { receipt: uuid, day: i64, evidence: uuid })
 export const BankObservation = relation("BankObservation", {
 	id: uuid,
 	business: uuid,
@@ -127,18 +126,17 @@ export const BankObservation = relation("BankObservation", {
 	status: closedId(BankStatus),
 	observedOn: i64,
 	amount: u64,
-	source: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const BankSource = relation("BankSource", { movement: uuid, observation: uuid, business: uuid })
-export const BankRetry = relation("BankRetry", { failed: uuid, succeeded: uuid, evidence: str })
+export const BankRetry = relation("BankRetry", { failed: uuid, succeeded: uuid, evidence: uuid })
 export const CashAllocation = relation("CashAllocation", {
 	id: uuid,
 	movement: uuid,
 	business: uuid,
 	purpose: closedId(CashPurpose),
 	amount: u64,
-	evidence: str
+	evidence: uuid
 })
 export const PayrollCashBinding = relation("PayrollCashBinding", {
 	allocation: uuid,
@@ -146,7 +144,7 @@ export const PayrollCashBinding = relation("PayrollCashBinding", {
 	business: uuid
 })
 export const BankTaxPayment = relation("BankTaxPayment", { allocation: uuid, payment: uuid, business: uuid })
-export const Owner = relation("Owner", { business: uuid, employee: uuid, evidence: str })
+export const Owner = relation("Owner", { business: uuid, employee: uuid, evidence: uuid })
 export const OwnerDistribution = relation("OwnerDistribution", {
 	id: uuid,
 	allocation: uuid,
@@ -154,8 +152,7 @@ export const OwnerDistribution = relation("OwnerDistribution", {
 	owner: uuid,
 	paidOn: i64,
 	amount: u64,
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const DistributionReturn = relation("DistributionReturn", {
 	id: uuid,
@@ -164,16 +161,14 @@ export const DistributionReturn = relation("DistributionReturn", {
 	business: uuid,
 	amount: u64,
 	paidOn: i64,
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const DistributionReview = relation("DistributionReview", {
 	id: uuid,
 	business: uuid,
 	year: i64,
 	digest: str,
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const RetirementPlan = relation("RetirementPlan", {
 	id: uuid,
@@ -181,8 +176,7 @@ export const RetirementPlan = relation("RetirementPlan", {
 	employee: uuid,
 	name: str,
 	ein: str,
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const PlanAccount = relation("PlanAccount", {
 	id: uuid,
@@ -190,7 +184,7 @@ export const PlanAccount = relation("PlanAccount", {
 	kind: closedId(PlanAccountKind),
 	provider: str,
 	reference: str,
-	evidence: str
+	evidence: uuid
 })
 export const RetirementAnnual = relation("RetirementAnnual", {
 	id: uuid,
@@ -205,8 +199,7 @@ export const RetirementAnnual = relation("RetirementAnnual", {
 	outsideAdditions: u64,
 	otherPlans: bool,
 	outsideAssets: bool,
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const RetirementContribution = relation("RetirementContribution", {
 	id: uuid,
@@ -217,13 +210,12 @@ export const RetirementContribution = relation("RetirementContribution", {
 	amount: u64,
 	source: closedId(ContributionSource),
 	origin: closedId(ContributionOrigin),
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const ContributionCancellation = relation("ContributionCancellation", {
+	id: uuid,
 	contribution: uuid,
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const ContributionElection = relation("ContributionElection", {
 	contribution: uuid,
@@ -260,8 +252,7 @@ export const ProviderOperation = relation("ProviderOperation", {
 	plan: uuid,
 	provider: str,
 	reference: str,
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const PlanReceipt = relation("PlanReceipt", {
 	id: uuid,
@@ -272,8 +263,7 @@ export const PlanReceipt = relation("PlanReceipt", {
 	year: i64,
 	observedOn: i64,
 	amount: u64,
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const ReceiptAllocation = relation("ReceiptAllocation", {
 	receipt: uuid,
@@ -289,8 +279,7 @@ export const RothConversion = relation("RothConversion", {
 	toAccount: uuid,
 	convertedOn: i64,
 	amount: u64,
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const ConversionReceipt = relation("ConversionReceipt", {
 	conversion: uuid,
@@ -302,7 +291,7 @@ export const SuppliedConversionTax = relation("SuppliedConversionTax", {
 	conversion: uuid,
 	field: str,
 	amount: u64,
-	evidence: str
+	evidence: uuid
 })
 export const RetirementReport = relation("RetirementReport", {
 	id: uuid,
@@ -310,49 +299,23 @@ export const RetirementReport = relation("RetirementReport", {
 	year: i64,
 	artifact: uuid,
 	supplied: str,
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 // A supplied historical report can confirm a full receipt's conversion without
 // inventing an event date. It cannot also consume dated conversion allocations.
 export const ReportedReceiptConversion = relation("ReportedReceiptConversion", {
+	id: uuid,
 	receipt: uuid,
 	report: uuid,
 	plan: uuid,
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const PlanBalance = relation("PlanBalance", {
 	id: uuid,
 	account: uuid,
 	asOf: i64,
 	amount: u64,
-	evidence: str,
-	recordedAt: i64
-})
-export const RetirementSetup = relation("RetirementSetup", {
-	id: uuid,
-	plan: uuid,
-	detail: str,
-	evidence: str,
-	recordedAt: i64
-})
-export const RetirementSetupResolution = relation("RetirementSetupResolution", {
-	setup: uuid,
-	evidence: str,
-	recordedAt: i64
-})
-export const BookkeepingIssue = relation("BookkeepingIssue", {
-	id: uuid,
-	business: uuid,
-	detail: str,
-	evidence: str,
-	recordedAt: i64
-})
-export const BookkeepingResolution = relation("BookkeepingResolution", {
-	issue: uuid,
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const PlanSubject = relation("PlanSubject", { subject: uuid, plan: uuid, business: uuid })
 export const RetirementFilingBasis = relation("RetirementFilingBasis", {
@@ -366,8 +329,7 @@ export const Business = relation("Business", {
 	name: str,
 	ein: str,
 	state: closedId(State),
-	timeZone: str,
-	recordedAt: i64
+	timeZone: str
 })
 export const BusinessAddress = relation("BusinessAddress", {
 	business: uuid,
@@ -382,7 +344,7 @@ export const StateAccount = relation("StateAccount", {
 	business: uuid,
 	state: closedId(State),
 	taxpayerNumber: str,
-	evidence: str
+	evidence: uuid
 })
 export const Employee = relation("Employee", {
 	id: uuid,
@@ -391,21 +353,20 @@ export const Employee = relation("Employee", {
 	lastName: str,
 	ssn: str,
 	address: str,
-	filingStatus: str,
-	recordedAt: i64
+	filingStatus: str
 })
 export const TaxAccount = relation("TaxAccount", {
 	id: uuid,
 	business: uuid,
 	family: closedId(AccountFamily),
-	evidence: str
+	evidence: uuid
 })
 export const AnnualBudget = relation("AnnualBudget", {
 	id: uuid,
 	employee: uuid,
 	year: i64,
 	limit: u64,
-	evidence: str
+	evidence: uuid
 })
 export const BudgetCommitment = relation("BudgetCommitment", {
 	id: uuid,
@@ -413,7 +374,7 @@ export const BudgetCommitment = relation("BudgetCommitment", {
 	year: i64,
 	amount: u64,
 	origin: closedId(CommitmentOrigin),
-	evidence: str
+	evidence: uuid
 })
 // Assignment is separate so an actual historical observation survives a missing budget.
 export const BudgetAssignment = relation("BudgetAssignment", {
@@ -440,15 +401,14 @@ export const Wage = relation("Wage", {
 	paidOn: interval(i64, 1n),
 	commitment: uuid,
 	gross: u64,
-	initialRevision: uuid,
-	recordedAt: i64
+	initialRevision: uuid
 })
 export const RegularWork = relation("RegularWork", { wage: uuid, employee: uuid, span: interval(i64) })
 export const RegularCommitment = relation("RegularCommitment", { commitment: uuid, wage: uuid })
 export const ObservedCompensation = relation("ObservedCompensation", {
 	wage: uuid,
 	commitment: uuid,
-	evidence: str
+	evidence: uuid
 })
 export const Deduction = relation("Deduction", {
 	wage: uuid,
@@ -456,7 +416,7 @@ export const Deduction = relation("Deduction", {
 	year: i64,
 	kind: closedId(DeductionKind),
 	amount: u64,
-	evidence: str
+	evidence: uuid
 })
 export const Election = relation("Election", {
 	id: uuid,
@@ -468,7 +428,7 @@ export const Election = relation("Election", {
 	signedOn: i64,
 	effective: interval(i64),
 	limit: u64,
-	evidence: str
+	evidence: uuid
 })
 // Operational authorization is qualified by its signed source and annual review.
 export const ElectionSource = relation("ElectionSource", {
@@ -494,14 +454,14 @@ export const DeferralPolicy = relation("DeferralPolicy", {
 	release: uuid,
 	year: i64,
 	limit: u64,
-	evidence: str
+	evidence: uuid
 })
 
 export const GrossSuggestionPolicy = relation("GrossSuggestionPolicy", {
 	id: uuid,
 	release: uuid,
 	method: closedId(GrossSuggestionMethod),
-	evidence: str
+	evidence: uuid
 })
 export const EmployeeAllowance = relation("EmployeeAllowance", {
 	id: uuid,
@@ -510,7 +470,7 @@ export const EmployeeAllowance = relation("EmployeeAllowance", {
 	policy: uuid,
 	maximum: u64,
 	limit: u64,
-	evidence: str
+	evidence: uuid
 })
 export const Recovery = relation("Recovery", {
 	id: uuid,
@@ -520,19 +480,16 @@ export const Recovery = relation("Recovery", {
 	component: closedId(Component),
 	kind: closedId(DeductionKind),
 	amount: u64,
-	evidence: str
+	evidence: uuid
 })
-export const Review = relation("Review", { id: uuid, employee: uuid, year: i64, topic: str, detail: str })
-export const Resolution = relation("Resolution", { review: uuid, evidence: str, recordedAt: i64 })
 
 export const PolicyRelease = relation("PolicyRelease", {
 	id: uuid,
 	sha256: str,
 	title: str,
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
-export const PolicyBinding = relation("PolicyBinding", { business: uuid, release: uuid, evidence: str })
+export const PolicyBinding = relation("PolicyBinding", { business: uuid, release: uuid, evidence: uuid })
 // Published rules are independently observable. Employer approval is a separate,
 // release-specific proof bounded by exactly one reviewed calendar year.
 
@@ -543,50 +500,49 @@ export const AnnualPolicy = relation("AnnualPolicy", {
 	year: i64,
 	calendar: uuid,
 	valid: interval(i64),
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const AnnualSource = relation("AnnualSource", {
 	annual: uuid,
 	artifact: uuid,
-	evidence: str
+	evidence: uuid
 })
 export const PublishedRate = relation("PublishedRate", {
 	annual: uuid,
 	kind: closedId(PublishedRateKind),
 	schedule: uuid,
 	artifact: uuid,
-	evidence: str
+	evidence: uuid
 })
 export const PolicyLimit = relation("PolicyLimit", {
 	annual: uuid,
 	kind: closedId(PolicyLimitKind),
 	cents: u64,
 	artifact: uuid,
-	evidence: str
+	evidence: uuid
 })
 export const LookbackPeriod = relation("LookbackPeriod", {
 	annual: uuid,
 	span: interval(i64),
 	artifact: uuid,
-	evidence: str
+	evidence: uuid
 })
 export const AnnualEvidence = relation("AnnualEvidence", {
+	id: uuid,
 	annual: uuid,
 	kind: closedId(PolicyEvidenceKind),
 	artifact: uuid,
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const AnnualApproval = relation("AnnualApproval", {
+	id: uuid,
 	annual: uuid,
 	release: uuid,
 	business: uuid,
 	authority: closedId(Authority),
 	year: i64,
 	valid: interval(i64),
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const CalculationPolicy = relation("CalculationPolicy", {
 	calculation: uuid,
@@ -603,8 +559,7 @@ export const ElectionDocument = relation("ElectionDocument", {
 	year: i64,
 	signedOn: i64,
 	artifact: uuid,
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const ElectionDocumentRevision = relation("ElectionDocumentRevision", {
 	document: uuid,
@@ -624,7 +579,7 @@ export const EmployerRateNotice = relation("EmployerRateNotice", {
 	state: closedId(State),
 	schedule: uuid,
 	valid: interval(i64),
-	evidence: str
+	evidence: uuid
 })
 export const EmployerSchedule = relation("EmployerSchedule", {
 	version: uuid,
@@ -633,27 +588,27 @@ export const EmployerSchedule = relation("EmployerSchedule", {
 	schedule: uuid,
 	valid: interval(i64)
 })
-export const FutaBasis = relation("FutaBasis", { version: uuid, evidence: str })
+export const FutaBasis = relation("FutaBasis", { version: uuid, evidence: uuid })
 export const SupportedPayrollDomain = relation("SupportedPayrollDomain", {
 	id: uuid,
 	release: uuid,
 	state: closedId(State),
 	federalDepositLimit: u64,
 	valid: interval(i64),
-	evidence: str
+	evidence: uuid
 })
 export const MonthlyDepositor = relation("MonthlyDepositor", {
 	id: uuid,
 	business: uuid,
 	valid: interval(i64),
-	evidence: str
+	evidence: uuid
 })
 export const SupportedProgram = relation("SupportedProgram", {
 	id: uuid,
 	domain: uuid,
 	program: closedId(Program),
 	eligible: interval(u64),
-	evidence: str
+	evidence: uuid
 })
 export const PolicyCoverage = relation("PolicyCoverage", {
 	release: uuid,
@@ -668,18 +623,18 @@ export const RateVersion = relation("RateVersion", {
 	component: closedId(Component),
 	valid: interval(i64),
 	schedule: uuid,
-	evidence: str
+	evidence: uuid
 })
 export const RateSchedule = relation("RateSchedule", {
 	id: uuid,
 	denominator: u64,
 	domain: interval(u64),
-	evidence: str
+	evidence: uuid
 })
 export const TaxBand = relation("TaxBand", {
 	id: uuid,
 	schedule: uuid,
-	span: interval(u64),
+	wages: interval(u64),
 	numerator: u64,
 	role: closedId(BandRole)
 })
@@ -701,7 +656,7 @@ export const AssessmentSet = relation("AssessmentSet", {
 	gross: u64,
 	origin: closedId(AssessmentOrigin)
 })
-export const ObservedSet = relation("ObservedSet", { set: uuid, evidence: str })
+export const ObservedSet = relation("ObservedSet", { set: uuid, evidence: uuid })
 export const PayrollCalculation = relation("PayrollCalculation", {
 	id: uuid,
 	set: uuid,
@@ -714,7 +669,7 @@ export const PayrollCalculation = relation("PayrollCalculation", {
 	sourceStamp: str,
 	recordingDay: i64,
 	contextHash: str,
-	evidence: str
+	evidence: uuid
 })
 export const ProposedWage = relation("ProposedWage", {
 	calculation: uuid,
@@ -723,7 +678,7 @@ export const ProposedWage = relation("ProposedWage", {
 	depositor: uuid,
 	span: interval(i64),
 	roth: u64,
-	evidence: str
+	evidence: uuid
 })
 export const ProposedRevision = relation("ProposedRevision", {
 	calculation: uuid,
@@ -734,7 +689,7 @@ export const ProposedRevision = relation("ProposedRevision", {
 	employee: uuid,
 	paidOn: interval(i64, 1n),
 	gross: u64,
-	evidence: str
+	evidence: uuid
 })
 export const CalculationRecoveryClaim = relation("CalculationRecoveryClaim", {
 	calculation: uuid,
@@ -743,7 +698,7 @@ export const CalculationRecoveryClaim = relation("CalculationRecoveryClaim", {
 	owedOnWage: uuid,
 	component: closedId(Component),
 	amount: u64,
-	evidence: str
+	evidence: uuid
 })
 export const Assessment = relation("Assessment", {
 	set: uuid,
@@ -755,13 +710,13 @@ export const ObservedAssessment = relation("ObservedAssessment", {
 	set: uuid,
 	component: closedId(Component),
 	amount: u64,
-	evidence: str
+	evidence: uuid
 })
 export const TaxableWages = relation("TaxableWages", {
 	set: uuid,
 	program: closedId(Program),
 	amount: u64,
-	evidence: str
+	evidence: uuid
 })
 export const CalculatedAssessment = relation("CalculatedAssessment", {
 	set: uuid,
@@ -809,14 +764,13 @@ export const AssessmentRevision = relation("AssessmentRevision", {
 	employee: uuid,
 	paidOn: interval(i64, 1n),
 	gross: u64,
-	kind: closedId(RevisionKind),
-	recordedAt: i64
+	kind: closedId(RevisionKind)
 })
 export const CorrectionAssessment = relation("CorrectionAssessment", {
 	revision: uuid,
 	predecessor: uuid,
 	wage: uuid,
-	evidence: str
+	evidence: uuid
 })
 export const RevisionAccount = relation("RevisionAccount", {
 	revision: uuid,
@@ -826,21 +780,37 @@ export const RevisionAccount = relation("RevisionAccount", {
 })
 
 export const Artifact = relation("Artifact", { id: uuid, sha256: str, mediaType: str })
-export const VerifiedArtifact = relation("VerifiedArtifact", { artifact: uuid, length: u64, verifiedAt: i64 })
-export const ArtifactLocation = relation("ArtifactLocation", { artifact: uuid, locator: str, evidence: str })
+/** Exact bytes were measured once at registration. */
+export const VerifiedArtifact = relation("VerifiedArtifact", { artifact: uuid, length: u64 })
+/** The canonical permanent copy. Its UUIDv7 is the verification instant; the
+ * archive command downloads the Drive bytes and matches Artifact.sha256 first. */
+export const DriveCopy = relation("DriveCopy", {
+	id: uuid,
+	artifact: uuid,
+	driveId: str,
+	remote: str,
+	evidence: uuid
+})
+/** A location superseded by the Drive copy, retained as history. */
+export const PriorLocation = relation("PriorLocation", {
+	copy: uuid,
+	artifact: uuid,
+	locator: str,
+	evidence: uuid
+})
+export const ArtifactLocation = relation("ArtifactLocation", { artifact: uuid, locator: str, evidence: uuid })
 export const TaxPayment = relation("TaxPayment", {
 	id: uuid,
 	business: uuid,
 	account: uuid,
 	sentOn: i64,
 	amount: u64,
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const PaymentSettlement = relation("PaymentSettlement", {
 	payment: uuid,
 	settlesOn: i64,
-	evidence: str
+	evidence: uuid
 })
 export const PaymentReference = relation("PaymentReference", {
 	payment: uuid,
@@ -856,8 +826,7 @@ export const PaymentReconciliation = relation("PaymentReconciliation", {
 	business: uuid,
 	account: uuid,
 	period: interval(i64),
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const PaymentAllocation = relation("PaymentAllocation", {
 	revision: uuid,
@@ -866,31 +835,24 @@ export const PaymentAllocation = relation("PaymentAllocation", {
 	reconciliation: uuid,
 	paidOn: interval(i64, 1n)
 })
+/** Evidence authorizing one negative entry's application to a payment. */
+export const NegativeApplication = relation("NegativeApplication", {
+	revision: uuid,
+	account: uuid,
+	evidence: uuid
+})
 export const PaymentAdjustment = relation("PaymentAdjustment", {
 	id: uuid,
 	reconciliation: uuid,
 	amount: i64,
 	period: interval(i64),
-	evidence: str
+	evidence: uuid
 })
 
-export const FinancialIssue = relation("FinancialIssue", {
-	id: uuid,
-	business: uuid,
-	scope: closedId(FinancialScope),
-	evidence: str,
-	detail: str
-})
-export const PaymentIssue = relation("PaymentIssue", { issue: uuid, business: uuid, account: uuid })
-export const FinancialResolution = relation("FinancialResolution", {
-	issue: uuid,
-	evidence: str,
-	recordedAt: i64
-})
 export const SignedDisposition = relation("SignedDisposition", {
 	revision: uuid,
 	account: uuid,
-	evidence: str,
+	evidence: uuid,
 	disposition: str
 })
 
@@ -913,14 +875,14 @@ export const BusinessDayCoverage = relation("BusinessDayCoverage", {
 	release: uuid,
 	authority: closedId(Authority),
 	span: interval(i64),
-	evidence: str
+	evidence: uuid
 })
 export const BusinessDay = relation("BusinessDay", {
 	release: uuid,
 	authority: closedId(Authority),
 	span: interval(i64, 1n),
 	eligible: bool,
-	evidence: str
+	evidence: uuid
 })
 export const DepositPolicy = relation("DepositPolicy", {
 	id: uuid,
@@ -932,7 +894,7 @@ export const DepositPolicy = relation("DepositPolicy", {
 	valid: interval(i64),
 	authority: closedId(Authority),
 	dueRule: closedId(DueRule),
-	evidence: str
+	evidence: uuid
 })
 export const DepositTrigger = relation("DepositTrigger", {
 	policy: uuid,
@@ -951,7 +913,7 @@ export const DepositCheckpoint = relation("DepositCheckpoint", {
 	kind: closedId(CheckpointKind),
 	opensOn: i64,
 	dueOn: i64,
-	evidence: str
+	evidence: uuid
 })
 export const FilingRequirement = relation("FilingRequirement", {
 	id: uuid,
@@ -959,7 +921,7 @@ export const FilingRequirement = relation("FilingRequirement", {
 	form: closedId(Form),
 	subjectKind: closedId(SubjectKind),
 	startsOn: i64,
-	evidence: str
+	evidence: uuid
 })
 export const FilingRule = relation("FilingRule", {
 	id: uuid,
@@ -968,12 +930,12 @@ export const FilingRule = relation("FilingRule", {
 	periodKind: closedId(PeriodKind),
 	authority: closedId(Authority),
 	dueRule: closedId(DueRule),
-	evidence: str
+	evidence: uuid
 })
 export const RequirementEnd = relation("RequirementEnd", {
 	requirement: uuid,
 	endsBefore: i64,
-	evidence: str
+	evidence: uuid
 })
 export const FilingSubject = relation("FilingSubject", {
 	id: uuid,
@@ -1001,7 +963,7 @@ export const Filing = relation("Filing", {
 	kind: closedId(FilingKind),
 	opensOn: i64,
 	dueOn: i64,
-	evidence: str
+	evidence: uuid
 })
 export const OriginalFiling = relation("OriginalFiling", {
 	filing: uuid,
@@ -1022,15 +984,14 @@ export const CorrectionFiling = relation("CorrectionFiling", {
 	business: uuid,
 	subject: uuid,
 	period: interval(i64),
-	evidence: str
+	evidence: uuid
 })
 export const DeadlineRevision = relation("DeadlineRevision", {
 	id: uuid,
 	filing: uuid,
 	sequence: u64,
 	dueOn: i64,
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const FormMethodPolicy = relation("FormMethodPolicy", {
 	id: uuid,
@@ -1052,8 +1013,7 @@ export const FilingVersion = relation("FilingVersion", {
 	release: uuid,
 	sequence: u64,
 	origin: closedId(VersionOrigin),
-	evidence: str,
-	recordedAt: i64
+	evidence: uuid
 })
 export const PreparedVersion = relation("PreparedVersion", { version: uuid, snapshot: str })
 export const AttestedVersion = relation("AttestedVersion", { version: uuid, attestation: str })
@@ -1081,7 +1041,7 @@ export const FormAdjustment = relation("FormAdjustment", {
 	id: uuid,
 	filing: uuid,
 	amount: i64,
-	evidence: str
+	evidence: uuid
 })
 export const FilingAdjustmentBasis = relation("FilingAdjustmentBasis", {
 	version: uuid,
@@ -1094,7 +1054,7 @@ export const AmendmentLiability = relation("AmendmentLiability", {
 	account: uuid,
 	business: uuid,
 	family: closedId(AccountFamily),
-	evidence: str
+	evidence: uuid
 })
 export const GrandfatheredEligibility = relation("GrandfatheredEligibility", {
 	filing: uuid,
@@ -1107,7 +1067,7 @@ export const CertifiedMailing = relation("CertifiedMailing", {
 	number: str,
 	mailedOn: i64,
 	receipt: uuid,
-	evidence: str
+	evidence: uuid
 })
 export const MailingEvidence = relation("MailingEvidence", { mailing: uuid, artifact: uuid })
 export const Submission = relation("Submission", {
@@ -1118,19 +1078,18 @@ export const Submission = relation("Submission", {
 	release: uuid,
 	policy: uuid,
 	method: closedId(SubmissionMethod),
-	requiredCount: u64,
-	recordedAt: i64
+	requiredCount: u64
 })
 export const GrandfatheredSubmission = relation("GrandfatheredSubmission", {
 	submission: uuid,
 	version: uuid,
 	filing: uuid,
-	evidence: str
+	evidence: uuid
 })
 export const DigitalSubmission = relation("DigitalSubmission", {
 	submission: uuid,
 	submittedOn: i64,
-	evidence: str
+	evidence: uuid
 })
 export const DigitalReference = relation("DigitalReference", {
 	submission: uuid,
@@ -1154,15 +1113,49 @@ export const SubmissionDocument = relation("SubmissionDocument", {
 	artifact: uuid,
 	part: str
 })
-export const Rejection = relation("Rejection", { submission: uuid, evidence: str, recordedAt: i64 })
+export const Rejection = relation("Rejection", { id: uuid, submission: uuid, evidence: uuid })
 export const ImportProvenance = relation("ImportProvenance", {
 	id: uuid,
 	sourceHash: str,
 	mapHash: str,
 	auditHash: str,
-	artifact: uuid,
-	recordedAt: i64
+	artifact: uuid
 })
+
+/** Prose is stored once. Every fact's `evidence` names the statement that
+ * justified writing it; identical text written by any command is one row. */
+export const Statement = relation("Statement", { id: uuid, text: str })
+export const StatementByText = key(Statement, ["text"])
+
+/** Header of an open question. Each kind has exactly one typed sidecar
+ * (exhaustive alternatives); an Answer closes it. The id is the asking instant. */
+export const Question = relation("Question", {
+	id: uuid,
+	business: uuid,
+	kind: closedId(QuestionKind),
+	detail: str
+})
+export const EmployeeQuestion = relation("EmployeeQuestion", {
+	question: uuid,
+	business: uuid,
+	employee: uuid,
+	year: i64,
+	topic: str
+})
+export const PlanQuestion = relation("PlanQuestion", {
+	question: uuid,
+	business: uuid,
+	plan: uuid,
+	evidence: uuid
+})
+export const BookkeepingQuestion = relation("BookkeepingQuestion", { question: uuid, evidence: uuid })
+export const AccountQuestion = relation("AccountQuestion", {
+	question: uuid,
+	business: uuid,
+	account: uuid,
+	evidence: uuid
+})
+export const Answer = relation("Answer", { id: uuid, question: uuid, evidence: uuid })
 
 export const relations = {
 	ContributionCancellation,
@@ -1203,10 +1196,6 @@ export const relations = {
 	RetirementReport,
 	ReportedReceiptConversion,
 	PlanBalance,
-	RetirementSetup,
-	RetirementSetupResolution,
-	BookkeepingIssue,
-	BookkeepingResolution,
 	PlanSubject,
 	RetirementFilingBasis,
 
@@ -1254,8 +1243,6 @@ export const relations = {
 	GrossSuggestionPolicy,
 	EmployeeAllowance,
 	Recovery,
-	Review,
-	Resolution,
 	PolicyRelease,
 	PolicyBinding,
 	PublishedRateKind,
@@ -1311,10 +1298,7 @@ export const relations = {
 	PaymentReconciliation,
 	PaymentAllocation,
 	PaymentAdjustment,
-	FinancialIssue,
-	FinancialScope,
-	PaymentIssue,
-	FinancialResolution,
+	QuestionKind,
 	SignedDisposition,
 	CalendarCoverage,
 	CalendarPeriod,
@@ -1355,7 +1339,17 @@ export const relations = {
 	CertifiedMailSubmission,
 	SubmissionDocument,
 	Rejection,
-	ImportProvenance
+	ImportProvenance,
+	Statement,
+	Question,
+	EmployeeQuestion,
+	PlanQuestion,
+	BookkeepingQuestion,
+	AccountQuestion,
+	Answer,
+	DriveCopy,
+	PriorLocation,
+	NegativeApplication
 }
 
 const submissionIdKey = key(Submission, ["id"])
@@ -1381,6 +1375,14 @@ const planSubjectSubjectKey = key(PlanSubject, ["subject"])
 const budgetCommitmentIdKey = key(BudgetCommitment, ["id"])
 const regularCommitmentCommitmentKey = key(RegularCommitment, ["commitment"])
 const observedCompensationCommitmentKey = key(ObservedCompensation, ["commitment"])
+
+const questionIdKey = key(Question, ["id"])
+const questionArms = [
+	key(EmployeeQuestion, ["question"]),
+	key(PlanQuestion, ["question"]),
+	key(BookkeepingQuestion, ["question"]),
+	key(AccountQuestion, ["question"])
+] as const
 
 export const identityLaws = [
 	key(Business, ["id"]),
@@ -1437,8 +1439,6 @@ export const identityLaws = [
 	key(ElectionUse, ["wage"]),
 	key(Recovery, ["id"]),
 	key(Recovery, ["fromWage", "owedOnWage", "component"]),
-	key(Review, ["id"]),
-	key(Resolution, ["review"]),
 	key(PolicyRelease, ["id"]),
 	key(PolicyRelease, ["sha256"]),
 	key(PolicyBinding, ["business"]),
@@ -1486,8 +1486,8 @@ export const identityLaws = [
 	key(RateSchedule, ["id"]),
 	key(RateSchedule, ["id", "domain"]),
 	key(TaxBand, ["id"]),
-	key(TaxBand, ["schedule", "span"]),
-	key(TaxBand, ["id", "schedule", "span"]),
+	key(TaxBand, ["schedule", "wages"]),
+	key(TaxBand, ["id", "schedule", "wages"]),
 	key(TaxBaseScope, ["id"]),
 	key(TaxBaseScope, ["id", "business", "employee", "year", "span"]),
 	key(TaxBaseScope, ["business", "employee", "program", "year"]),
@@ -1553,10 +1553,6 @@ export const identityLaws = [
 	key(PaymentReconciliation, ["id", "business", "account", "period"]),
 	key(PaymentAllocation, ["revision", "account"]),
 	key(PaymentAdjustment, ["id"]),
-	key(FinancialIssue, ["id"]),
-	key(FinancialIssue, ["id", "business"]),
-	key(PaymentIssue, ["issue"]),
-	key(FinancialResolution, ["issue"]),
 	key(SignedDisposition, ["revision", "account"]),
 	key(CalendarCoverage, ["release", "authority", "kind", "span"]),
 	key(CalendarPeriod, ["id"]),
@@ -1790,8 +1786,6 @@ export const laws = [
 	key(RothConversion, ["id"]),
 	key(RetirementReport, ["id"]),
 	key(PlanBalance, ["id"]),
-	key(RetirementSetup, ["id"]),
-	key(BookkeepingIssue, ["id"]),
 	key(BankMovement, ["id", "business"]),
 	key(BankMovement, ["id", "amount"]),
 	key(BankObservation, ["artifact", "row"]),
@@ -1827,8 +1821,6 @@ export const laws = [
 	key(RothConversion, ["id", "plan"]),
 	key(ConversionReceipt, ["conversion", "receipt"]),
 	key(SuppliedConversionTax, ["conversion", "field"]),
-	key(RetirementSetupResolution, ["setup"]),
-	key(BookkeepingResolution, ["issue"]),
 	planSubjectSubjectKey,
 	key(PlanSubject, ["plan"]),
 	key(RetirementFilingBasis, ["version"]),
@@ -1913,10 +1905,6 @@ export const laws = [
 	contained(on(RetirementReport, "plan"), on(RetirementPlan, "id")),
 	contained(on(RetirementReport, "artifact"), on(Artifact, "id")),
 	contained(on(PlanBalance, "account"), on(PlanAccount, "id")),
-	contained(on(RetirementSetup, "plan"), on(RetirementPlan, "id")),
-	contained(on(RetirementSetupResolution, "setup"), on(RetirementSetup, "id")),
-	contained(on(BookkeepingIssue, "business"), on(Business, "id")),
-	contained(on(BookkeepingResolution, "issue"), on(BookkeepingIssue, "id")),
 	contained(on(PlanSubject, ["plan", "business"]), on(RetirementPlan, ["id", "business"])),
 	contained(on(PlanSubject, ["subject", "business"]), on(FilingSubject, ["id", "business"])),
 	contained(on(RetirementFilingBasis, ["version", "filing"]), on(FilingVersion, ["id", "filing"])),
@@ -2239,8 +2227,6 @@ export const laws = [
 		weight: weigh("amount"),
 		within: within(0n, ref("amount"))
 	}),
-	contained(on(Review, "employee"), on(Employee, "id")),
-	contained(on(Resolution, "review"), on(Review, "id")),
 	contained(on(PolicyBinding, "business"), on(Business, "id")),
 	contained(on(PolicyBinding, "release"), on(PolicyRelease, "id")),
 	contained(on(EmployerRateNotice, "business"), on(Business, "id")),
@@ -2291,7 +2277,7 @@ export const laws = [
 		weight: weigh("denominator"),
 		within: within(1n, ref("denominator"))
 	}),
-	mirrors(on(TaxBand, ["schedule", "span"]), on(RateSchedule, ["id", "domain"])),
+	mirrors(on(TaxBand, ["schedule", "wages"]), on(RateSchedule, ["id", "domain"])),
 	capacity(on(select(TaxBand, { role: "Excess" }), "id"), {
 		from: on(TaxBand, "id"),
 		weight: weigh("numerator"),
@@ -2491,12 +2477,6 @@ export const laws = [
 		on(PaymentReconciliation, ["id", "business", "account", "period"])
 	),
 	contained(on(PaymentAdjustment, "reconciliation"), on(PaymentReconciliation, "id")),
-	contained(on(FinancialIssue, "business"), on(Business, "id")),
-	contained(on(FinancialIssue, "scope"), on(FinancialScope, "id")),
-	mirrors(on(select(FinancialIssue, { scope: "TaxAccount" }), "id"), on(PaymentIssue, "issue")),
-	contained(on(PaymentIssue, ["issue", "business"]), on(FinancialIssue, ["id", "business"])),
-	contained(on(PaymentIssue, ["account", "business"]), on(TaxAccount, ["id", "business"])),
-	contained(on(FinancialResolution, "issue"), on(FinancialIssue, "id")),
 	contained(on(SignedDisposition, ["revision", "account"]), on(RevisionAccount, ["revision", "account"])),
 	contained(on(CalendarCoverage, "release"), on(PolicyRelease, "id")),
 	mirrors(
@@ -2714,6 +2694,49 @@ export const laws = [
 	),
 
 	contained(on(Rejection, "submission"), on(Submission, "id")),
+	key(Rejection, ["id"]),
+	key(ContributionCancellation, ["id"]),
+	key(ReportedReceiptConversion, ["id"]),
+	key(AnnualEvidence, ["id"]),
+	key(AnnualApproval, ["id"]),
+
+	key(Statement, ["id"]),
+	StatementByText,
+	...Object.values(relations).flatMap((relation) =>
+		relation.kind === "relation" && "evidence" in relation.fields
+			? [contained(on(relation as typeof Answer, "evidence"), on(Statement, "id"))]
+			: []
+	),
+
+	questionIdKey,
+	key(Question, ["id", "business"]),
+	...questionArms,
+	...alternatives(questionIdKey, "kind", QuestionKind, {
+		Review: questionArms[0],
+		PlanSetup: questionArms[1],
+		Bookkeeping: questionArms[2],
+		TaxAccount: questionArms[3]
+	}),
+	contained(on(Question, "business"), on(Business, "id")),
+	contained(on(EmployeeQuestion, ["question", "business"]), on(Question, ["id", "business"])),
+	contained(on(EmployeeQuestion, ["employee", "business"]), on(Employee, ["id", "business"])),
+	contained(on(PlanQuestion, ["question", "business"]), on(Question, ["id", "business"])),
+	contained(on(PlanQuestion, ["plan", "business"]), on(RetirementPlan, ["id", "business"])),
+	contained(on(AccountQuestion, ["question", "business"]), on(Question, ["id", "business"])),
+	contained(on(AccountQuestion, ["account", "business"]), on(TaxAccount, ["id", "business"])),
+	key(Answer, ["id"]),
+	key(Answer, ["question"]),
+	contained(on(Answer, "question"), on(Question, "id")),
+
+	key(NegativeApplication, ["revision", "account"]),
+	contained(on(NegativeApplication, ["revision", "account"]), on(PaymentAllocation, ["revision", "account"])),
+	key(DriveCopy, ["id"]),
+	key(DriveCopy, ["artifact"]),
+	key(DriveCopy, ["driveId"]),
+	key(DriveCopy, ["id", "artifact"]),
+	contained(on(DriveCopy, "artifact"), on(VerifiedArtifact, "artifact")),
+	key(PriorLocation, ["artifact", "locator", "evidence"]),
+	contained(on(PriorLocation, ["copy", "artifact"]), on(DriveCopy, ["id", "artifact"])),
 	contained(on(ImportProvenance, "artifact"), on(Artifact, "id"))
 ]
 

@@ -3,6 +3,7 @@ import * as path from "node:path"
 import { test } from "node:test"
 import { ChangeSet, query, v } from "@bjornpagen/bumbledb"
 import { Effect } from "effect"
+import { statementWriter } from "../src/commands.ts"
 import { parseCalendarDate } from "../src/core/time.ts"
 import { mintId } from "../src/core/values.ts"
 import { ensureFilings } from "../src/filing-coverage.ts"
@@ -16,7 +17,7 @@ import { rows } from "../src/queries.ts"
 import { Ledger } from "../src/runtime.ts"
 import { formPolicy, forms } from "../src/schema/vocabulary.ts"
 import * as S from "../src/schema.ts"
-import { apply, withHistory } from "./native-history.ts"
+import { apply, say, withHistory } from "./native-history.ts"
 
 test("reviewed calendar grids cover leap years and authority-specific observed holidays; gaps refuse natively", async () => {
 	const evidence = "Synthetic calendar qualification, not live policy"
@@ -58,10 +59,10 @@ test("reviewed calendar grids cover leap years and authority-specific observed h
 			const release = yield* mintId
 			const draft = yield* ChangeSet.builder(S.ledger)
 			yield* draft.insert(S.PolicyRelease, [
-				{ id: release, sha256: "synthetic-calendar", title: evidence, evidence, recordedAt: 0n }
+				{ id: release, sha256: "synthetic-calendar", title: evidence, evidence: say(evidence) }
 			])
-			yield* installCalendarFacts(draft, release, federal)
-			yield* installCalendarFacts(draft, release, texas)
+			yield* installCalendarFacts(draft, statementWriter(draft), release, federal)
+			yield* installCalendarFacts(draft, statementWriter(draft), release, texas)
 			assert.equal((yield* apply(history, yield* draft.finish())).outcome.kind, "committed")
 			const snapshot = yield* history.snapshot({ consistency: { kind: "latest" } })
 			for (const [authority, from, expected] of [
@@ -93,7 +94,9 @@ test("reviewed calendar grids cover leap years and authority-specific observed h
 			const removed = calendar.days.find((row) => row.span.start === parseCalendarDate("2024-02-29"))
 			assert.ok(removed)
 			const gap = yield* ChangeSet.builder(S.ledger)
-			yield* gap.delete(S.BusinessDay, [{ release, authority: "FederalDC", ...removed }])
+			yield* gap.delete(S.BusinessDay, [
+				{ release, authority: "FederalDC", ...removed, evidence: say(removed.evidence) }
+			])
 			assert.equal((yield* apply(history, yield* gap.finish())).outcome.kind, "invariant-rejected")
 			assert.deepEqual(
 				(yield* history.snapshot({ consistency: { kind: "latest" } })).stateStamp,
@@ -107,11 +110,10 @@ test("reviewed calendar grids cover leap years and authority-specific observed h
 					name: "Calendar enrollment",
 					ein: "00-0000055",
 					state: "TX",
-					timeZone: "UTC",
-					recordedAt: 0n
+					timeZone: "UTC"
 				}
 			])
-			yield* setup.insert(S.PolicyBinding, [{ business, release, evidence }])
+			yield* setup.insert(S.PolicyBinding, [{ business, release, evidence: say(evidence) }])
 			for (const form of forms.filter((form) => formPolicy[form].due !== "RecordedEvent"))
 				yield* setup.insert(S.FilingRule, [
 					{
@@ -121,7 +123,7 @@ test("reviewed calendar grids cover leap years and authority-specific observed h
 						authority: formPolicy[form].authority,
 						periodKind: formPolicy[form].period,
 						dueRule: "FollowingMonthEnd",
-						evidence
+						evidence: say(evidence)
 					}
 				])
 			assert.equal((yield* apply(history, yield* setup.finish())).outcome.kind, "committed")

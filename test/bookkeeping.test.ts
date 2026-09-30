@@ -18,7 +18,7 @@ import { Ledger, latest } from "../src/runtime.ts"
 import * as S from "../src/schema.ts"
 import { workRegister } from "../src/work.ts"
 import { refusalCode, resultId } from "./assertions.ts"
-import { apply, atTime, withHistory } from "./native-history.ts"
+import { apply, atTime, say, withHistory } from "./native-history.ts"
 import { setupPayroll } from "./payroll-fixture.ts"
 
 const evidence = "Synthetic bookkeeping evidence"
@@ -60,11 +60,11 @@ test("one Mercury payment funds a distribution and an after-tax contribution onc
 					kind: "Annual",
 					plan,
 					year: 2026,
-					deferralLimit: "2400000",
-					additionsLimit: "7000000",
-					compensationCap: "35000000",
-					outsideDeferrals: "0",
-					outsideAdditions: "0",
+					deferralLimit: "24000.00",
+					additionsLimit: "70000.00",
+					compensationCap: "350000.00",
+					outsideDeferrals: "0.00",
+					outsideAdditions: "0.00",
 					otherPlans: false,
 					outsideAssets: false
 				})
@@ -72,22 +72,22 @@ test("one Mercury payment funds a distribution and an after-tax contribution onc
 					kind: "BankMovement",
 					direction: "Outflow",
 					paidOn: date,
-					amount: "500000",
+					amount: "5000.00",
 					reference: "synthetic-mercury-1"
 				}
 				const movement = receiptId(yield* record(bank))
 				assert.equal(receiptId(yield* record(bank)), movement)
-				const distribution = receiptId(yield* record({ kind: "Distribution", movement, amount: "500000" }))
+				const distribution = receiptId(yield* record({ kind: "Distribution", movement, amount: "5000.00" }))
 				const contribution = receiptId(
 					yield* record({
 						kind: "Contribution",
 						plan,
 						year: 2026,
 						source: "EmployeeAfterTax",
-						amount: "500000"
+						amount: "5000.00"
 					})
 				)
-				yield* record({ kind: "FundContribution", contribution, movement, distribution, amount: "500000" })
+				yield* record({ kind: "FundContribution", contribution, movement, distribution, amount: "5000.00" })
 				const before = yield* latest
 				assert.equal((yield* relationRows(before, S.Wage)).length, 0)
 				assert.equal(
@@ -97,7 +97,7 @@ test("one Mercury payment funds a distribution and an after-tax contribution onc
 				assert.equal((yield* distributionPosition(before, business, 2026)).distributed, 500000n)
 				assert.equal((yield* retirementPosition(before, plan, 2026)).afterTax, 500000n)
 				assert.equal(
-					refusalCode(yield* Effect.result(record({ kind: "Distribution", movement, amount: "1" }))),
+					refusalCode(yield* Effect.result(record({ kind: "Distribution", movement, amount: "0.01" }))),
 					"invariant-rejected"
 				)
 				const received = receiptId(
@@ -110,9 +110,9 @@ test("one Mercury payment funds a distribution and an after-tax contribution onc
 						receivedOn: date,
 						year: 2026,
 						source: "EmployeeAfterTax",
-						amount: "500000",
-						allocations: [{ id: contribution, amount: "500000" }],
-						conversion: { fromAccount, toAccount, convertedOn: date, amount: "500003", principal: "500000" }
+						amount: "5000.00",
+						allocations: [{ id: contribution, amount: "5000.00" }],
+						conversion: { fromAccount, toAccount, convertedOn: date, amount: "5000.03", principal: "5000.00" }
 					})
 				)
 				const snapshot = yield* latest
@@ -129,10 +129,10 @@ test("one Mercury payment funds a distribution and an after-tax contribution onc
 					"stages never consume contribution capacity again"
 				)
 				const work = (yield* workRegister(snapshot, business, parseCalendarDate(date))).work
-				assert.equal(work.find((r) => r.id === `conversion/${received}`)?.completion, "Complete")
-				assert.equal(work.find((r) => r.id === `conversion/${received}`)?.blocks, "None")
+				assert.equal(work.find((r) => r.id === `after-tax-conversion/${received}`)?.status, "Complete")
+				assert.equal(work.find((r) => r.id === `after-tax-conversion/${received}`)?.gates, "None")
 				const bindingDraft = yield* ChangeSet.builder(S.ledger)
-				yield* bindingDraft.insert(S.PolicyBinding, [{ business, release, evidence }])
+				yield* bindingDraft.insert(S.PolicyBinding, [{ business, release, evidence: say(evidence) }])
 				assert.equal((yield* apply(history, yield* bindingDraft.finish())).outcome.kind, "committed")
 				const filing = resultId(
 					yield* expectRetirementFiling({
@@ -151,24 +151,24 @@ test("one Mercury payment funds a distribution and an after-tax contribution onc
 				assert.equal(
 					(yield* workRegister(yield* latest, business, parseCalendarDate(date))).work.find(
 						(r) => r.id === filing
-					)?.action,
-					"filings submit"
+					)?.next.op,
+					"filings.submit"
 				)
 				const conversion = (yield* relationRows(yield* latest, S.RothConversion))[0]
 				assert.ok(conversion)
-				yield* record({ kind: "SuppliedTax", conversion: conversion.id, field: "Taxable", amount: "3" })
+				yield* record({ kind: "SuppliedTax", conversion: conversion.id, field: "Taxable", amount: "0.03" })
 				assert.equal(
 					(yield* workRegister(yield* latest, business, parseCalendarDate(date))).work.find(
 						(r) => r.id === filing
-					)?.action,
-					"filings prepare"
+					)?.next.op,
+					"filings.prepare"
 				)
 				yield* record({ kind: "DistributionReview", year: 2026 })
 				assert.equal((yield* distributionPosition(yield* latest, business, 2026)).reviewed, true)
 				const refund = receiptId(
-					yield* record({ ...bank, direction: "Inflow", reference: "synthetic-return-1", amount: "100" })
+					yield* record({ ...bank, direction: "Inflow", reference: "synthetic-return-1", amount: "1.00" })
 				)
-				yield* record({ kind: "DistributionReturn", distribution, movement: refund, amount: "100" })
+				yield* record({ kind: "DistributionReturn", distribution, movement: refund, amount: "1.00" })
 				const revised = yield* distributionPosition(yield* latest, business, 2026)
 				assert.equal(revised.distributed, 500000n)
 				assert.equal(revised.returned, 100n)
@@ -195,8 +195,7 @@ test("native cash constraints require Mercury identities, reject duplicates and 
 				direction: "Outflow" as const,
 				paidOn: parseCalendarDate(date),
 				amount: 100n,
-				evidence,
-				recordedAt: 0n
+				evidence: say(evidence)
 			}
 			const missing = yield* ChangeSet.builder(S.ledger)
 			yield* missing.insert(S.BankMovement, [cash])
@@ -247,18 +246,18 @@ test("annual inputs never roll forward; observed excess and wrong-source receipt
 						plan,
 						year: 2026,
 						source: "EmployeeAfterTax",
-						amount: "1000"
+						amount: "10.00"
 					})
 				)
 				yield* record({
 					kind: "Annual",
 					plan,
 					year: 2026,
-					deferralLimit: "2400000",
-					additionsLimit: "7000000",
-					compensationCap: "35000000",
-					outsideDeferrals: "0",
-					outsideAdditions: "0",
+					deferralLimit: "24000.00",
+					additionsLimit: "70000.00",
+					compensationCap: "350000.00",
+					outsideDeferrals: "0.00",
+					outsideAdditions: "0.00",
 					otherPlans: false,
 					outsideAssets: false
 				})
@@ -291,14 +290,14 @@ test("annual inputs never roll forward; observed excess and wrong-source receipt
 					account,
 					year: 2026,
 					source: "EmployeeRothDeferral",
-					amount: "1000",
-					allocations: [{ id: contribution, amount: "1000" }]
+					amount: "10.00",
+					allocations: [{ id: contribution, amount: "10.00" }]
 				})
 				const snapshot = yield* latest
 				assert.equal((yield* relationRows(snapshot, S.PlanReceipt)).length, 1)
 				assert.ok(
 					(yield* workRegister(snapshot, business, parseCalendarDate(date))).work.some(
-						(r) => r.id.startsWith("receipt/") && r.completion === "Open"
+						(r) => r.id.startsWith("receipt-discrepancy/") && r.status === "Open"
 					)
 				)
 			})
@@ -336,7 +335,7 @@ test("partial receipts survive year end, late allocation reconciles them, and su
 						plan,
 						year: 2026,
 						source: "EmployeeAfterTax",
-						amount: "1000"
+						amount: "10.00"
 					})
 				)
 				const first = receiptId(
@@ -348,8 +347,8 @@ test("partial receipts survive year end, late allocation reconciles them, and su
 						account,
 						year: 2026,
 						source: "EmployeeAfterTax",
-						amount: "400",
-						allocations: [{ id: contribution, amount: "400" }]
+						amount: "4.00",
+						allocations: [{ id: contribution, amount: "4.00" }]
 					})
 				)
 				const second = receiptId(
@@ -361,14 +360,17 @@ test("partial receipts survive year end, late allocation reconciles them, and su
 						account,
 						year: 2026,
 						source: "EmployeeAfterTax",
-						amount: "600",
+						amount: "6.00",
 						allocations: []
 					})
 				)
 				const future = parseCalendarDate("2027-01-02")
 				let register = yield* workRegister(yield* latest, business, future)
-				assert.equal(register.work.find((r) => r.id === `after-tax-receipt/${contribution}`)?.amount, 600n)
-				assert.equal(register.work.find((r) => r.id === `conversion/${first}`)?.completion, "Open")
+				assert.equal(
+					register.work.find((r) => r.id === `after-tax-plan-receipt/${contribution}`)?.amount,
+					600n
+				)
+				assert.equal(register.work.find((r) => r.id === `after-tax-conversion/${first}`)?.status, "Open")
 				assert.equal(
 					refusalCode(
 						yield* Effect.result(
@@ -380,22 +382,22 @@ test("partial receipts survive year end, late allocation reconciles them, and su
 				yield* record({
 					kind: "AllocateReceipt",
 					receipt: second,
-					allocations: [{ id: contribution, amount: "600" }]
+					allocations: [{ id: contribution, amount: "6.00" }]
 				})
 				assert.equal((yield* relationRows(yield* latest, S.PlanReceiptDate)).length, 0)
 				register = yield* workRegister(yield* latest, business, future)
 				assert.equal(
-					register.work.find((r) => r.id === `after-tax-receipt/${contribution}`)?.completion,
+					register.work.find((r) => r.id === `after-tax-plan-receipt/${contribution}`)?.status,
 					"Complete"
 				)
-				assert.equal(register.work.find((r) => r.id === `conversion/${second}`)?.completion, "Open")
+				assert.equal(register.work.find((r) => r.id === `after-tax-conversion/${second}`)?.status, "Open")
 				assert.equal(
 					refusalCode(
 						yield* Effect.result(
 							record({
 								kind: "AllocateReceipt",
 								receipt: second,
-								allocations: [{ id: contribution, amount: "601" }]
+								allocations: [{ id: contribution, amount: "6.01" }]
 							})
 						)
 					),
@@ -418,8 +420,8 @@ test("partial receipts survive year end, late allocation reconciles them, and su
 				)
 				yield* record({ kind: "ConfirmReportedConversion", receipt: first, report: supplied })
 				register = yield* workRegister(yield* latest, business, future)
-				assert.equal(register.work.find((r) => r.id === `conversion/${first}`)?.completion, "Complete")
-				assert.equal(register.work.find((r) => r.id === `conversion/${second}`)?.completion, "Open")
+				assert.equal(register.work.find((r) => r.id === `after-tax-conversion/${first}`)?.status, "Complete")
+				assert.equal(register.work.find((r) => r.id === `after-tax-conversion/${second}`)?.status, "Open")
 				assert.equal((yield* relationRows(yield* latest, S.RothConversion)).length, 0)
 				const to = receiptId(
 					yield* record({
@@ -441,8 +443,8 @@ test("partial receipts survive year end, late allocation reconciles them, and su
 								fromAccount: account,
 								toAccount: to,
 								convertedOn: date,
-								amount: "400",
-								receipts: [{ id: first, amount: "400" }]
+								amount: "4.00",
+								receipts: [{ id: first, amount: "4.00" }]
 							})
 						)
 					),

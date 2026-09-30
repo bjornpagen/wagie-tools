@@ -1,21 +1,19 @@
 import type { Fact, Uuid } from "@bjornpagen/bumbledb"
 import { Effect, Schema } from "effect"
-import { businessCommand } from "./commands.ts"
+import { businessCommand, type Note } from "./commands.ts"
 import { civilDaySpan, epochDay, periodSpan, toCalendarDate } from "./core/time.ts"
 import { mintId, Refusal } from "./core/values.ts"
 import { followingBusinessDay, nominalDeadline } from "./policy/calendar.ts"
 import { currentRevisions, relationRows, rows } from "./queries.ts"
 import { type Draft, parseStrict, type Snapshot } from "./runtime.ts"
-import { commandFields, Day, Id, inputFields, YearNumber } from "./schema/input.ts"
+import { commandFields, Id, inputFields, YearNumber } from "./schema/input.ts"
 import { formPolicy, forms, retirementForms } from "./schema/vocabulary.ts"
 import * as S from "./schema.ts"
 
 export const FilingEnsureInput = Schema.Struct({
 	...commandFields,
 	throughYear: YearNumber,
-	enrollment: Schema.optional(
-		Schema.Struct(inputFields(S.FilingRequirement, ["startsOn", "evidence"], { startsOn: Day }))
-	)
+	enrollment: Schema.optional(Schema.Struct(inputFields(S.FilingRequirement, ["startsOn", "evidence"])))
 })
 type Enrollment = (typeof FilingEnsureInput.Type)["enrollment"]
 
@@ -26,6 +24,7 @@ type Enrollment = (typeof FilingEnsureInput.Type)["enrollment"]
 export const ensureFilingFacts = (
 	snapshot: Snapshot,
 	draft: Draft,
+	note: Note,
 	options: {
 		business: Uuid
 		throughYear: number
@@ -111,7 +110,7 @@ export const ensureFilingFacts = (
 					form,
 					subjectKind: formPolicy[form].subject,
 					startsOn: options.enrollment.startsOn,
-					evidence: options.enrollment.evidence
+					evidence: yield* note(options.enrollment.evidence)
 				}
 				yield* draft.insert(S.FilingRequirement, [requirement])
 			}
@@ -235,8 +234,8 @@ export const ensureFilings = (payload: unknown) =>
 			business,
 			action: "filings ensure",
 			input: payload,
-			plan: ({ snapshot, draft }) =>
-				ensureFilingFacts(snapshot, draft, {
+			plan: ({ snapshot, draft, note }) =>
+				ensureFilingFacts(snapshot, draft, note, {
 					business,
 					throughYear: input.throughYear,
 					enrollment: input.enrollment
@@ -244,29 +243,27 @@ export const ensureFilings = (payload: unknown) =>
 		})
 	})
 
+export const ExpectRetirementInput = Schema.Struct({
+	...commandFields,
+	plan: Id,
+	...inputFields(S.Filing, ["form", "opensOn", "dueOn", "evidence"], {
+		form: Schema.Literals(retirementForms)
+	}),
+	year: YearNumber
+})
+
 export const expectRetirementFiling = (payload: unknown) =>
 	Effect.gen(function* () {
-		const input = parseStrict(
-			Schema.Struct({
-				...commandFields,
-				plan: Id,
-				...inputFields(S.Filing, ["form", "opensOn", "dueOn", "evidence"], {
-					form: Schema.Literals(retirementForms),
-					opensOn: Day,
-					dueOn: Day
-				}),
-				year: YearNumber
-			}),
-			payload
-		)
+		const input = parseStrict(ExpectRetirementInput, payload)
 		const business = input.business
 		return yield* businessCommand({
 			request: input.request,
 			business,
 			action: "filings expect-retirement",
 			input: payload,
-			plan: ({ snapshot, draft }) =>
+			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
+					const evidence = yield* note(input.evidence)
 					const plan = (yield* relationRows(snapshot, S.RetirementPlan)).find(
 						(r) => r.id === input.plan && r.business === business
 					)
@@ -306,7 +303,7 @@ export const expectRetirementFiling = (payload: unknown) =>
 								form: input.form,
 								subjectKind: "Plan",
 								startsOn: span.start,
-								evidence: input.evidence
+								evidence
 							}
 						])
 					const existingScope = (yield* relationRows(snapshot, S.FilingScope)).find(
@@ -339,7 +336,7 @@ export const expectRetirementFiling = (payload: unknown) =>
 							kind: "Original",
 							opensOn: input.opensOn,
 							dueOn: input.dueOn,
-							evidence: input.evidence
+							evidence
 						}
 					])
 					yield* draft.insert(S.OriginalFiling, [

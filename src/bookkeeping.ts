@@ -1,9 +1,10 @@
-import type { IntervalValue, Uuid } from "@bjornpagen/bumbledb"
+import type { Fact, IntervalValue, Uuid } from "@bjornpagen/bumbledb"
 import { Effect, Schema } from "effect"
 import { businessCommand } from "./commands.ts"
 import { civilDayPoint, epochDay, periodSpan, toCalendarDate, type UnixEpochDay } from "./core/time.ts"
 import { entityId, json, mintId, Nonblank, Refusal } from "./core/values.ts"
 import { relationRows } from "./queries.ts"
+import { askQuestion, questions } from "./questions.ts"
 import { fingerprint, parseStrict, type Snapshot } from "./runtime.ts"
 import * as S from "./schema.ts"
 
@@ -137,14 +138,8 @@ export const admitContribution = (
 					message: "Reconcile provider receipt records before authorizing more contributions"
 				})
 			)
-		const resolvedIssues = new Set(
-			(yield* relationRows(snapshot, S.BookkeepingResolution)).map((r) => r.issue)
-		)
-		if (
-			(yield* relationRows(snapshot, S.BookkeepingIssue)).some(
-				(r) => r.business === position.plan.business && !resolvedIssues.has(r.id)
-			)
-		)
+		const open = (yield* questions(snapshot, position.plan.business)).filter((q) => !q.answer)
+		if (open.some((q) => q.kind === "Bookkeeping"))
 			return yield* Effect.fail(
 				new Refusal({
 					code: "ReceiptReconciliation",
@@ -190,8 +185,7 @@ export const admitContribution = (
 				})
 			)
 		if (source === "EmployeeAfterTax") {
-			const done = new Set((yield* relationRows(snapshot, S.RetirementSetupResolution)).map((r) => r.setup))
-			if ((yield* relationRows(snapshot, S.RetirementSetup)).some((r) => r.plan === plan && !done.has(r.id)))
+			if (open.some((q) => q.kind === "PlanSetup" && q.plan === plan))
 				return yield* Effect.fail(
 					new Refusal({
 						code: "RetirementSetup",
@@ -278,137 +272,130 @@ export const retirementActivity = (snapshot: Snapshot, plan: Uuid, year: number)
 		}
 	})
 
-import { commandFields, Day, Id, inputField, inputFields, Year } from "./schema/input.ts"
+import { commandFields, Day, Id, inputField, inputFields, money } from "./schema/input.ts"
 
 const AmountLink = Schema.Struct({ id: Id, ...inputFields(S.ReceiptAllocation, ["amount"]) })
 const ConversionDetails = Schema.Struct(
-	inputFields(S.RothConversion, ["fromAccount", "toAccount", "convertedOn", "amount"], { convertedOn: Day })
+	inputFields(S.RothConversion, ["fromAccount", "toAccount", "convertedOn", "amount"])
 )
-const Operation = Schema.Union([
-	Schema.Struct({
+/** Each bookkeeping operation is one closed arm, keyed by its kind. */
+export const operations = {
+	AllocateReceipt: Schema.Struct({
 		kind: Schema.Literal("AllocateReceipt"),
 		...inputFields(S.ReceiptAllocation, ["receipt"]),
 		allocations: Schema.Array(AmountLink)
 	}),
-	Schema.Struct({
+	SuppliedReport: Schema.Struct({
 		kind: Schema.Literal("SuppliedReport"),
-		...inputFields(S.RetirementReport, ["plan", "year", "artifact", "supplied"], { year: Year })
+		...inputFields(S.RetirementReport, ["plan", "year", "artifact", "supplied"])
 	}),
-	Schema.Struct({
+	ConfirmReportedConversion: Schema.Struct({
 		kind: Schema.Literal("ConfirmReportedConversion"),
 		...inputFields(S.ReportedReceiptConversion, ["receipt", "report"])
 	}),
-	Schema.Struct({
+	CancelAuthorization: Schema.Struct({
 		kind: Schema.Literal("CancelAuthorization"),
 		...inputFields(S.ContributionCancellation, ["contribution"])
 	}),
-	Schema.Struct({
+	Plan: Schema.Struct({
 		kind: Schema.Literal("Plan"),
 		...inputFields(S.RetirementPlan, ["employee", "name", "ein"])
 	}),
-	Schema.Struct({
+	Account: Schema.Struct({
 		kind: Schema.Literal("Account"),
 		...inputFields(S.PlanAccount, ["plan", "provider", "reference"]),
 		accountKind: inputField(S.PlanAccount.fields.kind)
 	}),
-	Schema.Struct({
+	Annual: Schema.Struct({
 		kind: Schema.Literal("Annual"),
-		...inputFields(
-			S.RetirementAnnual,
-			[
-				"plan",
-				"year",
-				"deferralLimit",
-				"additionsLimit",
-				"compensationCap",
-				"outsideDeferrals",
-				"outsideAdditions",
-				"otherPlans",
-				"outsideAssets"
-			],
-			{ year: Year }
-		)
+		...inputFields(S.RetirementAnnual, [
+			"plan",
+			"year",
+			"deferralLimit",
+			"additionsLimit",
+			"compensationCap",
+			"outsideDeferrals",
+			"outsideAdditions",
+			"otherPlans",
+			"outsideAssets"
+		])
 	}),
-	Schema.Struct({
+	BankMovement: Schema.Struct({
 		kind: Schema.Literal("BankMovement"),
-		...inputFields(S.BankMovement, ["direction", "paidOn", "amount"], { paidOn: Day }),
+		...inputFields(S.BankMovement, ["direction", "paidOn", "amount"]),
 		...inputFields(S.MercuryTransaction, ["reference"])
 	}),
-	Schema.Struct({
+	Distribution: Schema.Struct({
 		kind: Schema.Literal("Distribution"),
 		...inputFields(S.CashAllocation, ["movement", "amount"])
 	}),
-	Schema.Struct({
+	DistributionReturn: Schema.Struct({
 		kind: Schema.Literal("DistributionReturn"),
 		...inputFields(S.DistributionReturn, ["distribution", "amount"]),
 		...inputFields(S.CashAllocation, ["movement"])
 	}),
-	Schema.Struct({
+	DistributionReview: Schema.Struct({
 		kind: Schema.Literal("DistributionReview"),
-		...inputFields(S.DistributionReview, ["year"], { year: Year })
+		...inputFields(S.DistributionReview, ["year"])
 	}),
-	Schema.Struct({
+	PayrollCash: Schema.Struct({
 		kind: Schema.Literal("PayrollCash"),
 		...inputFields(S.PayrollTransaction, ["movement", "wage"]),
 		...inputFields(S.CashAllocation, ["amount"])
 	}),
-	Schema.Struct({
-		kind: Schema.Literal("Contribution"),
-		...inputFields(S.RetirementContribution, ["plan", "year", "source", "amount"], {
-			year: Year,
-			source: Schema.Literal("EmployeeRothDeferral")
+	Contribution: Schema.Union([
+		Schema.Struct({
+			kind: Schema.Literal("Contribution"),
+			...inputFields(S.RetirementContribution, ["plan", "year", "source", "amount"], {
+				source: Schema.Literal("EmployeeRothDeferral")
+			}),
+			...inputFields(S.ContributionDeduction, ["wage"])
 		}),
-		...inputFields(S.ContributionDeduction, ["wage"])
-	}),
-	Schema.Struct({
-		kind: Schema.Literal("Contribution"),
-		...inputFields(S.RetirementContribution, ["plan", "year", "source", "amount"], {
-			year: Year,
-			source: Schema.Literal("EmployeeAfterTax")
+		Schema.Struct({
+			kind: Schema.Literal("Contribution"),
+			...inputFields(S.RetirementContribution, ["plan", "year", "source", "amount"], {
+				source: Schema.Literal("EmployeeAfterTax")
+			})
 		})
-	}),
-	Schema.Struct({
+	]),
+	AuthorizeAfterTax: Schema.Struct({
 		kind: Schema.Literal("AuthorizeAfterTax"),
 		...inputFields(S.RetirementContribution, ["plan", "amount"])
 	}),
-	Schema.Struct({
+	FundContribution: Schema.Struct({
 		kind: Schema.Literal("FundContribution"),
 		...inputFields(S.ContributionFunding, ["contribution", "amount"]),
 		...inputFields(S.CashAllocation, ["movement"]),
 		distribution: Schema.optional(Id)
 	}),
-	Schema.Struct({
+	ProviderReceipt: Schema.Struct({
 		kind: Schema.Literal("ProviderReceipt"),
 		...inputFields(S.ProviderOperation, ["plan", "provider", "reference"]),
-		...inputFields(S.PlanReceipt, ["account", "year", "source", "amount"], { year: Year }),
+		...inputFields(S.PlanReceipt, ["account", "year", "source", "amount"]),
 		receivedOn: Schema.optional(Day),
 		allocations: Schema.Array(AmountLink),
 		conversion: Schema.optional(
-			Schema.Struct({ ...ConversionDetails.fields, principal: inputField(S.ConversionReceipt.fields.amount) })
+			Schema.Struct({ ...ConversionDetails.fields, principal: money(S.ConversionReceipt.fields.amount) })
 		)
 	}),
-	Schema.Struct({
+	Conversion: Schema.Struct({
 		kind: Schema.Literal("Conversion"),
 		...inputFields(S.ProviderOperation, ["plan", "provider", "reference"]),
 		...ConversionDetails.fields,
 		receipts: Schema.Array(AmountLink)
 	}),
-	Schema.Struct({
+	SuppliedTax: Schema.Struct({
 		kind: Schema.Literal("SuppliedTax"),
 		...inputFields(S.SuppliedConversionTax, ["conversion", "field", "amount"], {
 			field: Schema.Literals(["Basis", "Taxable"])
 		})
 	}),
-	Schema.Struct({
+	Balance: Schema.Struct({
 		kind: Schema.Literal("Balance"),
-		...inputFields(S.PlanBalance, ["account", "asOf", "amount"], { asOf: Day })
-	}),
-	Schema.Struct({
-		kind: Schema.Literal("ResolveSetup"),
-		...inputFields(S.RetirementSetupResolution, ["setup"])
-	}),
-	Schema.Struct({ kind: Schema.Literal("ResolveIssue"), ...inputFields(S.BookkeepingResolution, ["issue"]) })
-])
+		...inputFields(S.PlanBalance, ["account", "asOf", "amount"])
+	})
+}
+const Operation = Schema.Union(Object.values(operations))
 export const BookkeepingInput = Schema.Struct({
 	...commandFields,
 	evidence: Nonblank,
@@ -426,10 +413,10 @@ export const recordBookkeeping = (payload: unknown) =>
 			business,
 			action: "bookkeeping record",
 			input: payload,
-			plan: ({ snapshot, draft, recordingDay, recordedAt }) =>
+			plan: ({ snapshot, draft, recordingDay, note }) =>
 				Effect.gen(function* () {
 					const op = input.operation,
-						evidence = input.evidence
+						evidence = yield* note(input.evidence)
 					const plans = (yield* relationRows(snapshot, S.RetirementPlan)).filter(
 						(r) => r.business === business
 					)
@@ -456,13 +443,13 @@ export const recordBookkeeping = (payload: unknown) =>
 							accounts.find((r) => r.id === id && plans.some((p) => p.id === r.plan)),
 							"Select this plan's account"
 						)
-					const actualDay = (value: UnixEpochDay) => {
+					const actualDay = (value: bigint): UnixEpochDay => {
 						if (value > recordingDay)
 							throw new Refusal({
 								code: "FutureObservation",
 								message: "Record the actual date after the event"
 							})
-						return value
+						return epochDay(value)
 					}
 					const id = yield* mintId
 					const allocate = (
@@ -482,7 +469,7 @@ export const recordBookkeeping = (payload: unknown) =>
 							if (old) return old.id
 							const operationId = yield* mintId
 							yield* draft.insert(S.ProviderOperation, [
-								{ id: operationId, plan, provider, reference, evidence, recordedAt }
+								{ id: operationId, plan, provider, reference, evidence }
 							])
 							return operationId
 						})
@@ -516,8 +503,7 @@ export const recordBookkeeping = (payload: unknown) =>
 									toAccount: to.id,
 									convertedOn,
 									amount: positive(details.amount),
-									evidence,
-									recordedAt
+									evidence
 								}
 							])
 							yield* draft.insert(
@@ -559,8 +545,7 @@ export const recordBookkeeping = (payload: unknown) =>
 									year: op.year,
 									artifact: op.artifact,
 									supplied: op.supplied,
-									evidence,
-									recordedAt
+									evidence
 								}
 							])
 							break
@@ -573,7 +558,7 @@ export const recordBookkeeping = (payload: unknown) =>
 								"Select this plan's receipt"
 							)
 							yield* draft.insert(S.ReportedReceiptConversion, [
-								{ receipt: receipt.id, report: op.report, plan: receipt.plan, evidence, recordedAt }
+								{ id, receipt: receipt.id, report: op.report, plan: receipt.plan, evidence }
 							])
 							break
 						}
@@ -583,7 +568,7 @@ export const recordBookkeeping = (payload: unknown) =>
 								"Select an unspent authorization"
 							)
 							yield* draft.insert(S.ContributionCancellation, [
-								{ contribution: contribution.id, evidence, recordedAt }
+								{ id, contribution: contribution.id, evidence }
 							])
 							break
 						}
@@ -597,7 +582,7 @@ export const recordBookkeeping = (payload: unknown) =>
 							)
 							yield* draft.insert(S.Owner, [{ business, employee: employee.id, evidence }])
 							yield* draft.insert(S.RetirementPlan, [
-								{ id, business, employee: employee.id, name: op.name, ein: op.ein, evidence, recordedAt }
+								{ id, business, employee: employee.id, name: op.name, ein: op.ein, evidence }
 							])
 							break
 						}
@@ -631,8 +616,7 @@ export const recordBookkeeping = (payload: unknown) =>
 									outsideAdditions: op.outsideAdditions,
 									otherPlans: op.otherPlans,
 									outsideAssets: op.outsideAssets,
-									evidence,
-									recordedAt
+									evidence
 								}
 							])
 							break
@@ -649,20 +633,15 @@ export const recordBookkeeping = (payload: unknown) =>
 									movement.direction === op.direction
 								)
 									return { id: movement.id, kind: op.kind }
-								yield* draft.insert(S.BookkeepingIssue, [
-									{
-										id,
-										business,
-										detail: json({
-											reason: "Conflicting bank observation",
-											existing: movement.id,
-											operation: op
-										}),
-										evidence,
-										recordedAt
-									}
-								])
-								return { kind: "ReconciliationRequired", issue: id }
+								const issue = yield* askQuestion(
+									draft,
+									note,
+									business,
+									{ kind: "Bookkeeping" },
+									`Conflicting bank observation of Mercury ${op.reference}: recorded movement ${movement.id} differs from ${json(op)}`,
+									input.evidence
+								)
+								return { kind: "ReconciliationRequired", issue }
 							}
 							yield* draft.insert(S.BankMovement, [
 								{
@@ -671,8 +650,7 @@ export const recordBookkeeping = (payload: unknown) =>
 									direction: op.direction,
 									paidOn: actualDay(op.paidOn),
 									amount: positive(op.amount),
-									evidence,
-									recordedAt
+									evidence
 								}
 							])
 							yield* draft.insert(S.MercuryTransaction, [{ movement: id, reference: op.reference }])
@@ -682,7 +660,7 @@ export const recordBookkeeping = (payload: unknown) =>
 									issuer: "Mercury",
 									scope: business,
 									value: op.reference,
-									sourceText: evidence
+									sourceText: input.evidence
 								}
 							])
 							break
@@ -704,8 +682,7 @@ export const recordBookkeeping = (payload: unknown) =>
 									owner: owner.employee,
 									paidOn: movement.paidOn,
 									amount,
-									evidence,
-									recordedAt
+									evidence
 								}
 							])
 							break
@@ -729,8 +706,7 @@ export const recordBookkeeping = (payload: unknown) =>
 									business,
 									amount,
 									paidOn: movement.paidOn,
-									evidence,
-									recordedAt
+									evidence
 								}
 							])
 							break
@@ -738,7 +714,7 @@ export const recordBookkeeping = (payload: unknown) =>
 						case "DistributionReview": {
 							const position = yield* distributionPosition(snapshot, business, Number(op.year))
 							yield* draft.insert(S.DistributionReview, [
-								{ id, business, year: op.year, digest: position.digest, evidence, recordedAt }
+								{ id, business, year: op.year, digest: position.digest, evidence }
 							])
 							break
 						}
@@ -785,8 +761,7 @@ export const recordBookkeeping = (payload: unknown) =>
 									amount,
 									source: op.source,
 									origin: "Observed",
-									evidence,
-									recordedAt
+									evidence
 								}
 							])
 							break
@@ -814,8 +789,7 @@ export const recordBookkeeping = (payload: unknown) =>
 									amount,
 									source: "EmployeeAfterTax",
 									origin: "Authorized",
-									evidence,
-									recordedAt
+									evidence
 								}
 							])
 							yield* draft.insert(S.ContributionAuthorization, [
@@ -882,8 +856,7 @@ export const recordBookkeeping = (payload: unknown) =>
 									year: op.year,
 									observedOn: recordingDay,
 									amount: positive(op.amount),
-									evidence,
-									recordedAt
+									evidence
 								}
 							])
 							yield* draft.insert(
@@ -931,30 +904,9 @@ export const recordBookkeeping = (payload: unknown) =>
 									account: account.id,
 									asOf: actualDay(op.asOf),
 									amount: op.amount,
-									evidence,
-									recordedAt
+									evidence
 								}
 							])
-							break
-						}
-						case "ResolveSetup": {
-							const setup = yield* required(
-								(yield* relationRows(snapshot, S.RetirementSetup)).find(
-									(r) => r.id === op.setup && plans.some((p) => p.id === r.plan)
-								),
-								"Select this plan's setup item"
-							)
-							yield* draft.insert(S.RetirementSetupResolution, [{ setup: setup.id, evidence, recordedAt }])
-							break
-						}
-						case "ResolveIssue": {
-							const issue = yield* required(
-								(yield* relationRows(snapshot, S.BookkeepingIssue)).find(
-									(r) => r.id === op.issue && r.business === business
-								),
-								"Select this business's issue"
-							)
-							yield* draft.insert(S.BookkeepingResolution, [{ issue: issue.id, evidence, recordedAt }])
 							break
 						}
 					}
@@ -964,29 +916,78 @@ export const recordBookkeeping = (payload: unknown) =>
 	})
 
 /** Filing evidence freezes exact events and supplied facts, never calculated tax boxes. */
+/** The frozen basis of a retirement filing: every event fact for the plan's
+ * year, in a canonical order, so the digest depends on the facts alone. */
+export const filingDigestOf = (activity: {
+	receipts: readonly Fact<typeof S.PlanReceipt>[]
+	receiptDates: readonly Fact<typeof S.PlanReceiptDate>[]
+	receiptAllocations: readonly Fact<typeof S.ReceiptAllocation>[]
+	conversions: readonly Fact<typeof S.RothConversion>[]
+	conversionReceipts: readonly Fact<typeof S.ConversionReceipt>[]
+	reportedConversions: readonly Fact<typeof S.ReportedReceiptConversion>[]
+	suppliedTax: readonly Fact<typeof S.SuppliedConversionTax>[]
+	suppliedReports: readonly Fact<typeof S.RetirementReport>[]
+}) => {
+	const canonical = <T>(rows: readonly T[]) => [...rows].sort((a, b) => json(a).localeCompare(json(b)))
+	return fingerprint({
+		receipts: canonical(activity.receipts),
+		receiptDates: canonical(activity.receiptDates),
+		receiptAllocations: canonical(activity.receiptAllocations),
+		conversions: canonical(activity.conversions),
+		conversionReceipts: canonical(activity.conversionReceipts),
+		reportedConversions: canonical(activity.reportedConversions),
+		suppliedTax: canonical(activity.suppliedTax),
+		suppliedReports: canonical(activity.suppliedReports)
+	})
+}
+
+/** Which rows of a plan's year enter its filing basis; shared with the
+ * 0001 cutover, which must re-derive stored digests over migrated rows. */
+export const filingActivityOf = (
+	plan: Uuid,
+	year: number,
+	rows: {
+		receipts: readonly Fact<typeof S.PlanReceipt>[]
+		receiptDates: readonly Fact<typeof S.PlanReceiptDate>[]
+		receiptAllocations: readonly Fact<typeof S.ReceiptAllocation>[]
+		conversions: readonly Fact<typeof S.RothConversion>[]
+		conversionReceipts: readonly Fact<typeof S.ConversionReceipt>[]
+		reportedConversions: readonly Fact<typeof S.ReportedReceiptConversion>[]
+		suppliedTax: readonly Fact<typeof S.SuppliedConversionTax>[]
+		suppliedReports: readonly Fact<typeof S.RetirementReport>[]
+		contributions: readonly Fact<typeof S.RetirementContribution>[]
+	}
+) => {
+	const span = periodSpan(year, "Year")
+	const receipts = rows.receipts.filter((r) => r.plan === plan && r.year === BigInt(year))
+	const conversions = rows.conversions.filter(
+		(r) => r.plan === plan && r.convertedOn >= span.start && r.convertedOn < span.end
+	)
+	const contributionIds = new Set(
+		rows.contributions.filter((r) => r.plan === plan && r.year === BigInt(year)).map((r) => r.id)
+	)
+	const conversionIds = new Set(conversions.map((r) => r.id)),
+		receiptIds = new Set(receipts.map((r) => r.id))
+	return {
+		receipts,
+		receiptDates: rows.receiptDates.filter((r) => receiptIds.has(r.receipt)),
+		receiptAllocations: rows.receiptAllocations.filter(
+			(r) => contributionIds.has(r.contribution) || receiptIds.has(r.receipt)
+		),
+		conversions,
+		conversionReceipts: rows.conversionReceipts.filter(
+			(r) => conversionIds.has(r.conversion) || receiptIds.has(r.receipt)
+		),
+		reportedConversions: rows.reportedConversions.filter((r) => receiptIds.has(r.receipt)),
+		suppliedTax: rows.suppliedTax.filter((r) => conversionIds.has(r.conversion)),
+		suppliedReports: rows.suppliedReports.filter((r) => r.plan === plan && r.year === BigInt(year))
+	}
+}
+
 export const retirementFilingDigest = (snapshot: Snapshot, plan: Uuid, period: IntervalValue) =>
 	Effect.gen(function* () {
 		const activity = yield* retirementActivity(snapshot, plan, toCalendarDate(epochDay(period.start)).year)
-		const {
-			receipts,
-			receiptDates,
-			receiptAllocations,
-			conversions,
-			conversionReceipts,
-			reportedConversions,
-			suppliedTax,
-			suppliedReports
-		} = activity
-		return fingerprint({
-			receipts,
-			receiptDates,
-			receiptAllocations,
-			conversions,
-			conversionReceipts,
-			reportedConversions,
-			suppliedTax,
-			suppliedReports
-		})
+		return filingDigestOf(activity)
 	})
 export const bookkeepingReport = (snapshot: Snapshot, business: Uuid, year: number) =>
 	Effect.gen(function* () {

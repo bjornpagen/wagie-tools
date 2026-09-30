@@ -7,7 +7,7 @@ import { relationRows } from "../src/queries.ts"
 import type { LedgerHistory } from "../src/runtime.ts"
 import { annualRequirements } from "../src/schema/vocabulary.ts"
 import * as S from "../src/schema.ts"
-import { apply } from "./native-history.ts"
+import { apply, say } from "./native-history.ts"
 
 export const seedAnnualPolicies = (history: LedgerHistory, business: Uuid, release: Uuid, approve = true) =>
 	Effect.gen(function* () {
@@ -20,7 +20,7 @@ export const seedAnnualPolicies = (history: LedgerHistory, business: Uuid, relea
 		yield* draft.insert(S.Artifact, [
 			{ id: artifact, sha256: `synthetic-${artifact}`, mediaType: "text/plain" }
 		])
-		yield* draft.insert(S.VerifiedArtifact, [{ artifact, length: 1n, verifiedAt: 0n }])
+		yield* draft.insert(S.VerifiedArtifact, [{ artifact, length: 1n }])
 		const policies = []
 		for (const authority of S.Authority.handles) {
 			const calendar = calendars.find(
@@ -38,11 +38,10 @@ export const seedAnnualPolicies = (history: LedgerHistory, business: Uuid, relea
 					year: 2026n,
 					calendar: calendar.id,
 					valid: periodSpan(2026, "Year"),
-					evidence,
-					recordedAt: 0n
+					evidence: say(evidence)
 				}
 			])
-			yield* draft.insert(S.AnnualSource, [{ annual, artifact, evidence }])
+			yield* draft.insert(S.AnnualSource, [{ annual, artifact, evidence: say(evidence) }])
 			for (const kind of required.rates) {
 				const component = kind === "FUTAFullCredit" ? "FUTA" : kind === "SUTAEntry" ? "SUTA" : kind
 				let schedule = versions.find(
@@ -51,13 +50,18 @@ export const seedAnnualPolicies = (history: LedgerHistory, business: Uuid, relea
 				if (!schedule) {
 					schedule = yield* mintId
 					yield* draft.insert(S.RateSchedule, [
-						{ id: schedule, denominator: 10000n, domain: { start: 0n, end: MAX_U64 }, evidence }
+						{
+							id: schedule,
+							denominator: 10000n,
+							domain: { start: 0n, end: MAX_U64 },
+							evidence: say(evidence)
+						}
 					])
 					yield* draft.insert(S.TaxBand, [
-						{ id: yield* mintId, schedule, span: { start: 0n, end: MAX_U64 }, numerator: 0n, role: "Excess" }
+						{ id: yield* mintId, schedule, wages: { start: 0n, end: MAX_U64 }, numerator: 0n, role: "Excess" }
 					])
 				}
-				yield* draft.insert(S.PublishedRate, [{ annual, kind, schedule, artifact, evidence }])
+				yield* draft.insert(S.PublishedRate, [{ annual, kind, schedule, artifact, evidence: say(evidence) }])
 			}
 			const limits = {
 				RegularDeferral: 2400000n,
@@ -68,22 +72,26 @@ export const seedAnnualPolicies = (history: LedgerHistory, business: Uuid, relea
 				StateWageBase: 900000n
 			}
 			for (const kind of required.limits)
-				yield* draft.insert(S.PolicyLimit, [{ annual, kind, cents: limits[kind], artifact, evidence }])
+				yield* draft.insert(S.PolicyLimit, [
+					{ annual, kind, cents: limits[kind], artifact, evidence: say(evidence) }
+				])
 			for (const kind of required.evidence)
-				yield* draft.insert(S.AnnualEvidence, [{ annual, kind, artifact, evidence, recordedAt: 0n }])
+				yield* draft.insert(S.AnnualEvidence, [
+					{ id: yield* mintId, annual, kind, artifact, evidence: say(evidence) }
+				])
 			if (authority === "FederalDC")
 				yield* draft.insert(S.LookbackPeriod, [
-					{ annual, span: periodSpan(2025, "Year"), artifact, evidence }
+					{ annual, span: periodSpan(2025, "Year"), artifact, evidence: say(evidence) }
 				])
 			const approval = {
+				id: yield* mintId,
 				annual,
 				release,
 				business,
 				authority,
 				year: 2026n,
 				valid: periodSpan(2026, "Year"),
-				evidence,
-				recordedAt: 0n
+				evidence: say(evidence)
 			}
 			if (approve) yield* draft.insert(S.AnnualApproval, [approval])
 			policies.push(approval)

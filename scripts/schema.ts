@@ -15,8 +15,8 @@ const program = Effect.gen(function* () {
 		["schema.json", snapshot],
 		["schema.ts", bindings]
 	] as const) {
-		const actual = yield* io("read initial schema artifact", () =>
-			fs.readFile(new URL(`../migrations/0000-initial/${name}`, import.meta.url), "utf8")
+		const actual = yield* io("read current schema artifact", () =>
+			fs.readFile(new URL(`../migrations/0001-statements/${name}`, import.meta.url), "utf8")
 		)
 		if (actual !== expected)
 			return yield* Effect.fail(
@@ -26,7 +26,7 @@ const program = Effect.gen(function* () {
 				})
 			)
 	}
-	yield* Console.log("Canonical initial snapshot and generated bindings match the current schema")
+	yield* Console.log("Canonical current snapshot and generated bindings match the current schema")
 })
 
 NodeRuntime.runMain(program.pipe(Effect.provide(NativeRuntime.layer())))

@@ -18,10 +18,34 @@ const paidWages = query(S.ledger).rule((r) => {
 		.find({ ...wage, cash })
 })
 
-function totalBy<T>(values: readonly T[], key: (row: T) => string, amount: (row: T) => bigint) {
-	const totals = new Map<string, bigint>()
-	for (const row of values) totals.set(key(row), unsigned((totals.get(key(row)) ?? 0n) + amount(row)))
-	return Object.fromEntries(totals)
+/** Totals are rows, never maps keyed by a name: the field `amount` carries the
+ * unit. A total is `complete` only when every wage in the period has a fact
+ * for that component; imported history can lack taxable-wage facts, and a
+ * sum over the wages that have them is not the period's figure. */
+function totalBy<T, K extends string>(
+	values: readonly T[],
+	key: K,
+	name: (row: T) => string,
+	amount: (row: T) => bigint,
+	wageOf: (row: T) => string,
+	wageIds: ReadonlySet<string>,
+	coverage = true
+) {
+	const totals = new Map<string, { amount: bigint; wages: Set<string> }>()
+	for (const row of values) {
+		const entry = totals.get(name(row)) ?? { amount: 0n, wages: new Set<string>() }
+		entry.amount = unsigned(entry.amount + amount(row))
+		entry.wages.add(wageOf(row))
+		totals.set(name(row), entry)
+	}
+	return [...totals]
+		.sort(([a], [b]) => a.localeCompare(b))
+		.map(([label, entry]) => ({
+			[key]: label,
+			amount: entry.amount,
+			wagesCovered: BigInt(entry.wages.size),
+			...(coverage ? { complete: entry.wages.size === wageIds.size } : {})
+		}))
 }
 
 /** One numerical/evidence selection shared by reports and immutable prepared
@@ -70,23 +94,32 @@ export const periodFigures = (snapshot: Snapshot, business: Uuid, period: CivilD
 				filingIds.has(row.filing)
 			),
 			totals: {
-				wageCount: wages.length,
+				wageCount: BigInt(wages.length),
 				gross: wages.reduce((sum, row) => unsigned(sum + row.gross), 0n),
 				cash: wages.reduce((sum, row) => unsigned(sum + row.cash), 0n),
 				assessed: totalBy(
 					assessed,
+					"component",
 					(row) => row.component,
-					(row) => row.amount
+					(row) => row.amount,
+					(row) => row.wage,
+					wageIds
 				),
 				taxable: totalBy(
 					taxable,
+					"component",
 					(row) => row.component,
-					(row) => row.amount
+					(row) => row.amount,
+					(row) => row.wage,
+					wageIds
 				),
 				deducted: totalBy(
 					deducted,
+					"kind",
 					(row) => row.kind,
-					(row) => row.amount
+					(row) => row.amount,
+					(row) => row.wage,
+					wageIds
 				)
 			}
 		}

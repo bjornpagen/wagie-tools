@@ -1,11 +1,11 @@
 import type { Uuid } from "@bjornpagen/bumbledb"
 import { Effect, Schema } from "effect"
-import { businessCommand, businessFacts } from "./commands.ts"
-import { civilDaySpan, epochDay, nowUnixMilliseconds, today } from "./core/time.ts"
+import { businessCommand, businessFacts, statementWriter } from "./commands.ts"
+import { civilDaySpan, epochDay, today } from "./core/time.ts"
 import { mintId, Nonblank, Refusal } from "./core/values.ts"
 import { relationRows, rows } from "./queries.ts"
 import { parseStrict, planAndCommit, type Snapshot } from "./runtime.ts"
-import { commandFields, Day, Id, inputFields, Year } from "./schema/input.ts"
+import { commandFields, Day, Id, inputFields } from "./schema/input.ts"
 import * as S from "./schema.ts"
 
 const AddressInput = Schema.Struct(
@@ -27,7 +27,7 @@ export const EmployeeInput = Schema.Struct({
 })
 export const BudgetInput = Schema.Struct({
 	...commandFields,
-	...inputFields(S.AnnualBudget, ["employee", "year", "limit", "evidence"], { year: Year })
+	...inputFields(S.AnnualBudget, ["employee", "year", "limit", "evidence"])
 })
 export const AssignmentInput = Schema.Struct({
 	...commandFields,
@@ -38,10 +38,6 @@ export const ElectionInput = Schema.Struct({
 	...commandFields,
 	...inputFields(S.ElectionSource, ["document"]),
 	effectiveOn: Day
-})
-export const ReviewResolutionInput = Schema.Struct({
-	...commandFields,
-	...inputFields(S.Resolution, ["review", "evidence"])
 })
 
 const employeeFor = (snapshot: Snapshot, business: Uuid, employee: Uuid) =>
@@ -60,8 +56,7 @@ export const configureBusiness = (payload: unknown) =>
 	Effect.gen(function* () {
 		const input = parseStrict(BusinessInput, payload),
 			request = input.request
-		const recordingDay = yield* today(input.timeZone),
-			recordedAt = yield* nowUnixMilliseconds
+		const recordingDay = yield* today(input.timeZone)
 		if (new Set(input.addresses.map((row) => row.kind)).size !== input.addresses.length)
 			return yield* Effect.fail(
 				new Refusal({ code: "DuplicateAddressKind", message: "Supply each address kind once" })
@@ -74,6 +69,7 @@ export const configureBusiness = (payload: unknown) =>
 			timeZone: input.timeZone,
 			plan: (snapshot, draft) =>
 				Effect.gen(function* () {
+					const note = statementWriter(draft)
 					const existing = (yield* rows(snapshot, businessFacts, {})).find((row) =>
 						input.business ? row.id === input.business : row.ein === input.ein
 					)
@@ -89,8 +85,7 @@ export const configureBusiness = (payload: unknown) =>
 							name: input.name,
 							ein: input.ein,
 							state: input.state,
-							timeZone: input.timeZone,
-							recordedAt
+							timeZone: input.timeZone
 						}
 					])
 					const oldAddresses = yield* relationRows(snapshot, S.BusinessAddress)
@@ -105,16 +100,21 @@ export const configureBusiness = (payload: unknown) =>
 						)
 						if (old) yield* draft.delete(S.StateAccount, [old])
 						yield* draft.insert(S.StateAccount, [
-							{ business, state: input.state, taxpayerNumber: input.stateAccount, evidence: input.evidence }
+							{
+								business,
+								state: input.state,
+								taxpayerNumber: input.stateAccount,
+								evidence: yield* note(input.evidence)
+							}
 						])
 					}
 					const existingAccounts = yield* relationRows(snapshot, S.TaxAccount)
 					for (const family of S.AccountFamily.handles)
 						if (!existingAccounts.some((row) => row.business === business && row.family === family))
 							yield* draft.insert(S.TaxAccount, [
-								{ id: yield* mintId, business, family, evidence: input.evidence }
+								{ id: yield* mintId, business, family, evidence: yield* note(input.evidence) }
 							])
-					return { business, evidence: input.evidence }
+					return { business }
 				})
 		})
 	})
@@ -128,7 +128,7 @@ export const recordEmployee = (payload: unknown) =>
 			business,
 			action: "employee record",
 			input: payload,
-			plan: ({ snapshot, draft, recordedAt }) =>
+			plan: ({ snapshot, draft }) =>
 				Effect.gen(function* () {
 					const existing = input.employee
 						? yield* employeeFor(snapshot, business, input.employee)
@@ -145,11 +145,10 @@ export const recordEmployee = (payload: unknown) =>
 							lastName: input.lastName,
 							ssn: input.ssn,
 							address: input.address,
-							filingStatus: input.filingStatus,
-							recordedAt
+							filingStatus: input.filingStatus
 						}
 					])
-					return { employee, business, evidence: input.evidence }
+					return { employee, business }
 				})
 		})
 	})
@@ -168,7 +167,7 @@ export const recordBudget = (payload: unknown) =>
 			business,
 			action: "compensation budget",
 			input: payload,
-			plan: ({ snapshot, draft }) =>
+			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
 					yield* employeeFor(snapshot, business, employee)
 					const existing = (yield* relationRows(snapshot, S.AnnualBudget)).find(
@@ -177,7 +176,7 @@ export const recordBudget = (payload: unknown) =>
 					const budget = existing?.id ?? (yield* mintId)
 					if (existing) yield* draft.delete(S.AnnualBudget, [existing])
 					yield* draft.insert(S.AnnualBudget, [
-						{ id: budget, employee, year, limit: input.limit, evidence: input.evidence }
+						{ id: budget, employee, year, limit: input.limit, evidence: yield* note(input.evidence) }
 					])
 					return { budget, employee, year }
 				})
@@ -395,48 +394,6 @@ export const recordElection = (payload: unknown) =>
 						}
 					])
 					return { election, allowance, employee, year }
-				})
-		})
-	})
-
-export const listReviews = (snapshot: Snapshot, business: Uuid) =>
-	Effect.gen(function* () {
-		const employeeIds = new Set(
-			(yield* relationRows(snapshot, S.Employee))
-				.filter((row) => row.business === business)
-				.map((row) => row.id)
-		)
-		const resolved = yield* relationRows(snapshot, S.Resolution)
-		return (yield* relationRows(snapshot, S.Review))
-			.filter((row) => employeeIds.has(row.employee))
-			.map((row) => ({ ...row, resolution: resolved.find((item) => item.review === row.id) }))
-	})
-export const resolveReview = (payload: unknown) =>
-	Effect.gen(function* () {
-		const input = parseStrict(ReviewResolutionInput, payload),
-			business = input.business
-		return yield* businessCommand({
-			request: input.request,
-			business,
-			action: "review resolve",
-			input: payload,
-			plan: ({ snapshot, draft, recordedAt }) =>
-				Effect.gen(function* () {
-					const review = (yield* listReviews(snapshot, business)).find((row) => row.id === input.review)
-					if (!review)
-						return yield* Effect.fail(
-							new Refusal({ code: "ReviewMissing", message: "No matching review for this business" })
-						)
-					if (review.resolution && review.resolution.evidence !== input.evidence)
-						return yield* Effect.fail(
-							new Refusal({
-								code: "ReviewAlreadyResolved",
-								message: "The review already has different resolution evidence"
-							})
-						)
-					if (!review.resolution)
-						yield* draft.insert(S.Resolution, [{ review: review.id, evidence: input.evidence, recordedAt }])
-					return { review: review.id }
 				})
 		})
 	})

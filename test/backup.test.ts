@@ -30,8 +30,7 @@ test("native backup restores the Wagie Tools theory and facts into a new writabl
 				name: "Backup Test",
 				ein: "00-0000003",
 				state: "TX",
-				timeZone: "America/Chicago",
-				recordedAt: 1234567890000n
+				timeZone: "America/Chicago"
 			} as const
 			yield* draft.insert(S.Business, [business])
 			assert.equal((yield* apply(history, yield* draft.finish())).outcome.kind, "committed")

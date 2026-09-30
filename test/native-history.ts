@@ -2,9 +2,10 @@ import assert from "node:assert/strict"
 import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
-import { type ChangeSet, NativeRuntime } from "@bjornpagen/bumbledb"
+import { ChangeSet, NativeRuntime } from "@bjornpagen/bumbledb"
 import { Command, type History, type LocalBinding, RequestId } from "@bjornpagen/bumbledb-log"
 import { Clock, Effect, Result, type Scope } from "effect"
+import { statementId } from "../src/commands.ts"
 import { io } from "../src/core/files.ts"
 import { periodSpan } from "../src/core/time.ts"
 import { mintId } from "../src/core/values.ts"
@@ -34,8 +35,28 @@ export function withHistory<A, E>(
 	)
 }
 
-export const apply = (history: LedgerHistory, changes: ChangeSet<typeof ledger>) =>
+/** Fixture evidence: the content-addressed statement id for `text`. Every
+ * statement a test has said is composed into each fixture change it applies. */
+const said = new Map<string, string>()
+export const say = (text: string) => {
+	const id = statementId(text)
+	said.set(id, text)
+	return id
+}
+const withStatements = (changes: ChangeSet<typeof ledger>) =>
 	Effect.gen(function* () {
+		if (!said.size) return changes
+		const statements = yield* ChangeSet.builder(S.ledger)
+		yield* statements.insert(
+			S.Statement,
+			[...said].map(([id, text]) => ({ id: id as ReturnType<typeof statementId>, text }))
+		)
+		return yield* changes.compose(yield* statements.finish())
+	})
+
+export const apply = (history: LedgerHistory, fixture: ChangeSet<typeof ledger>) =>
+	Effect.gen(function* () {
+		const changes = yield* withStatements(fixture)
 		const snapshot = yield* history.snapshot({ consistency: { kind: "latest" } })
 		const command = yield* Command.seal({
 			scope: history.identity,
@@ -56,7 +77,7 @@ export const yearFacts = (draft: Draft, year: number) =>
 			calendar = yield* mintId
 		const evidence = "Synthetic Gregorian year qualification"
 		yield* draft.insert(S.PolicyRelease, [
-			{ id: release, title: evidence, sha256: `synthetic-${release}`, evidence, recordedAt: 0n }
+			{ id: release, title: evidence, sha256: `synthetic-${release}`, evidence: say(evidence) }
 		])
 		yield* draft.insert(S.CalendarCoverage, [
 			{ release, authority: "FederalDC", kind: "Year", span: periodSpan(year, "Year") }
@@ -106,8 +127,7 @@ export const bankForWage = (
 				direction: "Outflow",
 				paidOn: day,
 				amount,
-				evidence: "Synthetic Mercury payment",
-				recordedAt: 0n
+				evidence: say("Synthetic Mercury payment")
 			}
 		])
 		yield* draft.insert(S.MercuryTransaction, [{ movement, reference: `synthetic-${movement}` }])

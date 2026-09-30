@@ -1,27 +1,18 @@
 import type { IntervalValue, Uuid } from "@bjornpagen/bumbledb"
 import { Effect, Schema } from "effect"
 import { businessCommand } from "../commands.ts"
-import { civilDaySpan, epochDay, periodSpan, type UnixEpochDay } from "../core/time.ts"
+import { epochDay, periodSpan, type UnixEpochDay } from "../core/time.ts"
 import { MAX_U64, mintId, Refusal } from "../core/values.ts"
 import { relationRows } from "../queries.ts"
 import { parseStrict, type Snapshot } from "../runtime.ts"
-import {
-	commandFields,
-	Day,
-	DayBounds,
-	Id,
-	inputField,
-	inputFields,
-	TaxBandInput,
-	Year
-} from "../schema/input.ts"
+import { commandFields, DaySpan, Id, inputFields, money, TaxBandInput } from "../schema/input.ts"
 import { annualRequirements } from "../schema/vocabulary.ts"
 import * as S from "../schema.ts"
 
 const Source = Schema.Struct(inputFields(S.AnnualSource, ["artifact", "evidence"]))
 export const AnnualPolicyInput = Schema.Struct({
 	...commandFields,
-	...inputFields(S.AnnualPolicy, ["authority", "year", "evidence"], { year: Year }),
+	...inputFields(S.AnnualPolicy, ["authority", "year", "evidence"]),
 	release: Id,
 	sources: Schema.Array(Source),
 	rates: Schema.Array(
@@ -33,7 +24,7 @@ export const AnnualPolicyInput = Schema.Struct({
 		})
 	),
 	limits: Schema.Array(Schema.Struct({ ...inputFields(S.PolicyLimit, ["kind", "cents"]), ...Source.fields })),
-	lookback: Schema.optional(Schema.Struct({ ...DayBounds.fields, ...Source.fields }))
+	lookback: Schema.optional(Schema.Struct({ span: DaySpan, ...Source.fields }))
 })
 export const AnnualEvidenceInput = Schema.Struct({
 	...commandFields,
@@ -59,7 +50,7 @@ export const recordAnnualPolicy = (payload: unknown) =>
 			business,
 			action: "policy annual",
 			input: payload,
-			plan: ({ snapshot, draft, recordedAt }) =>
+			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
 					const release = input.release,
 						valid = periodSpan(Number(input.year), "Year")
@@ -91,14 +82,13 @@ export const recordAnnualPolicy = (payload: unknown) =>
 							year: input.year,
 							calendar: calendar.id,
 							valid,
-							evidence: input.evidence,
-							recordedAt
+							evidence: yield* note(input.evidence)
 						}
 					])
-					yield* draft.insert(
-						S.AnnualSource,
-						input.sources.map((row) => ({ annual, artifact: row.artifact, evidence: row.evidence }))
-					)
+					for (const row of input.sources)
+						yield* draft.insert(S.AnnualSource, [
+							{ annual, artifact: row.artifact, evidence: yield* note(row.evidence) }
+						])
 					for (const rate of input.rates) {
 						const schedule = yield* mintId
 						yield* draft.insert(S.RateSchedule, [
@@ -106,7 +96,7 @@ export const recordAnnualPolicy = (payload: unknown) =>
 								id: schedule,
 								denominator: rate.denominator,
 								domain: { start: 0n, end: MAX_U64 },
-								evidence: rate.evidence
+								evidence: yield* note(rate.evidence)
 							}
 						])
 						for (const band of rate.bands)
@@ -114,10 +104,7 @@ export const recordAnnualPolicy = (payload: unknown) =>
 								{
 									id: yield* mintId,
 									schedule,
-									span: {
-										start: band.start,
-										end: band.end
-									},
+									wages: band.wages,
 									numerator: band.numerator,
 									role: band.role
 								}
@@ -128,27 +115,27 @@ export const recordAnnualPolicy = (payload: unknown) =>
 								kind: rate.kind,
 								schedule,
 								artifact: rate.artifact,
-								evidence: rate.evidence
+								evidence: yield* note(rate.evidence)
 							}
 						])
 					}
-					yield* draft.insert(
-						S.PolicyLimit,
-						input.limits.map((row) => ({
-							annual,
-							kind: row.kind,
-							cents: row.cents,
-							artifact: row.artifact,
-							evidence: row.evidence
-						}))
-					)
+					for (const row of input.limits)
+						yield* draft.insert(S.PolicyLimit, [
+							{
+								annual,
+								kind: row.kind,
+								cents: row.cents,
+								artifact: row.artifact,
+								evidence: yield* note(row.evidence)
+							}
+						])
 					if (input.lookback)
 						yield* draft.insert(S.LookbackPeriod, [
 							{
 								annual,
-								span: civilDaySpan(input.lookback.start, input.lookback.endExclusive),
+								span: input.lookback.span,
 								artifact: input.lookback.artifact,
-								evidence: input.lookback.evidence
+								evidence: yield* note(input.lookback.evidence)
 							}
 						])
 					return { annual }
@@ -166,7 +153,7 @@ export const recordAnnualEvidence = (payload: unknown) =>
 			business,
 			action: "policy evidence",
 			input: payload,
-			plan: ({ snapshot, draft, recordedAt }) =>
+			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
 					const policy = (yield* relationRows(snapshot, S.AnnualPolicy)).find(
 						(row) => row.id === annual && row.business === business
@@ -176,11 +163,11 @@ export const recordAnnualEvidence = (payload: unknown) =>
 						return yield* fail("PolicyAuthorityMismatch", "Evidence belongs to a different authority")
 					yield* draft.insert(S.AnnualEvidence, [
 						{
+							id: yield* mintId,
 							annual,
 							kind: input.kind,
 							artifact: input.artifact,
-							evidence: input.evidence,
-							recordedAt
+							evidence: yield* note(input.evidence)
 						}
 					])
 					return { annual, kind: input.kind }
@@ -241,7 +228,7 @@ export const refreshPolicy = (payload: unknown) =>
 			business,
 			action: "policy refresh",
 			input: payload,
-			plan: ({ snapshot, draft, recordedAt }) =>
+			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
 					const data = yield* annualPolicyData(snapshot, business)
 					const policy = data.policies.find((row) => row.id === annual)
@@ -315,7 +302,11 @@ export const refreshPolicy = (payload: unknown) =>
 						const taxable = (yield* relationRows(snapshot, S.TaxBand)).filter(
 							(row) => row.schedule === adopted.schedule && row.role === "WithinBase"
 						)
-						if (taxable.length !== 1 || taxable[0]?.span.start !== 0n || taxable[0]?.span.end !== base?.cents)
+						if (
+							taxable.length !== 1 ||
+							taxable[0]?.wages.start !== 0n ||
+							taxable[0]?.wages.end !== base?.cents
+						)
 							return yield* fail(
 								"AnnualWageBaseMismatch",
 								"Employer schedule must use the reviewed state wage base"
@@ -323,22 +314,20 @@ export const refreshPolicy = (payload: unknown) =>
 					}
 					yield* draft.insert(S.AnnualApproval, [
 						{
+							id: yield* mintId,
 							annual,
 							release,
 							business,
 							authority: policy.authority,
 							year: policy.year,
 							valid: policy.valid,
-							evidence: input.evidence,
-							recordedAt
+							evidence: yield* note(input.evidence)
 						}
 					])
 					return {
 						annual,
 						release,
-						authority: policy.authority,
-						validFrom: policy.valid.start,
-						validUntil: policy.valid.end
+						authority: policy.authority
 					}
 				})
 		})
@@ -351,15 +340,15 @@ const sameSchedule = (snapshot: Snapshot, left: Uuid, right: Uuid) =>
 			b = schedules.find((row) => row.id === right)
 		if (!a || !b || a.denominator !== b.denominator) return false
 		const entries = (id: Uuid) =>
-			bands.filter((row) => row.schedule === id).sort((x, y) => (x.span.start < y.span.start ? -1 : 1))
+			bands.filter((row) => row.schedule === id).sort((x, y) => (x.wages.start < y.wages.start ? -1 : 1))
 		const x = entries(left),
 			y = entries(right)
 		return (
 			x.length === y.length &&
 			x.every(
 				(row, i) =>
-					row.span.start === y[i]?.span.start &&
-					row.span.end === y[i]?.span.end &&
+					row.wages.start === y[i]?.wages.start &&
+					row.wages.end === y[i]?.wages.end &&
 					row.numerator === y[i]?.numerator &&
 					row.role === y[i]?.role
 			)
@@ -382,14 +371,11 @@ export const approvedPoliciesAt = (snapshot: Snapshot, business: Uuid, release: 
 
 export const ElectionDocumentInput = Schema.Struct({
 	...commandFields,
-	...inputFields(S.ElectionDocument, ["employee", "year", "signedOn", "artifact", "evidence"], {
-		year: Year,
-		signedOn: Day
-	}),
+	...inputFields(S.ElectionDocument, ["employee", "year", "signedOn", "artifact", "evidence"]),
 	supersedes: Schema.optional(Id),
 	amounts: Schema.Record(
 		Schema.Literals(S.ElectionContributionKind.handles),
-		inputField(S.ElectionDocumentAmount.fields.cents)
+		money(S.ElectionDocumentAmount.fields.cents)
 	)
 })
 
@@ -403,7 +389,7 @@ export const recordElectionDocument = (payload: unknown) =>
 			business,
 			action: "election document",
 			input: payload,
-			plan: ({ snapshot, draft, recordedAt, recordingDay }) =>
+			plan: ({ snapshot, draft, note, recordingDay }) =>
 				Effect.gen(function* () {
 					if (
 						!(yield* relationRows(snapshot, S.Employee)).some(
@@ -445,8 +431,7 @@ export const recordElectionDocument = (payload: unknown) =>
 							year: input.year,
 							signedOn: epochDay(signedOn),
 							artifact: input.artifact,
-							evidence: input.evidence,
-							recordedAt
+							evidence: yield* note(input.evidence)
 						}
 					])
 					if (predecessor)

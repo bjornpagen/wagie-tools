@@ -1,13 +1,13 @@
-import { type Fact, query, v } from "@bjornpagen/bumbledb"
+import type { Fact } from "@bjornpagen/bumbledb"
 import { Effect, Schema } from "effect"
 import { businessCommand } from "./commands.ts"
-import { CivilDaySpan } from "./core/time.ts"
 import { entityId, json, mintId, Nonblank, Refusal, signed } from "./core/values.ts"
 import { entryKey } from "./deposits.ts"
 import { liabilityEntries, relationRows, rows } from "./queries.ts"
+import { askQuestion, questions } from "./questions.ts"
 import { paymentEquation } from "./reconciliation.ts"
 import { parseStrict } from "./runtime.ts"
-import { commandFields, Day, Id, inputFields } from "./schema/input.ts"
+import { commandFields, Id, inputFields } from "./schema/input.ts"
 import * as S from "./schema.ts"
 
 const ReferenceInput = Schema.Struct(
@@ -15,12 +15,10 @@ const ReferenceInput = Schema.Struct(
 )
 export const PaymentRecordInput = Schema.Struct({
 	...commandFields,
-	...inputFields(S.TaxPayment, ["account", "sentOn", "amount", "evidence"], { sentOn: Day }),
+	...inputFields(S.TaxPayment, ["account", "sentOn", "amount", "evidence"]),
 	references: Schema.Array(ReferenceInput),
 	artifacts: Schema.Array(Id),
-	settlement: Schema.optional(
-		Schema.Struct(inputFields(S.PaymentSettlement, ["settlesOn", "evidence"], { settlesOn: Day }))
-	)
+	settlement: Schema.optional(Schema.Struct(inputFields(S.PaymentSettlement, ["settlesOn", "evidence"])))
 })
 
 const referenceKey = (row: typeof ReferenceInput.Type) => json([row.issuer, row.scope, row.value])
@@ -52,7 +50,7 @@ export const recordPayment = (payload: unknown) =>
 			business,
 			action: "payment record",
 			input: payload,
-			plan: ({ snapshot, draft, recordedAt, recordingDay }) =>
+			plan: ({ snapshot, draft, note, recordingDay }) =>
 				Effect.gen(function* () {
 					if (sentOn > recordingDay || (settlement && settlement.settlesOn < sentOn))
 						return yield* Effect.fail(
@@ -79,27 +77,20 @@ export const recordPayment = (payload: unknown) =>
 								existing.sentOn !== sentOn)) ||
 						(originalSettlement && settlement && originalSettlement.settlesOn !== settlement.settlesOn)
 					if (conflict) {
-						const issue = yield* mintId
-						yield* draft.insert(S.FinancialIssue, [
-							{
-								id: issue,
-								business,
-								scope: "TaxAccount",
-								evidence: input.evidence,
-								detail: json({
-									reason: "Conflicting observation of an existing payment",
-									input,
-									existingPayments: [...identified]
-								})
-							}
-						])
-						yield* draft.insert(S.PaymentIssue, [{ issue, business, account }])
+						const issue = yield* askQuestion(
+							draft,
+							note,
+							business,
+							{ kind: "TaxAccount", account },
+							`Conflicting observation of existing payment(s) ${[...identified].join(", ")}; the retained request ${request} holds the observation.`,
+							input.evidence
+						)
 						return { kind: "ReconciliationRequired", issue, paymentsJson: json([...identified]) }
 					}
 					const payment = existing?.id ?? (yield* mintId)
 					if (!existing)
 						yield* draft.insert(S.TaxPayment, [
-							{ id: payment, business, account, amount, sentOn, evidence: input.evidence, recordedAt }
+							{ id: payment, business, account, amount, sentOn, evidence: yield* note(input.evidence) }
 						])
 					for (const reference of input.references) {
 						if (!references.some((row) => referenceKey(row) === referenceKey(reference)))
@@ -110,27 +101,22 @@ export const recordPayment = (payload: unknown) =>
 						input.artifacts.map((id) => ({ payment, artifact: entityId(id) }))
 					)
 					if (settlement && !originalSettlement)
-						yield* draft.insert(S.PaymentSettlement, [{ payment, ...settlement }])
+						yield* draft.insert(S.PaymentSettlement, [
+							{ payment, settlesOn: settlement.settlesOn, evidence: yield* note(settlement.evidence) }
+						])
 					return { kind: "PaymentRecorded", payment, observedPreviously: Boolean(existing) }
 				})
 		})
 	})
 
-const DateSpanInput = Schema.Struct({ start: Day, end: Day }).pipe(
-	Schema.decodeTo(Schema.toType(CivilDaySpan))
-)
 const AllocationInput = Schema.Struct({
 	...inputFields(S.PaymentAllocation, ["revision"]),
 	negativeApplicationEvidence: Schema.optional(Nonblank)
 })
 const AttributionInput = Schema.Struct({
-	...inputFields(S.PaymentReconciliation, ["payment", "period", "evidence"], { period: DateSpanInput }),
+	...inputFields(S.PaymentReconciliation, ["payment", "period", "evidence"]),
 	entries: Schema.Array(AllocationInput),
-	adjustments: Schema.Array(
-		Schema.Struct(
-			inputFields(S.PaymentAdjustment, ["amount", "period", "evidence"], { period: DateSpanInput })
-		)
-	)
+	adjustments: Schema.Array(Schema.Struct(inputFields(S.PaymentAdjustment, ["amount", "period", "evidence"])))
 })
 export const PaymentReconcileInput = Schema.Struct({
 	...commandFields,
@@ -154,7 +140,7 @@ export const reconcilePayments = (payload: unknown) =>
 			business,
 			action: "payment reconcile",
 			input: payload,
-			plan: ({ snapshot, draft, recordedAt }) =>
+			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
 					const payments = yield* relationRows(snapshot, S.TaxPayment)
 					const reconciliations = yield* relationRows(snapshot, S.PaymentReconciliation)
@@ -170,6 +156,11 @@ export const reconcilePayments = (payload: unknown) =>
 					const newReconciliations: Fact<typeof S.PaymentReconciliation>[] = []
 					const newAllocations: Fact<typeof S.PaymentAllocation>[] = []
 					const newAdjustments: Fact<typeof S.PaymentAdjustment>[] = []
+					const negatives: {
+						revision: (typeof newAllocations)[number]["revision"]
+						account: (typeof newAllocations)[number]["account"]
+						evidence: string
+					}[] = []
 					for (const attribution of input.payments) {
 						const payment = payments.find(
 							(row) => row.id === attribution.payment && row.business === business
@@ -203,6 +194,12 @@ export const reconcilePayments = (payload: unknown) =>
 								throw new Refusal({
 									code: "NegativeApplicationEvidence",
 									message: "A negative entry needs evidence authorizing this specific payment application"
+								})
+							if (entry.amount < 0n && selection.negativeApplicationEvidence)
+								negatives.push({
+									revision: entry.revision,
+									account: payment.account,
+									evidence: selection.negativeApplicationEvidence
 								})
 							newAllocations.push({
 								revision: entry.revision,
@@ -241,11 +238,16 @@ export const reconcilePayments = (payload: unknown) =>
 							business,
 							account: payment.account,
 							period,
-							evidence: json({ explanation: attribution.evidence, entries: attribution.entries }),
-							recordedAt
+							evidence: yield* note(attribution.evidence)
 						})
 						for (const adjustment of adjustmentAmounts)
-							newAdjustments.push({ id: yield* mintId, reconciliation, ...adjustment })
+							newAdjustments.push({
+								id: yield* mintId,
+								reconciliation,
+								amount: adjustment.amount,
+								period: adjustment.period,
+								evidence: yield* note(adjustment.evidence)
+							})
 					}
 					yield* draft.delete(
 						S.PaymentAllocation,
@@ -255,30 +257,46 @@ export const reconcilePayments = (payload: unknown) =>
 						S.PaymentAdjustment,
 						adjustments.filter((row) => oldIds.has(row.reconciliation))
 					)
+					yield* draft.delete(
+						S.NegativeApplication,
+						(yield* relationRows(snapshot, S.NegativeApplication)).filter((row) =>
+							allocations.some(
+								(a) =>
+									oldIds.has(a.reconciliation) && a.revision === row.revision && a.account === row.account
+							)
+						)
+					)
 					yield* draft.delete(S.PaymentReconciliation, old)
 					yield* draft.insert(S.PaymentReconciliation, newReconciliations)
 					yield* draft.insert(S.PaymentAllocation, newAllocations)
 					yield* draft.insert(S.PaymentAdjustment, newAdjustments)
+					for (const negative of negatives)
+						yield* draft.insert(S.NegativeApplication, [
+							{
+								revision: negative.revision,
+								account: negative.account,
+								evidence: yield* note(negative.evidence)
+							}
+						])
 					// Issue resolution is checked against the same scoped payments below.
-					const issues = yield* rows(snapshot, financialIssueFacts, {})
+					const issues = yield* questions(snapshot, business)
+					const explanation = yield* note(
+						input.payments.map((row) => `${row.payment}: ${row.evidence}`).join("\n")
+					)
 					for (const issueId of input.resolveIssues) {
-						const issue = issues.find((row) => row.id === issueId && row.business === business)
-						if (!issue || !newReconciliations.some((row) => row.account === issue.account))
+						const issue = issues.find((row) => row.id === issueId)
+						if (
+							issue?.kind !== "TaxAccount" ||
+							issue.answer ||
+							!newReconciliations.some((row) => row.account === issue.account)
+						)
 							return yield* Effect.fail(
 								new Refusal({
 									code: "IssueScope",
 									message: "A financial issue must match an account reconciled by this command"
 								})
 							)
-						yield* draft.insert(S.FinancialResolution, [
-							{
-								issue: issue.id,
-								evidence: json(
-									input.payments.map((row) => ({ payment: row.payment, evidence: row.evidence }))
-								),
-								recordedAt
-							}
-						])
+						yield* draft.insert(S.Answer, [{ id: yield* mintId, question: issue.id, evidence: explanation }])
 					}
 					return {
 						kind: "PaymentsReconciled",
@@ -289,12 +307,7 @@ export const reconcilePayments = (payload: unknown) =>
 		})
 	})
 
-const financialIssueFacts = query(S.ledger).rule((r) => {
-	const { issue, business, account } = v(S.PaymentIssue)
-	return r.match(S.PaymentIssue, { issue, business, account }).find({ id: issue, business, account })
-})
-
-const DispositionInput = Schema.Struct({
+export const DispositionInput = Schema.Struct({
 	...commandFields,
 	...inputFields(S.SignedDisposition, ["revision", "account", "disposition", "evidence"])
 })
@@ -309,7 +322,7 @@ export const disposeLiability = (payload: unknown) =>
 			business,
 			action: "payment dispose",
 			input: payload,
-			plan: ({ snapshot, draft }) =>
+			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
 					const entry = (yield* rows(snapshot, liabilityEntries, {})).find(
 						(row) =>
@@ -334,7 +347,7 @@ export const disposeLiability = (payload: unknown) =>
 						revision: entry.revision,
 						account: entry.account,
 						disposition: input.disposition,
-						evidence: input.evidence
+						evidence: yield* note(input.evidence)
 					}
 					const old = (yield* relationRows(snapshot, S.SignedDisposition)).find(
 						(row) => entryKey(row) === entryKey(entry)

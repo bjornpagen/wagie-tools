@@ -1,416 +1,197 @@
 ---
 name: wagie-tools
-description: Operate Wagie Tools payroll, owner distributions, retirement contribution and conversion bookkeeping, tax payments, filing completions, annual policy, and verified backups.
+description: Operate a Wagie Tools payroll ledger — payroll, Roth wires, tax payments, filings, retirement bookkeeping, policy and backups — through its JSON ops.
 ---
 
 # Wagie Tools
 
-Use the noninteractive CLI from this repository: `pnpm cli COMMAND`.
-It records payroll and evidence in a local BumbleDB history. Sending money,
-submitting returns, and mailing documents are separate external actions; perform
-those only within the user's authorization. An absent ledger record does not
-prove that an external action never happened.
-
-## Find the current state
-
-Read `private/binding.json` and use its existing store. A missing binding or
-schema mismatch needs investigation; never initialize over it. Commands accept
-`--binding PATH` when intentionally using another store. For build prerequisites,
-read [local runtime](docs/local-runtime.md).
-
-Read `private/provenance/README.md` when present for the operator handoff: company
-and plan IDs, the last completed transaction, pending evidence, and storage
-references. `private/README.md` may point there. Treat this as a dated lookup aid;
-the binding and live structured records decide current state. A copied draft
-evidence string saying "not posted" does not override a posted wage, funding link,
-Mercury ID, or committed command receipt.
-
-Use `pnpm cli db audit` to discover business IDs when unknown. Then select the
-relevant business and read only what the task needs:
-
-| User's task | Read commands after `pnpm cli` |
-|---|---|
-| Run payroll or explain what prevents it | `status --business BUSINESS_ID` |
-| Show upcoming or outstanding tax work | `deadlines --business BUSINESS_ID` |
-| Find employees, tax accounts, budgets, or elections | `business inspect --business BUSINESS_ID` |
-| Inspect filed forms, versions, and submission evidence | `filings inspect --business BUSINESS_ID` |
-| Review annual or quarterly figures | `report year --business BUSINESS_ID --year YEAR`; `report quarter --business BUSINESS_ID --year YEAR --quarter QUARTER` |
-| Inspect policy coverage or unresolved reviews | `policy inspect --business BUSINESS_ID`; `review list --business BUSINESS_ID` |
-
-Replace uppercase placeholders with discovered IDs and actual inputs. Payroll,
-status, deadlines, and reports share one work register. `blockers` prevents
-posting; `readiness` explains uncertainties in reported figures. Follow each
-item's `action` and evidence requirement. Upcoming work is not automatically due.
-Read commands do not create requirements or mark anything complete.
-
-`--as-of YYYY-MM-DD` on status, deadlines, filings inspection, and reports changes
-the historical view. Payroll posting always checks the real employer date.
-
-## Submit an intent once
-
-Domain writes use `pnpm cli GROUP ACTION --input private/intent.json` or
-`--input -` for JSON on stdin. Inputs are strict: unknown keys are rejected.
-Read the relevant input declaration below before constructing an unfamiliar
-payload; the source is authoritative for required fields and closed values.
-
-Each distinct intent needs a UUIDv7 `request`. Generate one with the installed
-package, for example:
+Three verbs, one JSON object each. Everything else is data.
 
 ```sh
-node --input-type=module -e 'import { v7 } from "uuid"; console.log(v7())'
+pnpm cli read   --input -    # {"read": "status", "business": "…"}
+pnpm cli apply  --input -    # {"op": "payroll.post", "request": "…", …}
+pnpm cli schema [NAME]       # every op and read, or one op's JSON Schema
+pnpm cli id                  # a fresh UUIDv7 for a request or operation
 ```
 
-Copy existing entity IDs from readback. Keep the same request and exact payload
-on retry. Money is a decimal string of integer cents; zero means an evidenced
-zero, not a missing value. Dates enter as `YYYY-MM-DD`; interval ends are exclusive.
-Native civil dates are Unix epoch days (1970-01-01 = 0), while recording timestamps
-are Unix milliseconds. Use [units](docs/units.md) to interpret numeric output.
+`--input FILE` reads a file; `-` or nothing reads stdin. `--binding FILE`
+selects another store; the default is `private/binding.json`, and startup
+never creates an empty ledger. Output is JSON.
 
-Successful receipts contain `outcome.result`; payroll commands wrap the receipt under `receipt` and add figure readback. Save the
-returned IDs, inspect the affected records, and re-read status after completing
-work. A nonzero exit can accompany a saved `ReconciliationRequired` observation.
+## Units at the boundary
 
-If interrupted, resolve the original request first:
+- Money is dollars with exactly two decimals, as a string: `"8000.00"`, `"0.01"`.
+  Never cents, never a number, never `"8000"`.
+- Dates are `"YYYY-MM-DD"`. A span is `{"start": …, "endExclusive": …}`.
+- Ids are UUIDv7 strings. Mint request and operation ids with `pnpm cli id`.
+- `evidence` is prose: why this write is justified (the approval, the receipt,
+  the document). The ledger stores each distinct text once and shows it back
+  as text on every fact that cites it.
+- Input is strict: unknown keys refuse. A refusal names every bad path at once.
 
-```sh
-pnpm cli command resolve --request REQUEST_ID
-```
+Units come from field names and never vary: `amount`, `gross`, `roth`, `limit`
+and `cents` are always money; `paidOn`, `dueOn`, `signedOn` are always dates;
+`period`, `valid`, `work`, `span` are always spans.
 
-A committed/no-change receipt settles the intent. An uncertain or rejected
-outcome requires reading its reason before taking another action. Never treat
-uncertainty as permission to send money again. For a stale calculation, resolve
-its posting request before creating a fresh calculation.
-
-`RequestHistoryChanged` identifies a retained request from a different history.
-Inspect its original history or backup for the outcome. The current ledger cannot
-resolve or replay a command addressed to the closed incarnation.
-
-## Run payroll
-
-1. Inspect the employee, current budget/election, and `status`. Address actual
-   blockers through their domain commands. A clear register is necessary;
-   calculation also requires applicable annual approvals and payroll policy.
-2. Establish the pay date, work interval, gross amount, requested Roth deduction,
-   and evidenced federal income-tax withholding. If deriving gross from an
-   existing annual budget, use `compensation suggest --business BUSINESS_ID
-   --employee EMPLOYEE_ID --paid-on YYYY-MM-DD --work-start YYYY-MM-DD
-   --work-end-exclusive YYYY-MM-DD`. A budget is a target, not a contractual rate.
-3. Use `payroll calculate` with this template, replacing every placeholder:
+## Start every task with `status`
 
 ```json
-{
-  "request": "REQUEST_ID", "business": "BUSINESS_ID", "employee": "EMPLOYEE_ID",
-  "purpose": {
-    "kind": "NewWage", "paidOn": "YYYY-MM-DD",
-    "grossCents": "GROSS_CENTS", "rothCents": "ROTH_CENTS",
-    "work": {"start": "YYYY-MM-DD", "endExclusive": "YYYY-MM-DD"}
-  },
-  "fit": {"cents": "FIT_CENTS", "evidence": "WITHHOLDING_SOURCE"},
-  "evidence": "PAYROLL_INSTRUCTION_SOURCE"
-}
+{"read": "status", "business": "BUSINESS_ID"}
 ```
 
-4. Inspect `payroll inspect --business BUSINESS_ID --calculation CALCULATION_ID`.
-   Its `paycheck` gives automatic FICA recovery, Roth, and cash. Outstanding
-   regular employee FICA is collected from pay after current withholding and
-   before Roth. A requested Roth amount that does not fit is refused. Do not
-   supply manual recoveries to a new calculation.
-5. After the actual payment, `payroll post` takes
-   `{request,business,calculation,settlement}`. Use
-   `settlement:{kind:"Bank",reference,paidOn,amount}` with the native Mercury
-   transaction ID, actual bank date, and integer cents. The positive amount must
-   match calculated cash, or the Roth remittance when cash is zero. When both
-   cash and Roth are zero, use `settlement:{kind:"NoTransfer"}`; no bank identity
-   or penny transfer is needed. Read the posted wage and remaining work.
+`pnpm cli read` with no business id: use `{"read": "db.audit"}` to discover ids.
 
-Native rules calculate FICA/FUTA/state unemployment amounts from stored policy.
-Do not add a second tax calculator or insert an assumed rate to clear a refusal.
-New Roth deductions require applicable election timing and employee allowance.
-`recovery record` attributes money actually deducted; it cannot manufacture a
-recovery or change cash. See [payroll inputs](src/payroll.ts) and
-[recovery inputs](src/recoveries.ts) for evidenced tax revisions and recoveries.
+`status` returns only what is open:
 
-## Handle an employee Roth transfer
+- `blockers`: items that stop new payroll right now. Clear these first.
+- `open`: every open item, blockers included. Each carries `rule`, `label`,
+  `amount`, `dueOn`, and `next`: the op that moves it forward and the input
+  fields the ledger already knows. Add `request`, `evidence`, and whatever
+  only the outside world knows (a Mercury id, a date, an amount).
+- `readiness`: notes on figures (an open review question, unattributed recovery,
+  an unarchived document). They do not block.
 
-Start with the private handoff, the selected year's report, and the relevant
-contribution's deduction, funding, and Mercury links. "Like the earlier one"
-means inspect that transaction's actual route. Employee Roth deferral and
-voluntary after-tax funding are different sources; use the requested source.
+`{"read": "work", …}` returns every item including complete ones. `asOf`
+(`"YYYY-MM-DD"`) on status, work, report and filings.inspect changes the view.
 
-| Current state | Next action |
-|---|---|
-| Roth deduction exists; remittance is unfunded | Record/reuse the actual Mercury movement and use `FundContribution`. Do not run another payroll or create a distribution. |
-| Deduction and funding already exist | Record only missing receipt evidence or confirmed provider receipt. Reuse the movement and contribution IDs. |
-| Requested new Roth deduction does not exist | Inspect current election, capacity and payroll readiness, then calculate the additional wage/deduction for review. A prior regular paycheck does not itself establish this deduction. |
+Other reads: `report` (`year`, optional `quarter`), `business.inspect`,
+`questions`, `filings.inspect`, `policy.inspect`, `payroll.inspect`
+(`calculation`), `compensation.suggest`, `artifact.audit`, `command.resolve`
+(`request`), `db.audit`, `db.verify-backup` (`archive`).
 
-For a new deduction, let the native payroll calculation determine FICA and any
-prior FICA recovery. Federal income-tax withholding is an evidenced supplied
-input, not an automatic calculation here; never reuse a prior nominal amount as
-a default or infer it from estimated-tax payments. Withholding records a
-deduction/liability; sending a tax deposit is a separate action. Explain those
-two facts once. When the desired outcome is an exact Roth wire with zero cash
-pay, review gross, each deduction, Roth, cash, and taxes remaining payable
-together. Bank cash available today is not a gross-wage ceiling.
+## Writes
 
-Show the concrete command/payload and figures when the user requests a preview.
-Use existing authorization; do not restart approval after the same action is
-approved. Never invent a Mercury ID to post before a transfer. With zero cash
-pay, `payroll post` accepts the actual Roth wire as its bank settlement and
-creates the contribution **and funding link**; do not also call `FundContribution`.
+Every write is `{"op": NAME, "request": UUIDv7, "business": ID, …}`. The
+request id is the intent's identity: keep the same id and payload on retry, and
+never reuse one for a different intent. A committed receipt has
+`outcome.result`; payroll ops add figure readback. A `ReconciliationRequired`
+result exits nonzero and opens a question in `status`.
 
-For an authorized Carry/Mercury wire, create or confirm the Carry contribution
-and obtain its current wire instructions first. Check the existing Mercury
-recipient against those instructions, including memo/reference and contribution
-year/source, then send once. If the user sends it, take the native Mercury ID,
-date and amount from their receipt and finish bookkeeping directly. Open the
-browser only for a necessary provider/bank action or missing information.
-Attach/archive the wire receipt; record Carry receipt only when confirmed.
+If a write is interrupted, `{"read": "command.resolve", "request": ID}` first.
+Committed or no-change settles it. Anything else: read the reason before doing
+anything, and never treat uncertainty as permission to send money again.
 
-Finish with the affected records and relevant status. Report what was recorded
-and any evidence still pending. Do not expand a contribution into a database
-migration, folder cleanup, full-company link audit or fresh tax research unless
-requested or a concrete failure requires it. Use stored current policy and its
-sources; retrieve new guidance when coverage is missing, inconsistent or being
-refreshed, or when the user asks for research.
+Run `pnpm cli schema OP` before an unfamiliar op. It is the authority on fields.
 
-## Record a tax payment
+## Recipes
 
-Read the audit/register for the account, liability entries, existing payments,
-and references before recording money already sent.
+### Regular payroll
 
-- `payment record`: `{request,business,account,sentOn,amount,evidence,references,artifacts}`.
-  A reference is `{issuer,scope,value,sourceText}`; an artifact is its UUID.
-  Preserve acknowledgement strings and source text. Optional
-  `settlement:{settlesOn,evidence}` records settlement separately from send date.
-- `payment reconcile`: `{request,business,payments,resolveIssues}`. Each payment
-  attribution is `{payment,period:{start,end},evidence,entries:[{revision}],adjustments}`.
-  Supply its complete allocation, including every payment affected by a move.
-  Entries plus separately evidenced signed adjustments must equal actual money.
-  Use empty arrays only when no such evidence/items exist.
+1. `status`. Clear blockers through their `next` ops.
+2. Gross: use `compensation.suggest` (`employee`, `paidOn`, `work`) or the
+   owner's figure. Federal income tax withholding is a supplied, evidenced
+   input, never a default or a guess.
+3. Calculate:
+   ```json
+   {"op": "payroll.calculate", "request": "…", "business": "…", "employee": "…",
+    "purpose": {"kind": "NewWage", "paidOn": "2026-10-07", "gross": "2301.37", "roth": "0.00",
+                "work": {"start": "2026-09-30", "endExclusive": "2026-10-07"}},
+    "fit": {"amount": "0.01", "evidence": "…"}, "evidence": "…"}
+   ```
+   The readback shows `paycheck`: automatic recovery of prior employee FICA,
+   Roth, and `cash`. Nothing is posted yet.
+4. Send the Mercury payment for exactly `cash`.
+5. Post, with the real Mercury transaction id, bank date and amount:
+   ```json
+   {"op": "payroll.post", "request": "…", "business": "…", "calculation": "…",
+    "evidence": "Owner approved; Mercury sent",
+    "settlement": {"kind": "Bank", "reference": "MERCURY_ID", "paidOn": "2026-10-07", "amount": "2125.31"}}
+   ```
+   Posting checks the register at the real employer date and refuses a stale
+   calculation. `{"kind": "NoTransfer"}` only when cash and Roth are both zero.
 
-Negative entries need `negativeApplicationEvidence`; nonzero adjustments need
-`{amount,period:{start,end},evidence}`. Filing adjustments do not substitute for
-payment adjustments. Use `payment dispose` only for an evidenced disposition of
-an unallocated negative entry. See [payment inputs](src/payments.ts).
+### Employee Roth wire (zero cash pay)
 
-Finish by checking the payment equation and work register. Recording a payment
-does not submit its return.
+The owner wants exactly `$X` to reach the plan as employee Roth. Do not solve
+for gross by hand: `RothOnly` finds the smallest gross whose paycheck leaves
+exactly zero cash after employee FICA, supplied FIT and automatic recovery.
 
-## Prepare or record a submitted form
+```json
+{"op": "payroll.calculate", "request": "…", "business": "…", "employee": "…",
+ "purpose": {"kind": "RothOnly", "paidOn": "2026-09-16", "roth": "8000.00",
+             "work": {"start": "2026-09-09", "endExclusive": "2026-09-16"}},
+ "fit": {"amount": "0.01", "evidence": "Owner-directed withholding"},
+ "evidence": "Owner requested an $8,000.00 Roth wire"}
+```
 
-Inspect the filing and its current version first. Retrieve the exact supporting
-files; `artifact record` hashes local bytes using
-`{request,business,file,mediaType,evidence}`. For an existing artifact,
-`artifact verify` checks retrieved bytes and `artifact locate` records a new
-location. Archive documents in the configured private location, discoverable
-from existing records; verify uploaded bytes before recording that location.
+Readback: `figures.input.gross` is the wage, `paycheck.cash` is `0.00`. Show the
+owner gross, each deduction, Roth and taxes remaining payable, then:
 
-`filings prepare` takes `{request,business,filing,evidence,documents}` with each
-document `{slot,role,artifact,part,file}`. It freezes the reported basis and
-verifies the bytes. [Form policy](src/schema/vocabulary.ts) defines required slots;
-use the exact filed version and manifest when recording a completed submission.
-Preparation does not generate a tax-form PDF or prove submission.
+1. Owner (or you, if authorized) sends the wire to the plan provider for `roth`.
+2. `payroll.post` with `settlement.amount` = `roth` and the Mercury id. This one
+   write creates the wage, deduction, bank movement, contribution and funding
+   link. Do not also fund the contribution.
+3. Download the Mercury receipt (status Sent). `artifact.record` its file, then
+   `artifact.attach-bank` to the movement (its id is in the post readback or
+   `report`). The `roth-remittance` blocker completes here.
+4. The provider's own confirmation is a reminder (`roth-plan-receipt`), never a
+   payroll blocker. Record it when it exists: `retirement.receipt`.
 
-After actual submission, `filings submit` takes
-`{request,business,version,method,manifest:[{slot,file}]}`. Choose its evidenced method:
+Requirements the ledger enforces: a current signed election and allowance for
+the year (`election.document`, `election.record`), the year's retirement
+`retirement.annual`, and remaining capacity. `EmployeeRothDeferral` and
+`EmployeeAfterTax` are different sources; use the one requested.
 
-| Method | Payload and evidence |
-|---|---|
-| Digital | `{kind:"Digital",submittedOn,evidence,reference?:{value,sourceText}}` |
-| Certified mail | First `mailing record` with `{request,business,carrier:"USPS",number,mailedOn,receipt,evidence,artifacts}`; `receipt` is the receipt artifact UUID. Then `{kind:"CertifiedMail",mailing}` uses the returned mailing UUID. |
-| Grandfathered | `{kind:"Grandfathered",evidence}` only for already imported historical eligibility; never grant this eligibility to new work. |
+### Record a tax payment already sent
 
-Certified mail requires the actual tracking number. One packet may serve several
-forms; each form still needs its own submission and document manifest. Mailing
-or digital submission is not proof of agency acceptance. Verify completion with
-`filings inspect` and status. A zero-tax correction can still require filing.
+`payment.record`: `account`, `sentOn`, `amount`, `evidence`, `references`
+(`{issuer, scope, value, sourceText}` from the acknowledgement), `artifacts`,
+optional `settlement: {settlesOn, evidence}`. Then `payment.reconcile` with the
+complete attribution: `payments: [{payment, period, evidence, entries: [{revision}], adjustments}]`.
+Entries plus evidenced adjustments must equal actual money. A negative entry
+needs `negativeApplicationEvidence`. Recording does not submit a return.
 
-Use `filings reject` for a rejection, `filings amend` for a correction of a
-submitted return, and `filings deadline` for an evidenced deadline change.
-Tax reassessment uses `payroll revise-tax`, preserving the wage, actual deductions,
-and payments while linking required amendments. Read [filing inputs](src/filings.ts)
-and [payroll inputs](src/payroll.ts) for these less common operations.
+### Prepare and submit a form
 
-## Update retirement records or compensation
+`filings.prepare` (`filing`, `evidence`, `documents: [{slot, role, artifact, part, file}]`)
+freezes the reported basis and verifies bytes. After the actual submission,
+`filings.submit` (`version`, `manifest`, `method`): `{"kind": "Digital", "submittedOn", "evidence", "reference"?}`,
+or `mailing.record` first then `{"kind": "CertifiedMail", "mailing"}`.
+`Grandfathered` is for imported history only. `filings.amend` opens a
+correction; `filings.deadline` records an evidenced change; `payroll.revise-tax`
+reassesses a posted wage.
 
-For a new signed election, verify/archive the document and inspect the employee's
-current election document. `election document` records
-`{request,business,employee,year,signedOn,artifact,evidence,amounts}`; supply
-`supersedes` with the current document UUID when replacing it. `amounts` contains
-all four contribution kinds declared in [ElectionDocumentInput](src/policy/annual.ts).
-Use actual document amounts, including explicit zeros.
+### Questions
 
-This preserves signed-document history. It does not create a deduction or transfer.
-Use `election record` with `{request,business,document,effectiveOn}` to activate
-it. `document` is the signed document UUID; `effectiveOn` is the actual prospective
-start date. The command derives signature date, year, Roth target, and annual
-allowance from the document, retirement annual review, and active policy.
-It closes an earlier authorization when replacing it. All historical Roth
-continues to count against the shared annual allowance. A replacement cannot
-backdate past signing or displace deductions already using the prior election.
+An open question is a fact: `question.ask` with a `subject` of kind `Review`
+(employee, year, topic), `PlanSetup` (plan), `Bookkeeping`, or `TaxAccount`
+(account). The kind decides what it holds back; `question.answer` closes it
+with evidence. Answer only from evidence that addresses the question.
 
-Read `report year` for plan/account/contribution IDs, current capacity, receipt
-progress, supplied reports, and Mercury bank traces. The active sources are
-`EmployeeRothDeferral` and `EmployeeAfterTax`. This is bookkeeping: no employer
-profit-sharing feature and no 1099-R calculation or generation.
+### Documents
 
-All bookkeeping writes use `pnpm cli bookkeeping --input private/intent.json`
-with `{request,business,evidence,operation}`. Read the closed `Operation` schema
-in [bookkeeping inputs](src/bookkeeping.ts) for exact fields.
+`artifact.record` hashes a local file. Upload the same bytes to the company's
+Drive folder, then `artifact.archive` (`artifact`, `driveFileId`, `remote`,
+`evidence`) downloads them by id, checks the hash and records the copy. A
+document without a Drive copy shows in `readiness`; backups refuse until every
+document has one. `artifact.audit` with `verify: true` re-reads every document.
 
-| Task | Operations and meaning |
-|---|---|
-| Record ordinary owner cash | `BankMovement` records the actual native Mercury `reference`, direction, date and cents. `Distribution` allocates its cents to the sole owner. Both IDs are retained. |
-| Return part of a distribution | Record an inflow, then `DistributionReturn` linking the original distribution. This invalidates the annual review. |
-| Plan new after-tax funding | `AuthorizeAfterTax` checks current signed election, annual limits, compensation, receipt reconciliation and setup. It reserves capacity; it sends no money. `CancelAuthorization` releases an entirely unspent reservation. |
-| Record actual after-tax funding | Reuse the authorization, or record an already completed `Contribution` as observed. Record the bank movement and distribution, then `FundContribution` linking all three. The distribution allocation is reused, so cash is counted once. |
-| Record withheld Roth funding | Payroll already creates the contribution and deduction link. `FundContribution` links the Mercury remittance to that contribution. Never create another wage or deduction. |
-| Confirm provider receipt | `ProviderReceipt` records the actual account, source, contribution year, provider operation reference, amount and allocations. Supply `receivedOn` only when the actual date is known; otherwise the recording-day observation stays separate. `AllocateReceipt` can link previously unallocated amounts later. |
-| Record an automatic or later conversion | Include `conversion` in the confirmed provider receipt, or use `Conversion` later. The supported active route is after-tax to plan Roth. Allocate principal from receipts; store actual converted amount separately. Receipt alone never proves conversion. |
-| Store supplied records | `SuppliedTax` stores externally supplied basis/taxable amounts; absence is unknown. `SuppliedReport` links supplied form data to an artifact. `ConfirmReportedConversion` links a whole historical receipt covered by that report when individual conversion dates are absent. It cannot duplicate dated conversion allocations. |
-| Annual handoff | `DistributionReview` freezes the exact annual distribution/return/funding set. Later changes invalidate it. `Balance` records a dated provider balance. |
+### Policy year
 
-All movements require unique nonblank Mercury IDs. Reuse existing IDs on retries.
-The bank outflow, distribution, contribution, receipt, and conversion are different
-facts about the flow of money. A conversion is neither another contribution nor
-another company cash payment. Actual observations can retain excess or conflicting
-provider facts; they do not authorize more contributions.
+`policy.install` a release with reviewed calendars, then `policy.annual`,
+`policy.evidence`, `policy.refresh` per authority, `policy.activate`.
+`retirement.annual` each year. Values never roll forward; missing coverage
+blocks payroll and says so in `status`.
 
-Withheld Roth remains a payroll blocker until funding and matching plan receipt
-are complete. Unused voluntary after-tax targets and conversion follow-ups are
-advisories. Setup and receipt discrepancies block new retirement funding. Use
-`ResolveSetup` or `ResolveIssue` only when evidence addresses the recorded issue.
-Outstanding conversion follow-ups survive the year boundary.
+### Backups
 
-Externally prepared retirement forms use the same filing register as payroll
-forms. `filings expect-retirement` takes
-`{request,business,plan,form,year,opensOn,dueOn,evidence}` with `F1099RIRS` or
-`F1099RRecipient`; supply reviewed deadlines for the chosen delivery method.
-Prepare and submit their exact external artifacts through the ordinary filing
-commands. A recorded conversion also prompts missing filing expectations at
-year end. The app freezes bookkeeping evidence and tracks completion.
+```json
+{"op": "db.backup", "operation": "UUIDv7", "output": "path.tar.gz"}
+{"read": "db.verify-backup", "archive": "path.tar.gz"}
+{"op": "db.restore", "operation": "UUIDv7", "archive": "…", "directory": "…", "bindingOutput": "…"}
+```
 
-`compensation budget` records an evidenced employee/year target;
-`compensation assign` assigns an existing commitment to it. Employee/profile
-changes and review resolutions use [profile inputs](src/profiles.ts). Resolve a
-review only from evidence addressing that review's actual issue.
+Verification restores in isolation and compares every fact. Keep the same
+operation id when retrying. Publishing to Drive is outside the ledger.
 
-## Refresh a reporting year
+## Rules
 
-Inspect policy before changing it. `policy install` must provide reviewed calendar
-coverage before `policy annual` can reference that release and year. The annual
-record stores public rules and source artifacts; `policy evidence` records
-employer-specific applicability. A release may support reporting while payroll
-evidence is incomplete. Once its executable payroll coverage is complete,
-`policy refresh` approves each annual jurisdiction for the release and
-`policy activate` selects it. Federal and state approvals both expire at year end.
-Retirement also needs a fresh `Annual` record for each year: limits, compensation
-cap, outside activity and asset attestations. Values never carry forward.
-Missing evidence stays missing; historical payments are not proof of an assigned rate.
-
-Once reviewed calendar coverage is available, `filings ensure` with
-`{request,business,throughYear}` materializes applicable forms idempotently.
-Initial enrollment also needs `enrollment:{startsOn,evidence}`. New employee W-2
-applicability is added atomically when wages post. Read [annual policy](src/policy/annual.ts),
-[release inputs](src/policy/install.ts), and [filing coverage](src/filing-coverage.ts)
-only as needed. Re-read policy and status to confirm coverage and remaining work.
-
-## Back up or maintain the ledger
-
-Use `db backup --operation OPERATION_ID --output ARCHIVE_PATH`, then
-`db verify-backup --archive ARCHIVE_PATH`. Operation IDs are UUIDv7; retry the same
-operation with the same paths. Verification restores independently and compares
-all facts. The archive includes private provenance and command recovery;
-referenced documents must remain available in their configured document storage.
-
-Publish to the existing CURRENT backup by file identity, using the destination
-and retention policy from private records. Download it, byte-compare, and run
-`db verify-backup` on that download before retiring a prior working copy.
-Retain historical originals when the user requires them.
-
-Recovery uses `db restore --operation OPERATION_ID --archive ARCHIVE_PATH
---directory NEW_DIRECTORY --binding-output NEW_FILE`. Inspect the restored audit
-before deliberately adopting its binding. Prior-incarnation request envelopes
-remain evidence and cannot be replayed against the restored history.
-
-The canonical initial baseline is `migrations/0000-initial/`, generated by
-BumbleDB Log 1.3.1. `pnpm schema:check` verifies its snapshot and TypeScript
-bindings; schema generation does not transfer facts or upgrade a working store.
-Read [migrations](docs/migrations.md) for a cutover or schema change. Retain the
-transition contract before dispatch, resolve uncertainty under that identity,
-compare facts and reports before activation, then adopt the returned binding.
-Keep original request/evidence bytes. A schema mismatch requires the matching
-bindings or an explicit transformation; never hide it with an empty database.
-
-Keep company identities, account details, real examples, rates, evidence, database
-files, and operational notes out of this skill and tracked code. Discover them
-from the selected ledger and private records. Use domain commands, never generic
-fact edits. Run `pnpm check` before publishing code and verify that private files
-remain untracked.
-
-Before a public push, review every outgoing commit as well as the staged diff.
-Check for real company/person names, tax/account identifiers, Mercury references,
-private Drive IDs, local personal paths and credentials; synthetic fixtures must
-not reuse live values. Stage explicit public paths only. Keep the operator
-handoff, receipts, request payloads, scan reports and database files under ignored
-`private/`; never force-add them. Verify the remote branch after pushing.
-
-## Permanent documents and portable recovery
-
-Google Drive is the permanent document store for a ledger configured with
-`private/storage.json`: `{ "version": 1, "required": "GoogleDrive", "remote": "gdrive:" }`.
-The live database stays local. Local document files are disposable caches;
-never leave a required original dependent on a Downloads or workstation path.
-
-Every retained supporting document must have a registered SHA-256 and one
-verified Drive file-ID URL. Reuse a matching existing Drive file; organize it
-without changing its identity. Changed bytes are a different artifact. Retain
-public source citations and historical paths as provenance, not active locations.
-
-Decide what needs retention before archiving. Bank-export CSVs are disposable
-import inputs once their relevant transactions are recorded, reconciled, and
-tagged with native Mercury IDs. Preserve the transaction facts, source identifiers,
-and any already recorded import hashes; do not upload or bundle the raw export
-merely to preserve its bytes. An intentionally unretained import CSV is not a
-missing supporting document or a recovery gap. This rule does not apply to actual
-receipts, bank statements, filed returns, signed elections, or other substantive
-supporting records, and file extension alone does not decide retention.
-
-Existing registered imports require explicit retirement before deleting their
-stored copies: the current audit and backup implementation requires every
-registered artifact. Preserve artifact hashes and transaction/source associations
-when implementing retirement; do not leave broken active links or delete ledger
-facts to remove an import dependency. Historical backups are historical snapshots,
-not a reason to keep archiving disposable inputs into new backups.
-
-After `artifact record`, upload the exact bytes to the configured private company
-folder and call `artifact archive` with
-`{request,business,artifact,driveFileId,remote,evidence}`. This command downloads
-the Drive file by ID, checks its SHA-256, and replaces active locations while
-preserving their historical evidence. `artifact locate` cannot qualify a Drive
-copy. Recording or verifying a cached copy does not add machine-specific paths
-to an archived document. Authentication uses the existing local rclone remote;
-never place credentials in the ledger or archives.
-
-For an already sent bank payment, `artifact attach-bank` takes
-`{request,business,artifact,movement,evidence}` and links its receipt without
-creating another movement. Its evidence must establish that the payment was
-sent; this does not establish bank settlement or recipient receipt.
-
-Run `artifact audit --verify-drive` before declaring document work complete.
-Unarchived documents appear in readiness once Drive archival is in use.
-The configured backup command refuses unarchived or changed documents, downloads
-every document by ID, and bundles those verified bytes by hash. It also includes
-the storage policy and exact application source. Backup verification checks all
-bundled document hashes against the restored ledger; restore creates a disposable
-document cache and retains the storage policy. A complete recovery test also runs
-`artifact audit --verify-drive` against the restored binding.
-
-Preserve an independently verified baseline before cleanup. Keep an inventory
-mapping historical evidence to its Drive document or hashed recovery-archive
-member. Never rewrite immutable command inputs or fabricate missing originals.
-Remove duplicate local sources and inactive staging only after their recovery
-copies and the final restored database have been verified. Publish CURRENT by
-its existing Drive ID only after financial preservation, document checks and
-recovery pass; recheck its prior identity/version/hash before replacement, then
-download, byte-compare and independently restore the published archive.
+- Sending money and submitting forms are external. The ledger records their
+  evidence. An absent record does not prove an action never happened.
+- Never invent a Mercury id, a date, or a withholding amount. Never reuse a
+  historical figure as a default.
+- Native rules price tax from stored policy. Do not add a second calculator.
+- Keep company identities, account numbers, real amounts and private Drive ids
+  out of this repository. They live in the ledger and under `private/`.
+- Retained requests, receipts and evidence live under `private/` and are never
+  force-added to Git.

@@ -7,19 +7,20 @@ import { epochDay, toCalendarDate, type UnixEpochDay } from "./core/time.ts"
 import { entityId, json, mintId, Nonblank, Refusal, unsigned } from "./core/values.ts"
 import { ensureFilingFacts } from "./filing-coverage.ts"
 import { AmendmentDeadlineInput, revisionFilingFacts } from "./filings.ts"
+import { solveRothOnlyGross } from "./gross-up.ts"
 import { ObservedAssessmentInput, observedSetFacts } from "./observations.ts"
 import { approvedPoliciesAt } from "./policy/annual.ts"
 import { currentRevisions, initialFederalAccruals, relationRows, rows } from "./queries.ts"
 import { captureRecoveryClaims, recoveryFacts, settlePaycheck } from "./recoveries.ts"
 import { type Draft, fingerprint, latest, parseStrict, resolveRequest, type Snapshot } from "./runtime.ts"
-import { commandFields, Day, DayPoint, DaySpan, Id, inputField, inputFields } from "./schema/input.ts"
+import { commandFields, DaySpan, Id, inputFields, money } from "./schema/input.ts"
 import { componentPolicy, components, withholdingPolicy } from "./schema/vocabulary.ts"
 import * as S from "./schema.ts"
 import { requirePayrollReady } from "./work.ts"
 
 export const WorkInput = DaySpan
 const SuppliedFIT = Schema.Struct({
-	cents: inputField(S.ObservedAssessment.fields.amount),
+	amount: money(S.ObservedAssessment.fields.amount),
 	evidence: Nonblank
 })
 export const CalculateInput = Schema.Struct({
@@ -28,9 +29,15 @@ export const CalculateInput = Schema.Struct({
 	purpose: Schema.Union([
 		Schema.Struct({
 			kind: Schema.Literal("NewWage"),
-			...inputFields(S.AssessmentSet, ["paidOn"], { paidOn: DayPoint }),
-			grossCents: inputField(S.AssessmentSet.fields.gross),
-			rothCents: inputField(S.ProposedWage.fields.roth),
+			...inputFields(S.AssessmentSet, ["paidOn", "gross"]),
+			...inputFields(S.ProposedWage, ["roth"]),
+			work: WorkInput
+		}),
+		/** Zero cash pay: the gross is solved so the paycheck funds exactly `roth`. */
+		Schema.Struct({
+			kind: Schema.Literal("RothOnly"),
+			...inputFields(S.AssessmentSet, ["paidOn"]),
+			...inputFields(S.ProposedWage, ["roth"]),
 			work: WorkInput
 		}),
 		Schema.Struct({
@@ -44,11 +51,13 @@ export const CalculateInput = Schema.Struct({
 })
 const BankInput = Schema.Struct({
 	...inputFields(S.MercuryTransaction, ["reference"]),
-	...inputFields(S.BankMovement, ["paidOn", "amount"], { paidOn: Day })
+	...inputFields(S.BankMovement, ["paidOn", "amount"])
 })
 export const PostInput = Schema.Struct({
 	...commandFields,
 	calculation: Id,
+	/** Why this wage is being posted now: the approval and the actual payment. */
+	evidence: Nonblank,
 	settlement: Schema.Union([
 		Schema.Struct({ kind: Schema.Literal("Bank"), ...BankInput.fields }),
 		Schema.Struct({ kind: Schema.Literal("NoTransfer") })
@@ -119,8 +128,9 @@ export const calculatePayroll = (payload: unknown) =>
 			business,
 			action: "payroll calculate",
 			input: payload,
-			plan: ({ snapshot, draft, recordingDay }) =>
+			plan: ({ snapshot, draft, recordingDay, note }) =>
 				Effect.gen(function* () {
+					const evidence = yield* note(input.evidence)
 					required(
 						(yield* relationRows(snapshot, S.Employee)).find(
 							(row) => row.id === employee && row.business === business
@@ -138,20 +148,12 @@ export const calculatePayroll = (payload: unknown) =>
 									"The revision target is not this employee's wage"
 								)
 							: undefined
-					const wageInput =
-						purpose.kind === "NewWage"
-							? { paidOn: purpose.paidOn, gross: purpose.grossCents }
-							: required(target, "WageMissing", "Select an existing wage")
-					const { paidOn, gross } = wageInput
+					const paidOn =
+						purpose.kind === "TaxRevision"
+							? required(target, "WageMissing", "Select an existing wage").paidOn
+							: purpose.paidOn
 					const payDay = epochDay(paidOn.start),
 						year = toCalendarDate(payDay).year
-					if (gross === 0n)
-						return yield* Effect.fail(
-							new Refusal({
-								code: "PositiveGrossRequired",
-								message: "New calculations require positive gross cents"
-							})
-						)
 					const policy = yield* policyAt(snapshot, business, payDay)
 					let predecessor: Fact<typeof S.AssessmentRevision> | undefined
 					if (purpose.kind === "TaxRevision") {
@@ -184,9 +186,43 @@ export const calculatePayroll = (payload: unknown) =>
 							row.id !== target?.id &&
 							(row.paidOn.start < paidOn.start ||
 								(row.paidOn.start === paidOn.start &&
-									(purpose.kind === "NewWage" || purpose.sameDayBefore.includes(row.id))))
+									(purpose.kind !== "TaxRevision" || purpose.sameDayBefore.includes(row.id))))
 					)
 					const prior = priorWages.reduce((total, row) => unsigned(total + row.gross), 0n)
+					const availableRules = (yield* relationRows(snapshot, S.RateVersion)).filter(
+						(row) =>
+							row.release === policy.release && row.business === business && contains(row.valid, payDay)
+					)
+					const recoveries =
+						purpose.kind === "TaxRevision"
+							? []
+							: yield* captureRecoveryClaims(snapshot, employee, payDay, evidence)
+					const gross =
+						purpose.kind === "TaxRevision"
+							? required(target, "WageMissing", "Select an existing wage").gross
+							: purpose.kind === "NewWage"
+								? purpose.gross
+								: yield* solveRothOnlyGross({
+										snapshot,
+										employeeSchedules: availableRules
+											.filter(
+												(row) =>
+													componentPolicy[row.component].payer === "Employee" &&
+													componentPolicy[row.component].method === "MarginalBands"
+											)
+											.map((row) => row.schedule),
+										prior,
+										fit: input.fit.amount,
+										roth: purpose.roth,
+										claims: recoveries
+									})
+					if (gross === 0n)
+						return yield* Effect.fail(
+							new Refusal({
+								code: "PositiveGrossRequired",
+								message: "New calculations require a positive gross"
+							})
+						)
 					const earning = { start: prior, end: unsigned(prior + gross) }
 					const context = {
 						wages: priorWages.map((row) => ({ wage: row.id, gross: row.gross, paidOn: row.paidOn })),
@@ -194,10 +230,6 @@ export const calculatePayroll = (payload: unknown) =>
 						sourceStamp: snapshot.stateStamp,
 						evidence: input.evidence
 					}
-					const availableRules = (yield* relationRows(snapshot, S.RateVersion)).filter(
-						(row) =>
-							row.release === policy.release && row.business === business && contains(row.valid, payDay)
-					)
 					const availableScopes = (yield* relationRows(snapshot, S.TaxBaseScope)).filter(
 						(row) => row.business === business && row.employee === employee && row.year === BigInt(year)
 					)
@@ -218,11 +250,11 @@ export const calculatePayroll = (payload: unknown) =>
 							business,
 							paidOn,
 							release: policy.release,
-							purpose: purpose.kind,
+							purpose: purpose.kind === "TaxRevision" ? "TaxRevision" : "NewWage",
 							sourceStamp: json(snapshot.stateStamp),
 							recordingDay,
 							contextHash: fingerprint(context),
-							evidence: input.evidence
+							evidence
 						}
 					])
 					yield* draft.insert(
@@ -236,8 +268,7 @@ export const calculatePayroll = (payload: unknown) =>
 							day: paidOn
 						}))
 					)
-					if (purpose.kind === "NewWage") {
-						const recoveries = yield* captureRecoveryClaims(snapshot, employee, payDay, input.evidence)
+					if (purpose.kind !== "TaxRevision") {
 						yield* draft.insert(
 							S.CalculationRecoveryClaim,
 							recoveries.map((row) => ({ ...row, calculation, set }))
@@ -264,8 +295,8 @@ export const calculatePayroll = (payload: unknown) =>
 								paidOn,
 								depositor: depositor.id,
 								span,
-								roth: purpose.rothCents,
-								evidence: input.evidence
+								roth: purpose.roth,
+								evidence
 							}
 						])
 					} else {
@@ -281,7 +312,7 @@ export const calculatePayroll = (payload: unknown) =>
 								employee,
 								paidOn,
 								gross,
-								evidence: input.evidence
+								evidence
 							}
 						])
 					}
@@ -293,7 +324,7 @@ export const calculatePayroll = (payload: unknown) =>
 						])
 						if (definition.method === "SuppliedAmount") {
 							yield* draft.insert(S.ObservedAssessment, [
-								{ set, component, amount: input.fit.cents, evidence: input.fit.evidence }
+								{ set, component, amount: input.fit.amount, evidence: yield* note(input.fit.evidence) }
 							])
 							continue
 						}
@@ -369,7 +400,7 @@ export const calculatePayroll = (payload: unknown) =>
 							}
 						])
 					}
-					return { calculation, set, purpose: purpose.kind }
+					return { calculation, set, purpose: purpose.kind, gross }
 				})
 		})
 	})
@@ -511,8 +542,9 @@ export const postPayroll = (payload: unknown) =>
 			business,
 			action: "payroll post",
 			input: payload,
-			plan: ({ snapshot, draft, recordingDay, recordedAt }) =>
+			plan: ({ snapshot, draft, recordingDay, note }) =>
 				Effect.gen(function* () {
+					const posted = yield* note(input.evidence)
 					const inspected = yield* freshCalculation(
 						snapshot,
 						business,
@@ -602,7 +634,7 @@ export const postPayroll = (payload: unknown) =>
 							year: BigInt(year),
 							amount: set.gross,
 							origin: "Regular",
-							evidence: proposal.evidence
+							evidence: posted
 						}
 					])
 					yield* draft.insert(S.BudgetAssignment, [
@@ -619,8 +651,7 @@ export const postPayroll = (payload: unknown) =>
 							paidOn: set.paidOn,
 							commitment,
 							gross: set.gross,
-							initialRevision: revision,
-							recordedAt
+							initialRevision: revision
 						}
 					])
 					yield* draft.insert(S.RegularCommitment, [{ commitment, wage }])
@@ -635,7 +666,7 @@ export const postPayroll = (payload: unknown) =>
 							"AssessmentMissing",
 							`Missing ${component}`
 						).amount,
-						evidence: calculation.evidence
+						evidence: posted
 					}))
 					yield* draft.insert(S.Deduction, deductions)
 					const paycheck = required(
@@ -652,7 +683,7 @@ export const postPayroll = (payload: unknown) =>
 								year: BigInt(year),
 								kind: "Recovery",
 								amount: recovery,
-								evidence: calculation.evidence
+								evidence: posted
 							}
 						])
 					if (election) {
@@ -663,7 +694,7 @@ export const postPayroll = (payload: unknown) =>
 								year: BigInt(year),
 								kind: "Roth",
 								amount: proposal.roth,
-								evidence: election.evidence
+								evidence: posted
 							}
 						])
 						yield* draft.insert(S.ElectionUse, [
@@ -713,8 +744,7 @@ export const postPayroll = (payload: unknown) =>
 								direction: "Outflow",
 								paidOn: bankDay,
 								amount: bankAmount,
-								evidence: calculation.evidence,
-								recordedAt
+								evidence: posted
 							}
 						])
 						yield* draft.insert(S.MercuryTransaction, [{ movement, reference: settlement.reference }])
@@ -726,7 +756,7 @@ export const postPayroll = (payload: unknown) =>
 								business,
 								purpose: cash > 0n ? "PayrollCash" : "RothRemittance",
 								amount: bankAmount,
-								evidence: calculation.evidence
+								evidence: posted
 							}
 						])
 						if (cash > 0n) yield* draft.insert(S.PayrollCashBinding, [{ allocation, wage, business }])
@@ -748,8 +778,7 @@ export const postPayroll = (payload: unknown) =>
 								amount: proposal.roth,
 								source: "EmployeeRothDeferral",
 								origin: "Observed",
-								evidence: calculation.evidence,
-								recordedAt
+								evidence: posted
 							}
 						])
 						yield* draft.insert(S.ContributionDeduction, [
@@ -785,10 +814,9 @@ export const postPayroll = (payload: unknown) =>
 						employee: set.employee,
 						paidOn: set.paidOn,
 						gross: set.gross,
-						kind: "Initial",
-						recordedAt
+						kind: "Initial"
 					})
-					yield* ensureFilingFacts(snapshot, draft, {
+					yield* ensureFilingFacts(snapshot, draft, note, {
 						business,
 						throughYear: year,
 						additionalPaidEmployees: [{ employee: set.employee, year }]
@@ -807,7 +835,7 @@ export const revisePayrollTax = (payload: unknown) =>
 			business,
 			action: "payroll revise-tax",
 			input: payload,
-			plan: ({ snapshot, draft, recordingDay, recordedAt }) =>
+			plan: ({ snapshot, draft, recordingDay, note }) =>
 				Effect.gen(function* () {
 					const prepared = yield* Effect.gen(function* () {
 						const source = input.assessment
@@ -837,6 +865,7 @@ export const revisePayrollTax = (payload: unknown) =>
 						)
 						const set = yield* observedSetFacts(
 							draft,
+							note,
 							{
 								id: yield* mintId,
 								business,
@@ -852,7 +881,7 @@ export const revisePayrollTax = (payload: unknown) =>
 							proposal: {
 								wage: wage.id,
 								predecessor: entityId(source.predecessor),
-								evidence: source.figures.evidence
+								evidence: yield* note(source.figures.evidence)
 							}
 						}
 					})
@@ -873,8 +902,7 @@ export const revisePayrollTax = (payload: unknown) =>
 						employee: set.employee,
 						paidOn: set.paidOn,
 						gross: set.gross,
-						kind: "Correction",
-						recordedAt
+						kind: "Correction"
 					}
 					const links = yield* revisionFacts(snapshot, draft, revisionFact)
 					yield* draft.insert(S.CorrectionAssessment, [
@@ -885,6 +913,7 @@ export const revisePayrollTax = (payload: unknown) =>
 						accounts: links,
 						recordingDay,
 						evidence: proposal.evidence,
+						note,
 						deadlines: input.amendments ?? []
 					})
 					return {

@@ -1,6 +1,6 @@
 {
 	"name": "wagie-tools",
-	"version": "1.0.0",
+	"version": "2.0.0",
 	"private": true,
 	"type": "module",
 	"packageManager": "pnpm@11.15.1",
@@ -13,7 +13,7 @@
 		"test": "node --test test/*.test.ts",
 		"lint": "biome check src test scripts migrations package.json tsconfig.json biome.json",
 		"format": "biome check --write src test scripts migrations package.json tsconfig.json biome.json",
-		"schema:generate": "bumbledb-log snapshot --schema src/schema.ts --export ledger --out migrations/0000-initial/schema.json && bumbledb-log bindings --snapshot migrations/0000-initial/schema.json --out migrations/0000-initial/schema.ts",
+		"schema:generate": "bumbledb-log snapshot --schema src/schema.ts --export ledger --out migrations/0001-statements/schema.json && bumbledb-log bindings --snapshot migrations/0001-statements/schema.json --out migrations/0001-statements/schema.ts",
 		"schema:check": "node scripts/schema.ts",
 		"check": "pnpm typecheck && pnpm lint && pnpm test && pnpm schema:check"
 	},

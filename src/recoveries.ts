@@ -5,14 +5,14 @@ import { epochDay, type UnixEpochDay } from "./core/time.ts"
 import { json, mintId, Refusal, signed, unsigned } from "./core/values.ts"
 import { currentAssessments, relationRows, rows } from "./queries.ts"
 import { type Draft, parseStrict, type Snapshot } from "./runtime.ts"
-import { commandFields, inputField, inputFields } from "./schema/input.ts"
+import { commandFields, inputField, inputFields, money } from "./schema/input.ts"
 import { componentPolicy, withholdingPolicy } from "./schema/vocabulary.ts"
 import * as S from "./schema.ts"
 
 export const RecoveryInput = Schema.Struct(
 	inputFields(S.Recovery, ["owedOnWage", "component", "amount", "evidence"], {
 		component: Schema.Literals(withholdingPolicy.map((row) => row.component)),
-		amount: inputField(S.Recovery.fields.amount).check(
+		amount: money(S.Recovery.fields.amount).check(
 			Schema.makeFilter((value) => value > 0n || "A recovery must be positive")
 		)
 	})
@@ -57,7 +57,7 @@ export const captureRecoveryClaims = (
 	snapshot: Snapshot,
 	employee: Uuid,
 	paidOn: UnixEpochDay,
-	evidence: string
+	evidence: Uuid
 ) =>
 	Effect.gen(function* () {
 		const deducted = yield* relationRows(snapshot, S.Deduction)
@@ -173,7 +173,7 @@ export const recoveryFacts = (
 		return input.reduce((sum, row) => unsigned(sum + row.amount), 0n)
 	})
 
-const RecordInput = Schema.Struct({
+export const RecoveryRecordInput = Schema.Struct({
 	...commandFields,
 	...inputFields(S.Recovery, ["evidence"]),
 	wage: inputField(S.Recovery.fields.fromWage),
@@ -182,14 +182,14 @@ const RecordInput = Schema.Struct({
 /** Attributes an existing actual recovery deduction; does not change cash. */
 export const recordRecovery = (payload: unknown) =>
 	Effect.gen(function* () {
-		const input = parseStrict(RecordInput, payload),
+		const input = parseStrict(RecoveryRecordInput, payload),
 			business = input.business
 		return yield* businessCommand({
 			request: input.request,
 			business,
 			action: "recovery record",
 			input: payload,
-			plan: ({ snapshot, draft, recordingDay }) =>
+			plan: ({ snapshot, draft, recordingDay, note }) =>
 				Effect.gen(function* () {
 					const wage = (yield* relationRows(snapshot, S.Wage)).find(
 						(row) => row.id === input.wage && row.business === business
@@ -236,8 +236,10 @@ export const recordRecovery = (payload: unknown) =>
 								message: "Attributions must exactly explain the actual recovery deduction"
 							})
 						)
-					yield* recoveryFacts(draft, wage.id, admitted)
-					return { wage: wage.id, evidence: input.evidence }
+					const noted = []
+					for (const row of admitted) noted.push({ ...row, evidence: yield* note(row.evidence) })
+					yield* recoveryFacts(draft, wage.id, noted)
+					return { wage: wage.id }
 				})
 		})
 	})

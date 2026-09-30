@@ -34,12 +34,12 @@ function assessmentProjection(selection: typeof allSets) {
 	// Basis + band identify each contribution, even when two amounts are equal.
 	const intersections = query(ledger).rule((r) => {
 		const { id: basis, set, schedule, earning } = v(CalculationBasis)
-		const { id: band, span, numerator, role } = v(TaxBand)
+		const { id: band, wages, numerator, role } = v(TaxBand)
 		return r
 			.match(CalculationBasis, { id: basis, set, schedule, earning })
 			.match(selection, { set })
-			.match(TaxBand, { id: band, schedule, span, numerator, role })
-			.find({ basis, band, numerator, role, span: r.intersection(earning, span) })
+			.match(TaxBand, { id: band, schedule, wages, numerator, role })
+			.find({ basis, band, numerator, role, span: r.intersection(earning, wages) })
 	})
 	const measured = query(ledger).rule((r) => {
 		const { span, ...identity } = v(intersections)

@@ -8,32 +8,15 @@ import { depositRegister, entryKey } from "./deposits.ts"
 import { inspectDocuments } from "./documents.ts"
 import { annualPolicyData, missingAnnualInputs } from "./policy/annual.ts"
 import { currentAssessments, currentRevisions, liabilityEntries, relationRows, rows } from "./queries.ts"
+import { questions } from "./questions.ts"
 import { paymentEquation } from "./reconciliation.ts"
 import { employeeTaxPositions, recoveryEquation } from "./recoveries.ts"
 import type { Snapshot } from "./runtime.ts"
 import { formPolicy } from "./schema/vocabulary.ts"
 import * as S from "./schema.ts"
+import { type WorkItem, workItem } from "./work-rules.ts"
 
-export type WorkItem = {
-	readonly kind:
-		| "Filing"
-		| "Payment"
-		| "Reconciliation"
-		| "Disposition"
-		| "Setup"
-		| "PolicyRefresh"
-		| "Retirement"
-		| "DistributionReview"
-	readonly blocks: "Payroll" | "RetirementFunding" | "None"
-	readonly id: string
-	readonly label: string
-	readonly opensOn: UnixEpochDay
-	readonly dueOn?: UnixEpochDay
-	readonly completion: "Open" | "Complete" | "Carryover"
-	readonly action: string
-	readonly amount?: bigint
-	readonly evidence?: string
-}
+export type { WorkItem } from "./work-rules.ts"
 export type ReadinessIssue = { readonly id: string; readonly kind: string; readonly detail: string }
 
 /** A single authoritative read model. Completion is derived from evidence;
@@ -47,6 +30,8 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 		const data = yield* Effect.all(
 			{
 				subjects: relationRows(snapshot, S.FilingSubject),
+				planSubjects: relationRows(snapshot, S.PlanSubject),
+				retirementBases: relationRows(snapshot, S.RetirementFilingBasis),
 				formAdjustments: relationRows(snapshot, S.FormAdjustment),
 				adjustmentBases: relationRows(snapshot, S.FilingAdjustmentBasis),
 				deductions: relationRows(snapshot, S.Deduction),
@@ -71,17 +56,14 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 				reconciliations: relationRows(snapshot, S.PaymentReconciliation),
 				allocations: relationRows(snapshot, S.PaymentAllocation),
 				adjustments: relationRows(snapshot, S.PaymentAdjustment),
-				financialIssues: relationRows(snapshot, S.FinancialIssue),
-				paymentIssues: relationRows(snapshot, S.PaymentIssue),
-				financialResolutions: relationRows(snapshot, S.FinancialResolution),
 				dispositions: relationRows(snapshot, S.SignedDisposition),
 				amendments: relationRows(snapshot, S.AmendmentLiability),
-				reviews: relationRows(snapshot, S.Review),
-				resolutions: relationRows(snapshot, S.Resolution),
 				employees: relationRows(snapshot, S.Employee),
 				elections: relationRows(snapshot, S.Election),
+				electionDocuments: relationRows(snapshot, S.ElectionDocument),
 				businesses: relationRows(snapshot, S.Business),
 				accounts: relationRows(snapshot, S.TaxAccount),
+				bindings: relationRows(snapshot, S.PolicyBinding),
 				entries: rows(snapshot, liabilityEntries, {})
 			},
 			{ concurrency: 1 }
@@ -94,9 +76,9 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 		const employees = data.employees.filter((row) => row.business === business)
 		const employeeIds = new Set(employees.map((row) => row.id))
 		const work: WorkItem[] = []
-		const electionDocuments = yield* relationRows(snapshot, S.ElectionDocument)
+		const readiness: ReadinessIssue[] = []
 		const annual = yield* annualPolicyData(snapshot, business)
-		const active = (yield* relationRows(snapshot, S.PolicyBinding)).find((row) => row.business === business)
+		const active = data.bindings.find((row) => row.business === business)
 		for (const policyYear of [year, year + 1n]) {
 			const valid = periodSpan(Number(policyYear), "Year")
 			for (const authority of S.Authority.handles) {
@@ -108,41 +90,36 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 						row.valid.start === valid.start &&
 						row.valid.end === valid.end
 				)
-				const candidates = annual.policies.filter(
+				const candidate = annual.policies.find(
 					(row) => row.authority === authority && row.year === policyYear
 				)
-				const missing = candidates.length
-					? candidates.map((row) => ({ annual: row.id, missing: missingAnnualInputs(annual, row.id) }))
-					: [{ missing: ["PublishedAnnualPolicy"] }]
-				work.push({
-					blocks: "Payroll",
-					kind: "PolicyRefresh",
-					id: `policy/${business}/${authority}/${policyYear}`,
-					label: `${policyYear} ${authority} payroll policy refresh`,
-					opensOn: valid.start,
-					dueOn: valid.start,
-					completion: approval ? "Complete" : "Open",
-					action: "policy refresh",
-					evidence: approval
-						? `Approved annual policy ${approval.annual}`
-						: JSON.stringify({
-								required: missing,
-								next: "Record verified rules and employer evidence, install executable coverage, then refresh this authority for the active release"
-							})
-				})
+				const missing = candidate ? missingAnnualInputs(annual, candidate.id) : ["PublishedAnnualPolicy"]
+				work.push(
+					workItem({
+						rule: "policy-refresh",
+						subject: `${authority}/${policyYear}`,
+						label: approval
+							? `${policyYear} ${authority} payroll policy approved`
+							: `${policyYear} ${authority} payroll policy needs refresh${missing.length ? `; missing ${missing.join(", ")}` : ""}`,
+						opensOn: valid.start,
+						dueOn: valid.start,
+						complete: approval !== undefined,
+						next: candidate
+							? { op: "policy.refresh", input: { annual: candidate.id, release: active?.release } }
+							: {
+									op: "policy.annual",
+									input: { authority, year: Number(policyYear), release: active?.release }
+								}
+					})
+				)
 			}
 		}
-		const readiness: ReadinessIssue[] = []
-		const setup = (id: string, label: string, action: string) =>
-			work.push({
-				blocks: "Payroll",
-				kind: "Setup",
-				id,
-				label,
-				action,
-				opensOn: asOf,
-				completion: "Open"
-			})
+		const setup = (
+			rule: Parameters<typeof workItem>[0]["rule"],
+			subject: string,
+			label: string,
+			next: WorkItem["next"]
+		) => work.push(workItem({ rule, subject, label, opensOn: asOf, complete: false, next }))
 		const rejected = new Set(data.rejections.map((row) => row.submission))
 		const currentVersions = new Map<Uuid, (typeof data.versions)[number]>()
 		for (const version of data.versions) {
@@ -158,11 +135,10 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 		for (const filing of filings) {
 			const version = currentVersions.get(filing.id)
 			const completed =
-				version && data.submissions.some((row) => row.version === version.id && !rejected.has(row.id))
+				version !== undefined &&
+				data.submissions.some((row) => row.version === version.id && !rejected.has(row.id))
 			const employee = data.employeeSubjects.find((row) => row.subject === filing.subject)?.employee
-			const plan = (yield* relationRows(snapshot, S.PlanSubject)).find(
-				(r) => r.subject === filing.subject
-			)?.plan
+			const plan = data.planSubjects.find((r) => r.subject === filing.subject)?.plan
 			const expected = data.revisions.filter(
 				(row) =>
 					plan === undefined &&
@@ -179,35 +155,45 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 			)
 			const currentAdjustments = data.formAdjustments.filter((row) => row.filing === filing.id)
 			const retirementStale =
-				plan &&
+				plan !== undefined &&
 				version?.origin === "Prepared" &&
-				(yield* relationRows(snapshot, S.RetirementFilingBasis)).find((r) => r.version === version.id)
-					?.digest !== (yield* retirementFilingDigest(snapshot, plan, filing.period))
+				data.retirementBases.find((r) => r.version === version.id)?.digest !==
+					(yield* retirementFilingDigest(snapshot, plan, filing.period))
+			// UUIDv7 ids are the clock: a revision minted after an attested
+			// version is newer information than that version.
 			const stale =
 				retirementStale ||
-				(version &&
+				(version !== undefined &&
 					(version.origin === "Prepared"
 						? expected.length !== basis.size ||
 							expected.some((row) => !basis.has(row.id)) ||
 							currentAdjustments.length !== adjustmentIds.size ||
 							currentAdjustments.some((row) => !adjustmentIds.has(row.id))
-						: expected.some((row) => row.recordedAt > version.recordedAt)))
+						: expected.some((row) => row.id > version.id)))
 			// A submitted snapshot stays submitted. Later facts create correction
 			// work on the leaf of its explicit amendment chain.
 			if (completed && stale && !data.corrections.some((row) => row.parent === filing.id))
-				setup(`correction/${filing.id}`, `${filing.form} has changed since submission`, "filings amend")
+				setup("filing-correction", filing.id, `${filing.form} has changed since submission`, {
+					op: "filings.amend",
+					input: { parent: filing.id }
+				})
 			const deadline = deadlines.get(filing.id)
-			work.push({
-				blocks: "Payroll",
-				kind: "Filing",
-				id: filing.id,
-				label: filing.form,
-				opensOn: epochDay(filing.opensOn),
-				dueOn: epochDay(deadline?.dueOn ?? filing.dueOn),
-				completion: completed ? "Complete" : "Open",
-				action: completed ? "filings inspect" : version && !stale ? "filings submit" : "filings prepare",
-				evidence: deadline?.evidence ?? filing.evidence
-			})
+			work.push(
+				workItem({
+					rule: "filing",
+					subject: filing.id,
+					label: filing.form,
+					opensOn: epochDay(filing.opensOn),
+					dueOn: epochDay(deadline?.dueOn ?? filing.dueOn),
+					complete: completed,
+					evidence: deadline?.evidence ?? filing.evidence,
+					next: completed
+						? { op: "filings.inspect", input: {} }
+						: version && !stale
+							? { op: "filings.submit", input: { version: version.id } }
+							: { op: "filings.prepare", input: { filing: filing.id } }
+				})
+			)
 		}
 		const requirements = data.requirements.filter(
 			(row) =>
@@ -218,7 +204,10 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 		for (const [form, policy] of Object.entries(formPolicy)) {
 			if (policy.due === "RecordedEvent") continue
 			if (!requirements.some((row) => row.form === form))
-				setup(`requirement/${form}`, `Missing ${form} requirement`, "filings ensure")
+				setup("filing-requirement", form, `Missing ${form} requirement`, {
+					op: "filings.ensure",
+					input: { throughYear: Number(year) }
+				})
 		}
 		for (const requirement of requirements) {
 			if (formPolicy[requirement.form].due === "RecordedEvent") continue
@@ -239,8 +228,9 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 								)
 						))
 			)
+			const ensure = { op: "filings.ensure", input: { throughYear: Number(year) } }
 			if (requirement.subjectKind === "Business" && !expectedSubjects.length)
-				setup(`subject/${requirement.id}`, `Missing ${requirement.form} business subject`, "filings ensure")
+				setup("filing-subject", requirement.id, `Missing ${requirement.form} business subject`, ensure)
 			for (const subject of expectedSubjects) {
 				if (
 					scopes.some(
@@ -249,9 +239,10 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 				)
 					continue
 				setup(
-					`scope/${requirement.id}/${subject.id}`,
+					"filing-scope",
+					`${requirement.id}/${subject.id}`,
 					`${requirement.form} coverage does not include this payroll date`,
-					"filings ensure"
+					ensure
 				)
 			}
 			if (requirement.subjectKind === "Employee") {
@@ -265,28 +256,36 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 				)) {
 					if (!data.employeeSubjects.some((row) => row.employee === employee.id))
 						setup(
-							`subject/${requirement.id}/${employee.id}`,
+							"filing-subject",
+							`${requirement.id}/${employee.id}`,
 							`Missing ${requirement.form} employee subject`,
-							"filings ensure"
+							ensure
 						)
 				}
 			}
 		}
 		for (const family of S.AccountFamily.handles)
 			if (!data.accounts.some((row) => row.business === business && row.family === family))
-				setup(`account/${family}`, `Missing ${family} tax account`, "business configure")
+				setup("tax-account", family, `Missing ${family} tax account`, { op: "business.configure", input: {} })
 		for (const employee of employees) {
 			if (!data.budgets.some((row) => row.employee === employee.id && row.year === year))
-				setup(`budget/${employee.id}/${year}`, "Missing annual compensation budget", "compensation budget")
+				setup("annual-budget", `${employee.id}/${year}`, "Missing annual compensation budget", {
+					op: "compensation.budget",
+					input: { employee: employee.id, year: Number(year) }
+				})
 		}
 		for (const commitment of data.commitments.filter(
 			(row) => employeeIds.has(row.employee) && row.year === year
 		)) {
 			if (!data.assignments.some((row) => row.commitment === commitment.id))
 				setup(
-					`budget-assignment/${commitment.id}`,
+					"budget-assignment",
+					commitment.id,
 					"Observed compensation is not assigned to its annual budget",
-					"compensation assign"
+					{
+						op: "compensation.assign",
+						input: { commitment: commitment.id }
+					}
 				)
 		}
 		const entries = data.entries.filter((row) => row.business === business)
@@ -315,51 +314,54 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 			}
 			if (!reconciliation || equation.difference !== 0n) {
 				unresolvedAccounts.add(payment.account)
-				work.push({
-					blocks: "Payroll",
-					kind: "Reconciliation",
-					id: payment.id,
-					label: "Account for money already sent",
-					opensOn: asOf,
-					completion: "Open",
-					action: "payment reconcile",
-					amount: equation.difference,
-					evidence: payment.evidence
-				})
+				work.push(
+					workItem({
+						rule: "payment-reconciliation",
+						subject: payment.id,
+						label: "Account for money already sent",
+						opensOn: asOf,
+						complete: false,
+						amount: equation.difference,
+						evidence: payment.evidence,
+						next: { op: "payment.reconcile", input: { payments: [{ payment: payment.id }] } }
+					})
+				)
 			}
 		}
-		for (const issue of data.financialIssues.filter(
-			(row) =>
-				row.business === business &&
-				!data.financialResolutions.some((resolution) => resolution.issue === row.id)
-		)) {
-			const paymentIssue = data.paymentIssues.find((row) => row.issue === issue.id)
-			if (paymentIssue) unresolvedAccounts.add(paymentIssue.account)
-			work.push({
-				blocks: "Payroll",
-				kind: "Reconciliation",
-				id: issue.id,
-				label: issue.detail,
-				opensOn: asOf,
-				completion: "Open",
-				action: "payment reconcile",
-				evidence: issue.evidence
-			})
+		const openQuestions = (yield* questions(snapshot, business)).filter((q) => !q.answer)
+		for (const question of openQuestions) {
+			if (question.kind === "TaxAccount") {
+				if (question.account) unresolvedAccounts.add(question.account)
+				work.push(
+					workItem({
+						rule: "tax-account-question",
+						subject: question.id,
+						label: question.detail,
+						opensOn: asOf,
+						complete: false,
+						evidence: question.evidence,
+						next: { op: "payment.reconcile", input: { resolveIssues: [question.id] } }
+					})
+				)
+			}
+			if (question.kind === "Review")
+				readiness.push({ id: question.id, kind: "Question", detail: question.detail })
 		}
 		const disposed = new Set(data.dispositions.map(entryKey))
 		for (const entry of entries.filter(
 			(row) => row.amount < 0n && !allocated.has(entryKey(row)) && !disposed.has(entryKey(row))
 		)) {
-			work.push({
-				blocks: "Payroll",
-				kind: "Disposition",
-				id: entryKey(entry),
-				label: "Resolve the tax reduction without assuming a refund or credit",
-				opensOn: asOf,
-				completion: "Open",
-				action: "payment dispose",
-				amount: entry.amount
-			})
+			work.push(
+				workItem({
+					rule: "negative-liability",
+					subject: entryKey(entry),
+					label: "Resolve the tax reduction without assuming a refund or credit",
+					opensOn: asOf,
+					complete: false,
+					amount: entry.amount,
+					next: { op: "payment.dispose", input: { revision: entry.revision, account: entry.account } }
+				})
+			)
 		}
 		const amendmentEntries = new Set(data.amendments.filter((row) => row.business === business).map(entryKey))
 		for (const amendment of data.amendments.filter((row) => row.business === business)) {
@@ -371,41 +373,46 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 					message: "An amendment does not match its business or liability"
 				})
 			if (entry.amount <= 0n) continue
-			work.push({
-				blocks: "Payroll",
-				kind: "Payment",
-				id: entryKey(entry),
-				label: `${filing.form} correction payment`,
-				opensOn: epochDay(filing.opensOn),
-				dueOn: epochDay(deadlines.get(filing.id)?.dueOn ?? filing.dueOn),
-				completion: allocated.has(entryKey(entry)) ? "Complete" : "Open",
-				action: unresolvedAccounts.has(entry.account) ? "payment reconcile" : "payment record",
-				amount: allocated.has(entryKey(entry)) ? 0n : entry.amount,
-				evidence: amendment.evidence
-			})
+			const paid = allocated.has(entryKey(entry))
+			work.push(
+				workItem({
+					rule: "correction-payment",
+					subject: entryKey(entry),
+					label: `${filing.form} correction payment`,
+					opensOn: epochDay(filing.opensOn),
+					dueOn: epochDay(deadlines.get(filing.id)?.dueOn ?? filing.dueOn),
+					complete: paid,
+					amount: paid ? 0n : entry.amount,
+					evidence: amendment.evidence,
+					next: unresolvedAccounts.has(entry.account)
+						? { op: "payment.reconcile", input: {} }
+						: { op: "payment.record", input: { account: entry.account } }
+				})
+			)
 		}
 		const deposits = yield* depositRegister(snapshot, business, amendmentEntries, acceptedReconciliations)
 		for (const deposit of deposits.deposits) {
-			work.push({
-				blocks: "Payroll",
-				kind: "Payment",
-				id: deposit.checkpoint,
-				label: `${data.accounts.find((row) => row.id === deposit.account)?.family ?? deposit.account} deposit`,
-				opensOn: deposit.opensOn,
-				dueOn: deposit.dueOn,
-				completion:
-					deposit.disposition === "Carryover"
-						? "Carryover"
-						: deposit.outstanding === 0n
-							? "Complete"
-							: "Open",
-				action: unresolvedAccounts.has(deposit.account) ? "payment reconcile" : "payment record",
-				amount: deposit.outstanding,
-				evidence: deposit.evidence
-			})
+			const family = data.accounts.find((row) => row.id === deposit.account)?.family ?? deposit.account
+			work.push(
+				workItem({
+					rule: "deposit",
+					subject: deposit.checkpoint,
+					label: `${family} deposit`,
+					opensOn: deposit.opensOn,
+					dueOn: deposit.dueOn,
+					complete: deposit.disposition !== "Carryover" && deposit.outstanding === 0n,
+					carryover: deposit.disposition === "Carryover",
+					amount: deposit.outstanding,
+					evidence: deposit.evidence,
+					next: unresolvedAccounts.has(deposit.account)
+						? { op: "payment.reconcile", input: {} }
+						: { op: "payment.record", input: { account: deposit.account, amount: deposit.outstanding } }
+				})
+			)
 		}
+		const install = { op: "policy.install", input: {} }
 		for (const entry of deposits.uncovered)
-			setup(`deposit/${entryKey(entry)}`, "Missing deposit coverage for a posted liability", "policy install")
+			setup("deposit-coverage", entryKey(entry), "Missing deposit coverage for a posted liability", install)
 		for (const account of data.accounts.filter((row) => row.business === business)) {
 			if (
 				!deposits.checkpoints.some(
@@ -413,16 +420,12 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 				)
 			)
 				setup(
-					`deposit-coverage/${account.id}`,
+					"deposit-coverage",
+					account.id,
 					`Missing current deposit calendar for ${account.family}`,
-					"policy install"
+					install
 				)
 		}
-		for (const review of data.reviews.filter(
-			(row) =>
-				employeeIds.has(row.employee) && !data.resolutions.some((resolution) => resolution.review === row.id)
-		))
-			readiness.push({ id: review.id, kind: "Review", detail: review.detail })
 		for (const employee of employees.filter(
 			(row) =>
 				!data.elections.some(
@@ -437,7 +440,7 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 			readiness.push({
 				id: employee.id,
 				kind: "ElectionMissing",
-				detail: electionDocuments.some((row) => row.employee === employee.id && row.year === year)
+				detail: data.electionDocuments.some((row) => row.employee === employee.id && row.year === year)
 					? "Signed election document recorded; verify its effective timing and employee allowance before authorizing new Roth deductions"
 					: "No applicable election is recorded for new Roth payroll"
 			})
@@ -452,7 +455,7 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 				readiness.push({
 					id: deduction.wage,
 					kind: "RecoveryUnattributed",
-					detail: `${equation.difference} cents of actual recovery deductions need attribution: recovery record`
+					detail: `${equation.difference} cents of actual recovery deductions need attribution: recovery.record`
 				})
 		}
 		for (const position of employeeTaxPositions(data.assessed, data.deductions, data.recoveries).filter(
@@ -471,12 +474,12 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 				readiness.push({
 					id: document.id,
 					kind: "DocumentUnarchived",
-					detail: "Required evidence has no verified permanent Drive copy: artifact archive"
+					detail: "Required evidence has no verified Drive copy: artifact.archive"
 				})
 		work.push(...(yield* bookkeepingWork(snapshot, business, asOf)))
 		work.sort((a, b) => (a.opensOn < b.opensOn ? -1 : a.opensOn > b.opensOn ? 1 : a.id.localeCompare(b.id)))
 		const blockers = work.filter(
-			(item) => item.blocks === "Payroll" && item.completion === "Open" && item.opensOn <= asOf
+			(item) => item.gates === "Payroll" && item.status === "Open" && item.opensOn <= asOf
 		)
 		return { business: company.id, asOf, state: snapshot.stateStamp, work, blockers, readiness }
 	})
@@ -488,8 +491,9 @@ export const requirePayrollReady = (snapshot: Snapshot, business: Uuid, asOf: Un
 			return yield* Effect.fail(
 				new Refusal({
 					code: "PayrollBlocked",
-					message: JSON.stringify(register.blockers, (_, value) =>
-						typeof value === "bigint" ? value.toString() : value
+					message: JSON.stringify(
+						register.blockers.map((item) => ({ id: item.id, label: item.label, next: item.next.op })),
+						(_, value) => (typeof value === "bigint" ? value.toString() : value)
 					)
 				})
 			)

@@ -9,7 +9,7 @@ import { currentAssessments, currentRevisions, liabilityEntries, rows } from "..
 import { paymentEquation } from "../src/reconciliation.ts"
 import { components } from "../src/schema/vocabulary.ts"
 import * as S from "../src/schema.ts"
-import { apply, bankForWage, withHistory, yearFacts } from "./native-history.ts"
+import { apply, bankForWage, say, withHistory, yearFacts } from "./native-history.ts"
 
 test("assessment revisions preserve the wage, original allocation and signed financial differences", async () => {
 	await withHistory((history) =>
@@ -35,8 +35,7 @@ test("assessment revisions preserve the wage, original allocation and signed fin
 					name: "Revision Test",
 					ein: "00-0000001",
 					state: "TX",
-					timeZone: "America/Chicago",
-					recordedAt: 0n
+					timeZone: "America/Chicago"
 				}
 			])
 			yield* draft.insert(S.Employee, [
@@ -47,12 +46,11 @@ test("assessment revisions preserve the wage, original allocation and signed fin
 					lastName: "Only",
 					ssn: "000-00-0000",
 					address: "Synthetic",
-					filingStatus: "Single",
-					recordedAt: 0n
+					filingStatus: "Single"
 				}
 			])
 			yield* draft.insert(S.BudgetCommitment, [
-				{ id: commitment, employee, year: 2026n, amount: 100000n, origin: "Regular", evidence }
+				{ id: commitment, employee, year: 2026n, amount: 100000n, origin: "Regular", evidence: say(evidence) }
 			])
 			yield* bankForWage(draft, wage, business, paidOn.start, 100000n)
 			yield* draft.insert(S.Wage, [
@@ -66,18 +64,17 @@ test("assessment revisions preserve the wage, original allocation and signed fin
 					paidOn,
 					commitment,
 					gross: 100000n,
-					initialRevision: initial,
-					recordedAt: 0n
+					initialRevision: initial
 				}
 			])
 			yield* draft.insert(S.RegularCommitment, [{ commitment, wage }])
 			yield* draft.insert(S.RegularWork, [{ wage, employee, span: periodSpan(2026, "Month", 6) }])
 			yield* draft.insert(S.Deduction, [
-				{ wage, employee, year: 2026n, kind: "FIT", amount: 20000n, evidence }
+				{ wage, employee, year: 2026n, kind: "FIT", amount: 20000n, evidence: say(evidence) }
 			])
 			yield* draft.insert(
 				S.TaxAccount,
-				accounts.map((item) => ({ ...item, business, evidence }))
+				accounts.map((item) => ({ ...item, business, evidence: say(evidence) }))
 			)
 			const chain = [initial, yield* mintId, yield* mintId]
 			const amounts = [20000n, 22500n, 19500n]
@@ -88,7 +85,7 @@ test("assessment revisions preserve the wage, original allocation and signed fin
 				yield* draft.insert(S.AssessmentSet, [
 					{ id: set, business, employee, paidOn, gross: 100000n, origin: "Observed" }
 				])
-				yield* draft.insert(S.ObservedSet, [{ set, evidence }])
+				yield* draft.insert(S.ObservedSet, [{ set, evidence: say(evidence) }])
 				yield* draft.insert(S.AssessmentRevision, [
 					{
 						id: revision,
@@ -98,21 +95,22 @@ test("assessment revisions preserve the wage, original allocation and signed fin
 						employee,
 						paidOn,
 						gross: 100000n,
-						kind: index === 0 ? "Initial" : "Correction",
-						recordedAt: BigInt(index)
+						kind: index === 0 ? "Initial" : "Correction"
 					}
 				])
 				if (index > 0) {
 					const predecessor = chain[index - 1]
 					assert.ok(predecessor)
-					yield* draft.insert(S.CorrectionAssessment, [{ revision, predecessor, wage, evidence }])
+					yield* draft.insert(S.CorrectionAssessment, [
+						{ revision, predecessor, wage, evidence: say(evidence) }
+					])
 				}
 				for (const component of components) {
 					yield* draft.insert(S.Assessment, [
 						{ set, component, origin: "Observed", method: "SuppliedAmount" }
 					])
 					yield* draft.insert(S.ObservedAssessment, [
-						{ set, component, amount: component === "FIT" ? amount : 0n, evidence }
+						{ set, component, amount: component === "FIT" ? amount : 0n, evidence: say(evidence) }
 					])
 				}
 				yield* draft.insert(
@@ -123,10 +121,10 @@ test("assessment revisions preserve the wage, original allocation and signed fin
 			const payment = yield* mintId
 			const reconciliation = yield* mintId
 			yield* draft.insert(S.TaxPayment, [
-				{ id: payment, business, account, sentOn: paidOn.start, amount: 20000n, evidence, recordedAt: 0n }
+				{ id: payment, business, account, sentOn: paidOn.start, amount: 20000n, evidence: say(evidence) }
 			])
 			yield* draft.insert(S.PaymentReconciliation, [
-				{ id: reconciliation, payment, business, account, period: paidOn, evidence, recordedAt: 0n }
+				{ id: reconciliation, payment, business, account, period: paidOn, evidence: say(evidence) }
 			])
 			yield* draft.insert(S.PaymentAllocation, [
 				{ revision: initial, account, business, reconciliation, paidOn }

@@ -5,24 +5,22 @@ import { epochDay } from "../core/time.ts"
 import { MAX_U64, mintId, Nonblank, Refusal } from "../core/values.ts"
 import { relationRows } from "../queries.ts"
 import { fingerprint, parseStrict, type Snapshot } from "../runtime.ts"
-import { CentRange, commandFields, DaySpan, inputFields, TaxBandInput, Year } from "../schema/input.ts"
+import { commandFields, DollarRange, inputFields, TaxBandInput } from "../schema/input.ts"
 import { componentPolicy, components, formPolicy, forms, submissionSlots } from "../schema/vocabulary.ts"
 import * as S from "../schema.ts"
 import { annualPolicyData } from "./annual.ts"
 import { CalendarInput, installCalendarFacts, nominalDeadline } from "./calendar.ts"
 
 const RuleInput = Schema.Struct({
-	...inputFields(S.RateVersion, ["component", "valid", "evidence"], { valid: DaySpan }),
+	...inputFields(S.RateVersion, ["component", "valid", "evidence"]),
 	...inputFields(S.RateSchedule, ["denominator"]),
 	bands: Schema.Array(TaxBandInput),
 	employerNotice: Schema.optional(Nonblank),
 	futaBasis: Schema.optional(Nonblank)
 })
 const DepositInput = Schema.Struct({
-	...inputFields(S.DepositPolicy, ["family", "valid", "periodKind", "authority", "dueRule", "evidence"], {
-		valid: DaySpan
-	}),
-	triggers: Schema.Record(Schema.Literals(S.CheckpointKind.handles), CentRange)
+	...inputFields(S.DepositPolicy, ["family", "valid", "periodKind", "authority", "dueRule", "evidence"]),
+	triggers: Schema.Record(Schema.Literals(S.CheckpointKind.handles), DollarRange)
 })
 export const PolicyInput = Schema.Struct({
 	...commandFields,
@@ -32,22 +30,14 @@ export const PolicyInput = Schema.Struct({
 	deposits: Schema.Array(DepositInput),
 	payroll: Schema.optional(
 		Schema.Struct({
-			...inputFields(S.SupportedPayrollDomain, ["valid", "federalDepositLimit", "evidence"], {
-				valid: DaySpan
-			}),
+			...inputFields(S.SupportedPayrollDomain, ["valid", "federalDepositLimit", "evidence"]),
 			programs: Schema.Array(
-				Schema.Struct(
-					inputFields(S.SupportedProgram, ["program", "eligible", "evidence"], { eligible: CentRange })
-				)
+				Schema.Struct(inputFields(S.SupportedProgram, ["program", "eligible", "evidence"]))
 			),
 			rates: Schema.Array(RuleInput),
-			deferrals: Schema.Array(
-				Schema.Struct(inputFields(S.DeferralPolicy, ["year", "limit", "evidence"], { year: Year }))
-			),
+			deferrals: Schema.Array(Schema.Struct(inputFields(S.DeferralPolicy, ["year", "limit", "evidence"]))),
 			grossSuggestion: Schema.Struct(inputFields(S.GrossSuggestionPolicy, ["method", "evidence"])),
-			monthlyDepositor: Schema.Struct(
-				inputFields(S.MonthlyDepositor, ["valid", "evidence"], { valid: DaySpan })
-			)
+			monthlyDepositor: Schema.Struct(inputFields(S.MonthlyDepositor, ["valid", "evidence"]))
 		})
 	)
 })
@@ -69,7 +59,7 @@ export const installPolicy = (payload: unknown) =>
 			business,
 			action: "policy install",
 			input: payload,
-			plan: ({ snapshot, draft, recordedAt }) =>
+			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
 					const { request: _, ...content } = input,
 						sha256 = fingerprint(content)
@@ -79,11 +69,11 @@ export const installPolicy = (payload: unknown) =>
 					if (existing) return { release: existing.id, sha256 }
 					const release = yield* mintId
 					yield* draft.insert(S.PolicyRelease, [
-						{ id: release, sha256, title: input.title, evidence: input.evidence, recordedAt }
+						{ id: release, sha256, title: input.title, evidence: yield* note(input.evidence) }
 					])
 					const calendars = []
 					for (const calendar of input.calendars)
-						calendars.push(yield* installCalendarFacts(draft, release, calendar))
+						calendars.push(yield* installCalendarFacts(draft, note, release, calendar))
 					for (const rule of input.filingRules)
 						yield* draft.insert(S.FilingRule, [
 							{
@@ -93,7 +83,7 @@ export const installPolicy = (payload: unknown) =>
 								authority: formPolicy[rule.form].authority,
 								periodKind: formPolicy[rule.form].period,
 								dueRule: rule.dueRule,
-								evidence: rule.evidence
+								evidence: yield* note(rule.evidence)
 							}
 						])
 					for (const rule of submissionSlots) {
@@ -148,7 +138,7 @@ export const installPolicy = (payload: unknown) =>
 								valid,
 								authority: definition.authority,
 								dueRule: definition.dueRule,
-								evidence: definition.evidence
+								evidence: yield* note(definition.evidence)
 							}
 						])
 						for (const kind of S.CheckpointKind.handles)
@@ -188,7 +178,7 @@ export const installPolicy = (payload: unknown) =>
 									kind: terminal ? "Terminal" : "Interim",
 									opensOn: period.span.end,
 									dueOn: due.span.start,
-									evidence: definition.evidence
+									evidence: yield* note(definition.evidence)
 								}
 							])
 						}
@@ -204,7 +194,7 @@ export const installPolicy = (payload: unknown) =>
 								state: "TX",
 								federalDepositLimit: payroll.federalDepositLimit,
 								valid,
-								evidence: payroll.evidence
+								evidence: yield* note(payroll.evidence)
 							}
 						])
 						for (const support of payroll.programs)
@@ -214,7 +204,7 @@ export const installPolicy = (payload: unknown) =>
 									domain,
 									program: support.program,
 									eligible: support.eligible,
-									evidence: support.evidence
+									evidence: yield* note(support.evidence)
 								}
 							])
 						const covered = new Set<(typeof S.Component.handles)[number]>()
@@ -233,7 +223,7 @@ export const installPolicy = (payload: unknown) =>
 									id: schedule,
 									denominator: rate.denominator,
 									domain: { start: 0n, end: MAX_U64 },
-									evidence: rate.evidence
+									evidence: yield* note(rate.evidence)
 								}
 							])
 							for (const band of rate.bands)
@@ -241,7 +231,7 @@ export const installPolicy = (payload: unknown) =>
 									{
 										id: yield* mintId,
 										schedule,
-										span: { start: band.start, end: band.end },
+										wages: band.wages,
 										numerator: band.numerator,
 										role: band.role
 									}
@@ -254,7 +244,7 @@ export const installPolicy = (payload: unknown) =>
 									component: rate.component,
 									valid: rateValid,
 									schedule,
-									evidence: rate.evidence
+									evidence: yield* note(rate.evidence)
 								}
 							])
 							if (rate.employerNotice) {
@@ -266,14 +256,15 @@ export const installPolicy = (payload: unknown) =>
 										state: "TX",
 										schedule,
 										valid: rateValid,
-										evidence: rate.employerNotice
+										evidence: yield* note(rate.employerNotice)
 									}
 								])
 								yield* draft.insert(S.EmployerSchedule, [
 									{ version, notice, business, schedule, valid: rateValid }
 								])
 							}
-							if (rate.futaBasis) yield* draft.insert(S.FutaBasis, [{ version, evidence: rate.futaBasis }])
+							if (rate.futaBasis)
+								yield* draft.insert(S.FutaBasis, [{ version, evidence: yield* note(rate.futaBasis) }])
 						}
 						for (const rule of payroll.deferrals)
 							yield* draft.insert(S.DeferralPolicy, [
@@ -282,11 +273,16 @@ export const installPolicy = (payload: unknown) =>
 									release,
 									year: rule.year,
 									limit: rule.limit,
-									evidence: rule.evidence
+									evidence: yield* note(rule.evidence)
 								}
 							])
 						yield* draft.insert(S.GrossSuggestionPolicy, [
-							{ id: yield* mintId, release, ...payroll.grossSuggestion }
+							{
+								id: yield* mintId,
+								release,
+								method: payroll.grossSuggestion.method,
+								evidence: yield* note(payroll.grossSuggestion.evidence)
+							}
 						])
 						const classification = payroll.monthlyDepositor,
 							classified = classification.valid
@@ -298,7 +294,12 @@ export const installPolicy = (payload: unknown) =>
 						)
 						if (!old)
 							yield* draft.insert(S.MonthlyDepositor, [
-								{ id: yield* mintId, business, valid: classified, evidence: classification.evidence }
+								{
+									id: yield* mintId,
+									business,
+									valid: classified,
+									evidence: yield* note(classification.evidence)
+								}
 							])
 					}
 					return { release, sha256 }
@@ -327,7 +328,7 @@ export const activatePolicy = (payload: unknown) =>
 			business,
 			action: "policy activate",
 			input: payload,
-			plan: ({ snapshot, draft }) =>
+			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
 					if (!(yield* relationRows(snapshot, S.PolicyRelease)).some((row) => row.id === release))
 						return yield* Effect.fail(
@@ -422,7 +423,7 @@ export const activatePolicy = (payload: unknown) =>
 						(row) => row.business === business
 					)
 					if (old) yield* draft.delete(S.PolicyBinding, [old])
-					yield* draft.insert(S.PolicyBinding, [{ business, release, evidence: input.evidence }])
+					yield* draft.insert(S.PolicyBinding, [{ business, release, evidence: yield* note(input.evidence) }])
 					return { business, release }
 				})
 		})

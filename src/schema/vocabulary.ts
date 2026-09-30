@@ -247,7 +247,8 @@ export const ElectionContributionKind = closed("ElectionContributionKind", [
 	"OptionalAfterTax",
 	"EmployerProfitSharing"
 ])
-export const FinancialScope = closed("FinancialScope", ["TaxAccount"])
+/** An open question whose answer is evidence. The kind decides which work it gates. */
+export const QuestionKind = closed("QuestionKind", ["Review", "PlanSetup", "Bookkeeping", "TaxAccount"])
 
 export const components = Component.handles
 export const componentPolicy = Component.axioms

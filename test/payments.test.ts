@@ -11,7 +11,7 @@ import { Ledger } from "../src/runtime.ts"
 import { components } from "../src/schema/vocabulary.ts"
 import * as S from "../src/schema.ts"
 import { workRegister } from "../src/work.ts"
-import { apply, bankForWage, withHistory, yearFacts } from "./native-history.ts"
+import { apply, bankForWage, say, withHistory, yearFacts } from "./native-history.ts"
 
 const payments = query(S.ledger).rule((r) => {
 	const row = v(S.TaxPayment)
@@ -40,7 +40,7 @@ test("payment commands deduplicate external events, expose conflicts, and exactl
 			const evidence = "Synthetic payment qualification"
 			const paidOn = civilDayPoint(parseCalendarDate("2026-06-15"))
 			const accounts = yield* Effect.forEach(S.AccountFamily.handles, (family) =>
-				mintId.pipe(Effect.map((id) => ({ id, business, family, evidence })))
+				mintId.pipe(Effect.map((id) => ({ id, business, family, evidence: say(evidence) })))
 			)
 			const account = accounts.find((row) => row.family === "Federal941")?.id
 			assert.ok(account)
@@ -50,8 +50,7 @@ test("payment commands deduplicate external events, expose conflicts, and exactl
 					name: "Synthetic",
 					ein: "00-0000089",
 					state: "TX",
-					timeZone: "America/Chicago",
-					recordedAt: 0n
+					timeZone: "America/Chicago"
 				}
 			])
 			yield* draft.insert(S.Employee, [
@@ -62,13 +61,12 @@ test("payment commands deduplicate external events, expose conflicts, and exactl
 					lastName: "Only",
 					ssn: "000-00-0000",
 					address: evidence,
-					filingStatus: "Single",
-					recordedAt: 0n
+					filingStatus: "Single"
 				}
 			])
 			yield* draft.insert(S.TaxAccount, accounts)
 			yield* draft.insert(S.BudgetCommitment, [
-				{ id: commitment, employee, year: 2026n, amount: 200000n, origin: "Regular", evidence }
+				{ id: commitment, employee, year: 2026n, amount: 200000n, origin: "Regular", evidence: say(evidence) }
 			])
 			yield* draft.insert(S.RegularCommitment, [{ commitment, wage }])
 			yield* draft.insert(S.RegularWork, [{ wage, employee, span: periodSpan(2026, "Month", 6) }])
@@ -84,14 +82,13 @@ test("payment commands deduplicate external events, expose conflicts, and exactl
 					paidOn,
 					commitment,
 					gross: 200000n,
-					initialRevision: revision,
-					recordedAt: 0n
+					initialRevision: revision
 				}
 			])
 			yield* draft.insert(S.AssessmentSet, [
 				{ id: set, business, employee, paidOn, gross: 200000n, origin: "Observed" }
 			])
-			yield* draft.insert(S.ObservedSet, [{ set, evidence }])
+			yield* draft.insert(S.ObservedSet, [{ set, evidence: say(evidence) }])
 			yield* draft.insert(S.AssessmentRevision, [
 				{
 					id: revision,
@@ -101,8 +98,7 @@ test("payment commands deduplicate external events, expose conflicts, and exactl
 					employee,
 					paidOn,
 					gross: 200000n,
-					kind: "Initial",
-					recordedAt: 0n
+					kind: "Initial"
 				}
 			])
 			yield* draft.insert(
@@ -112,7 +108,7 @@ test("payment commands deduplicate external events, expose conflicts, and exactl
 			for (const component of components) {
 				yield* draft.insert(S.Assessment, [{ set, component, origin: "Observed", method: "SuppliedAmount" }])
 				yield* draft.insert(S.ObservedAssessment, [
-					{ set, component, amount: component === "FIT" ? 123452n : 0n, evidence }
+					{ set, component, amount: component === "FIT" ? 123452n : 0n, evidence: say(evidence) }
 				])
 			}
 			assert.equal((yield* apply(history, yield* draft.finish())).outcome.kind, "committed")
@@ -120,7 +116,7 @@ test("payment commands deduplicate external events, expose conflicts, and exactl
 				request: yield* mintId,
 				business,
 				account,
-				amount: "123457",
+				amount: "1234.57",
 				sentOn: "2026-09-10",
 				evidence,
 				references: [
@@ -137,16 +133,18 @@ test("payment commands deduplicate external events, expose conflicts, and exactl
 			const payment = (yield* rows(snapshot, payments, {}))[0]
 			assert.ok(payment)
 			assert.equal((yield* rows(snapshot, payments, {})).length, 1)
-			const conflict = yield* recordPayment({ ...payload, request: yield* mintId, amount: "163058" })
+			const conflict = yield* recordPayment({ ...payload, request: yield* mintId, amount: "1630.58" })
 			assert.equal(conflict.outcome.kind, "committed")
 			assert.ok(conflict.outcome.kind === "committed")
 			const issue = conflict.outcome.result.issue
 			assert.equal(typeof issue, "string")
 			snapshot = yield* history.snapshot({ consistency: { kind: "latest" } })
 			const open = yield* workRegister(snapshot, business, parseCalendarDate("2026-09-10"))
-			assert.ok(open.blockers.some((row) => row.id === payment.id && row.action === "payment reconcile"))
-			assert.ok(open.blockers.some((row) => row.id === issue))
-			const period = { start: "2026-04-01", end: "2026-07-01" }
+			assert.ok(
+				open.blockers.some((row) => row.subject === payment.id && row.next.op === "payment.reconcile")
+			)
+			assert.ok(open.blockers.some((row) => row.subject === issue))
+			const period = { start: "2026-04-01", endExclusive: "2026-07-01" }
 			const attribution = { payment: payment.id, period, evidence, entries: [{ revision }], adjustments: [] }
 			const wrong = yield* Effect.result(
 				reconcilePayments({ request: yield* mintId, business, payments: [attribution], resolveIssues: [] })
@@ -159,7 +157,7 @@ test("payment commands deduplicate external events, expose conflicts, and exactl
 			const reconciliationInput = {
 				request: yield* mintId,
 				business,
-				payments: [{ ...attribution, adjustments: [{ amount: "5", period, evidence }] }],
+				payments: [{ ...attribution, adjustments: [{ amount: "0.05", period, evidence }] }],
 				resolveIssues: [issue]
 			}
 			const accepted = yield* reconcilePayments(reconciliationInput)

@@ -7,7 +7,7 @@ import { promisify } from "node:util"
 import { Effect, Schema } from "effect"
 import { businessCommand } from "./commands.ts"
 import { io } from "./core/files.ts"
-import { json, mintId, Nonblank, Refusal } from "./core/values.ts"
+import { mintId, Nonblank, Refusal } from "./core/values.ts"
 import { relationRows } from "./queries.ts"
 import { parseStrict, type Snapshot } from "./runtime.ts"
 import { commandFields, Id } from "./schema/input.ts"
@@ -56,7 +56,7 @@ export const loadStoragePolicy = (directory: string) =>
 		}
 	})
 
-const ArchiveInput = Schema.Struct({
+export const ArchiveInput = Schema.Struct({
 	...commandFields,
 	artifact: Id,
 	driveFileId: Nonblank,
@@ -65,25 +65,29 @@ const ArchiveInput = Schema.Struct({
 })
 type Download = typeof downloadDriveFile
 
-/** Replace active locations only after independently retrieving matching bytes.
- * Prior locations and their evidence remain in the immutable command history
- * and in the new location's provenance; the artifact identity never changes.
+/** Adopt a verified Drive copy only after independently retrieving matching
+ * bytes. Active locations become prior locations of that copy; the artifact
+ * identity never changes. The copy's UUIDv7 is the verification instant.
  */
 export const archiveArtifact = (payload: unknown, download: Download = downloadDriveFile) =>
 	Effect.gen(function* () {
 		const input = parseStrict(ArchiveInput, payload)
-		const locator = driveLocator(input.driveFileId)
+		driveLocator(input.driveFileId)
 		return yield* businessCommand({
 			request: input.request,
 			business: input.business,
 			action: "artifact archive",
 			input: payload,
-			plan: ({ snapshot, draft, recordedAt }) =>
+			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
 					const artifact = (yield* relationRows(snapshot, S.Artifact)).find((r) => r.id === input.artifact)
 					if (!artifact)
 						return yield* Effect.fail(
 							new Refusal({ code: "ArtifactMissing", message: "Select a registered artifact" })
+						)
+					if ((yield* relationRows(snapshot, S.DriveCopy)).some((r) => r.artifact === artifact.id))
+						return yield* Effect.fail(
+							new Refusal({ code: "ArtifactArchived", message: "This artifact already has its Drive copy" })
 						)
 					const bytes = yield* download(input.driveFileId, input.remote)
 					if (sha256(bytes) !== artifact.sha256)
@@ -96,30 +100,22 @@ export const archiveArtifact = (payload: unknown, download: Download = downloadD
 					const previous = (yield* relationRows(snapshot, S.ArtifactLocation)).filter(
 						(r) => r.artifact === artifact.id
 					)
-					const verified = (yield* relationRows(snapshot, S.VerifiedArtifact)).filter(
-						(r) => r.artifact === artifact.id
-					)
+					const copy = yield* mintId
 					yield* draft.delete(S.ArtifactLocation, previous)
-					yield* draft.delete(S.VerifiedArtifact, verified)
-					yield* draft.insert(S.VerifiedArtifact, [
-						{ artifact: artifact.id, length: BigInt(bytes.length), verifiedAt: recordedAt }
-					])
-					yield* draft.insert(S.ArtifactLocation, [
+					yield* draft.insert(S.DriveCopy, [
 						{
+							id: copy,
 							artifact: artifact.id,
-							locator,
-							evidence: json({
-								kind: "VerifiedDriveArtifact",
-								remote: input.remote,
-								sha256: artifact.sha256,
-								length: String(bytes.length),
-								verifiedAt: String(recordedAt),
-								evidence: input.evidence,
-								previousLocations: previous
-							})
+							driveId: input.driveFileId,
+							remote: input.remote,
+							evidence: yield* note(input.evidence)
 						}
 					])
-					return { artifact: artifact.id, locator, sha256: artifact.sha256, length: String(bytes.length) }
+					yield* draft.insert(
+						S.PriorLocation,
+						previous.map((r) => ({ copy, artifact: artifact.id, locator: r.locator, evidence: r.evidence }))
+					)
+					return { artifact: artifact.id, copy, driveId: input.driveFileId, sha256: artifact.sha256 }
 				})
 		})
 	})
@@ -127,76 +123,90 @@ export const archiveArtifact = (payload: unknown, download: Download = downloadD
 export const inspectDocuments = (snapshot: Snapshot) =>
 	Effect.gen(function* () {
 		const artifacts = yield* relationRows(snapshot, S.Artifact)
+		const lengths = new Map(
+			(yield* relationRows(snapshot, S.VerifiedArtifact)).map((r) => [r.artifact, r.length])
+		)
 		const locations = yield* relationRows(snapshot, S.ArtifactLocation)
+		const copies = new Map((yield* relationRows(snapshot, S.DriveCopy)).map((r) => [r.artifact, r]))
 		return artifacts.map((artifact) => {
-			const refs = locations.filter((r) => r.artifact === artifact.id)
-			const archived =
-				refs.length === 1 &&
-				refs.every((r) => {
-					try {
-						const proof = JSON.parse(r.evidence)
-						return (
-							!!driveId(r.locator) &&
-							proof.kind === "VerifiedDriveArtifact" &&
-							proof.sha256 === artifact.sha256
-						)
-					} catch {
-						return false
-					}
-				})
-			return { ...artifact, locations: refs, archived }
+			const copy = copies.get(artifact.id)
+			return {
+				...artifact,
+				length: lengths.get(artifact.id),
+				drive: copy
+					? { copy: copy.id, driveId: copy.driveId, locator: driveLocator(copy.driveId) }
+					: undefined,
+				locations: locations.filter((r) => r.artifact === artifact.id),
+				archived: copy !== undefined
+			}
 		})
 	})
 
-/** Returns the verified bytes so backup capture cannot race a second download. */
-export const collectDriveDocuments = (
+/** Every document's exact bytes, each checked against its registered SHA-256.
+ * A verified local cache copy is used when present; otherwise the Drive copy
+ * is downloaded by file ID. Returns the bytes so capture cannot race a second read.
+ */
+export const collectDocuments = (
 	snapshot: Snapshot,
 	remote: string,
+	cacheDirectory: string | undefined,
 	download: Download = downloadDriveFile
 ) =>
 	Effect.gen(function* () {
 		const documents = yield* inspectDocuments(snapshot)
-		const missing = documents.filter((d) => !d.archived || !/^[a-f0-9]{64}$/.test(d.sha256))
+		const missing = documents.filter((d) => !d.drive || !/^[a-f0-9]{64}$/.test(d.sha256))
 		if (missing.length)
 			return yield* Effect.fail(
 				new Refusal({
 					code: "DocumentsUnarchived",
-					message: `${missing.length} documents lack a verified canonical Drive location: ${missing.map((d) => d.id).join(", ")}`
+					message: `${missing.length} documents lack a verified Drive copy: ${missing.map((d) => d.id).join(", ")}`
 				})
 			)
 		return yield* Effect.forEach(
 			documents,
 			(document) =>
 				Effect.gen(function* () {
-					const id = driveId(document.locations[0]?.locator ?? "")
-					if (!id)
-						return yield* Effect.fail(
-							new Refusal({ code: "DriveIdentity", message: "Missing Drive identity" })
-						)
-					const bytes = yield* download(id, remote)
+					const drive = document.drive
+					if (!drive)
+						return yield* Effect.fail(new Refusal({ code: "DriveIdentity", message: "Missing Drive copy" }))
+					const cached = cacheDirectory
+						? yield* io("read cached document", async () => {
+								try {
+									return await fs.readFile(path.join(cacheDirectory, document.sha256))
+								} catch {
+									return undefined
+								}
+							})
+						: undefined
+					const bytes =
+						cached && sha256(cached) === document.sha256 ? cached : yield* download(drive.driveId, remote)
 					if (sha256(bytes) !== document.sha256)
 						return yield* Effect.fail(
-							new Refusal({ code: "ArtifactChanged", message: `Drive content changed for ${document.id}` })
+							new Refusal({ code: "ArtifactChanged", message: `Document bytes changed for ${document.id}` })
 						)
-					return { artifact: document.id, sha256: document.sha256, locator: driveLocator(id), bytes }
+					return { artifact: document.id, sha256: document.sha256, locator: drive.locator, bytes }
 				}),
 			{ concurrency: 4 }
 		)
 	})
 
+export const AttachBankInput = Schema.Struct({
+	...commandFields,
+	artifact: Id,
+	movement: Id,
+	evidence: Nonblank
+})
+
 /** A typed receipt association, without creating another bank movement. */
 export const attachBankArtifact = (payload: unknown) =>
 	Effect.gen(function* () {
-		const input = parseStrict(
-			Schema.Struct({ ...commandFields, artifact: Id, movement: Id, evidence: Nonblank }),
-			payload
-		)
+		const input = parseStrict(AttachBankInput, payload)
 		return yield* businessCommand({
 			request: input.request,
 			business: input.business,
 			action: "artifact attach-bank",
 			input: payload,
-			plan: ({ snapshot, draft, recordedAt }) =>
+			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
 					const bank = (yield* relationRows(snapshot, S.BankMovement)).find(
 						(r) => r.id === input.movement && r.business === input.business
@@ -235,8 +245,7 @@ export const attachBankArtifact = (payload: unknown) =>
 							status: "Sent",
 							observedOn: bank.paidOn,
 							amount: bank.amount,
-							source: input.evidence,
-							recordedAt
+							evidence: yield* note(input.evidence)
 						}
 					])
 					yield* draft.insert(S.BankSource, [{ movement: bank.id, observation, business: bank.business }])

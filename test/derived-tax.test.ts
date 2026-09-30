@@ -75,8 +75,8 @@ test("equal band contributions survive, split bands equal merged bands, and earl
 				assert.ok(band)
 				yield* changes.delete(S.TaxBand, [band])
 				yield* changes.insert(S.TaxBand, [
-					{ ...band, span: { start: 0n, end: 450000n } },
-					{ ...band, id: yield* mintId, span: { start: 450000n, end: 900000n } }
+					{ ...band, wages: { start: 0n, end: 450000n } },
+					{ ...band, id: yield* mintId, wages: { start: 450000n, end: 900000n } }
 				])
 				const amount = numerator === 270n ? 200000n : 2n
 				const prior = 450000n - amount / 2n
@@ -134,7 +134,7 @@ test("exact quotient admits doubling-only overflow while native band gaps, overl
 					yield* invalid.insert(S.RateSchedule, [{ ...schedule, denominator: 0n }])
 				} else if (corruption === "gap") {
 					yield* invalid.delete(S.TaxBand, [band])
-					yield* invalid.insert(S.TaxBand, [{ ...band, span: { start: 1n, end: band.span.end } }])
+					yield* invalid.insert(S.TaxBand, [{ ...band, wages: { start: 1n, end: band.wages.end } }])
 				} else yield* invalid.insert(S.TaxBand, [{ ...band, id: yield* mintId }])
 				assert.equal(
 					(yield* apply(history, yield* invalid.finish())).outcome.kind,

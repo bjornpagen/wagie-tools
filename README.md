@@ -3,9 +3,15 @@
 Payroll for the wagie who signs their own checks.
 
 A local payroll and bookkeeping ledger for a single-owner S corporation.
-TypeScript and Effect run a noninteractive CLI over BumbleDB. The current
+TypeScript and Effect run a JSON operation interface over BumbleDB. The current
 scope is federal payroll, Texas unemployment, ordinary owner distributions,
 and employee Roth and after-tax retirement contribution bookkeeping.
+
+The interface is three verbs and a table of named operations. `apply` takes one
+write (`{"op": "payroll.post", …}`), `read` takes one read
+(`{"read": "status", …}`), and `schema` prints every operation's JSON Schema.
+Money crosses the boundary as dollars with two decimals, dates as
+`YYYY-MM-DD`, and every integer's unit is fixed by its field name.
 
 [Operating skill](SKILL.md)
 · [Data model](src/schema.ts)
@@ -15,7 +21,10 @@ and employee Roth and after-tax retirement contribution bookkeeping.
 ## The model
 
 Wages, tax assessments, bank movements, contributions, filings, and their
-evidence are separate facts. Keys, containment, closed relations, interval
+evidence are separate facts. Prose evidence is a Statement, stored once and
+cited by id from every fact it justifies. Open questions are one header with
+a typed arm per kind; an Answer closes them. UUIDv7 ids are the clock; there
+are no timestamp columns. Keys, containment, closed relations, interval
 relationships, and capacity constraints judge the final state of each write.
 TypeScript inputs and query results derive their shapes from the schema.
 
@@ -29,6 +38,12 @@ Every actual payroll or distribution transfer has a native Mercury transaction
 ID. Cash allocations connect one movement to its uses without spending it twice.
 A wage fully absorbed by deductions can explicitly require no bank transfer.
 Employee FICA recovery follows the outstanding balance and available net pay.
+A `RothOnly` calculation solves the gross that leaves exactly zero cash after
+tax and the requested Roth, so a zero-cash Roth wire is one intent.
+
+Withheld Roth blocks payroll until it has left the business: funded by a
+Mercury movement whose sent receipt is attached. The plan provider's own
+confirmation is tracked as a reminder and never gates payroll.
 
 Money uses integer cents. Civil dates use Unix epoch days; recording timestamps
 use Unix milliseconds. TypeScript brands distinguish dates, instants, and day
@@ -56,21 +71,20 @@ Use Node 24+ and the repository's pinned pnpm version:
 ```sh
 pnpm install --frozen-lockfile
 pnpm check
-pnpm cli --help
+pnpm cli schema
 ```
 
-Operations use JSON inputs and return JSON results. The [operating skill](SKILL.md)
-covers payroll, distributions, retirement records, tax work, policy, and backups.
 For an existing configured ledger:
 
 ```sh
-pnpm cli db audit
-pnpm cli status --business BUSINESS_ID
-pnpm cli deadlines --business BUSINESS_ID
-pnpm cli report year --business BUSINESS_ID --year YEAR
+echo '{"read": "db.audit"}' | pnpm cli read
+echo '{"read": "status", "business": "BUSINESS_ID"}' | pnpm cli read
+echo '{"read": "report", "business": "BUSINESS_ID", "year": 2026}' | pnpm cli read
 ```
 
-Replace placeholders with IDs and periods from the ledger. Startup opens
+`status` lists open work and payroll blockers; every item carries the `next`
+operation and the input fields the ledger already knows. The
+[operating skill](SKILL.md) has the recipes. Startup opens
 `private/binding.json`; it never creates an empty replacement for a missing
 database. The public repository contains synthetic test fixtures. A working
 ledger needs its own company, employee, policy, election, and filing evidence.
@@ -95,11 +109,11 @@ application source. Restore checks all bundled document hashes and recreates
 the cache without depending on the original computer's paths. The live database
 continues to run locally. See the operating skill for archival and cleanup rules.
 
-`migrations/0000-initial/` is the canonical initial database baseline. BumbleDB
-Log 1.3.1 generates its native schema snapshot and TypeScript bindings. Fresh
-histories use that snapshot; the initial cutover copies existing facts through
-native unpublished population. Future schema changes use ordinary TypeScript
-transformations and explicit native transitions. See [migrations](docs/migrations.md).
+`migrations/0001-statements/` is the current database baseline; `0000-initial/`
+is retained as the source of its cutover. BumbleDB Log 1.3.1 generates each
+snapshot and its TypeScript bindings. Fresh histories use the current snapshot;
+a schema change is a handwritten transformation between two generated bindings,
+run as an explicit native transition. See [migrations](docs/migrations.md).
 
 ## Development
 
@@ -125,12 +139,14 @@ snapshot and transformation for subsequent schema changes.
 
 ## Repository
 
-- `src/schema.ts`, `src/schema/`: relations, constraints, vocabulary, and input derivation.
+- `src/schema.ts`, `src/schema/`: relations, constraints, vocabulary, boundary units, and input derivation.
+- `src/ops.ts`: the operation table; `src/cli.ts`: `apply`, `read`, `schema`, `id`.
+- `src/work-rules.ts`, `src/work.ts`, `src/bookkeeping-work.ts`: the work register as rules.
 - `src/policy/`: annual qualifications and calendar policy.
-- `src/`: domain commands, native queries, reports, and the CLI.
+- `src/`: domain commands, native queries, reports.
 - `test/`: synthetic fixtures, independent arithmetic checks, and native lifecycle tests.
-- `migrations/0000-initial/`: canonical snapshot, generated bindings, and the initial fact-preserving cutover.
-- `scripts/schema.ts`: verifies the snapshot and bindings against the current declaration.
+- `migrations/`: generated snapshots and bindings per baseline, and handwritten cutovers.
+- `scripts/schema.ts`: verifies the current snapshot and bindings against the declaration.
 - `SKILL.md`: instructions for operating a configured ledger.
 
 ## License

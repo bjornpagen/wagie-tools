@@ -7,9 +7,19 @@ export const MAX_I64 = (1n << 63n) - 1n
 export const MIN_I64 = -(1n << 63n)
 const v7Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
-export const EntityId = Schema.String.check(Schema.isPattern(v7Pattern))
-export const Nonblank = Schema.String.check(Schema.isPattern(/\S/))
-export const DayText = Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/))
+export const EntityId = Schema.String.check(Schema.isPattern(v7Pattern)).annotate({
+	description: "UUIDv7; mint one with `wagie id`"
+})
+/** Any stored UUID: entity ids are v7 (the clock); statement ids are v8 (content). */
+export const StoredId = Schema.String.check(
+	Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[78][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+)
+export const Nonblank = Schema.String.check(Schema.isPattern(/\S/)).annotate({
+	description: "Non-blank text"
+})
+export const DayText = Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/)).annotate({
+	description: "Civil date YYYY-MM-DD"
+})
 
 export function entityId(value: string): Uuid {
 	const checked = Schema.decodeUnknownSync(EntityId)(value)
