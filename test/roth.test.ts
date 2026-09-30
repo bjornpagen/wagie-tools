@@ -43,7 +43,7 @@ test("dollars at the boundary are exact, two-decimal, and refuse anything else",
 		paidOn: "2026-09-16",
 		period: { start: "2026-01-01", endExclusive: "2027-01-01" },
 		earning: { start: "0.00", end: "Infinity" },
-		year: "2026",
+		year: 2026,
 		evidence: "the prose",
 		nested: [{ dueOn: "2026-10-15" }]
 	})
@@ -134,10 +134,10 @@ const electRoth = (
 			}
 		])
 		yield* rules.insert(S.ElectionDocumentAmount, [
-			{ document, kind: "Roth", cents: 2400000n },
-			{ document, kind: "Traditional", cents: 0n },
-			{ document, kind: "OptionalAfterTax", cents: 0n },
-			{ document, kind: "EmployerProfitSharing", cents: 0n }
+			{ document, kind: "Roth", amount: 2400000n },
+			{ document, kind: "Traditional", amount: 0n },
+			{ document, kind: "OptionalAfterTax", amount: 0n },
+			{ document, kind: "EmployerProfitSharing", amount: 0n }
 		])
 		yield* rules.insert(S.ElectionSource, [
 			{

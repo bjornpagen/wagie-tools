@@ -29,9 +29,12 @@ never creates an empty ledger. Output is JSON.
   as text on every fact that cites it.
 - Input is strict: unknown keys refuse. A refusal names every bad path at once.
 
-Units come from field names and never vary: `amount`, `gross`, `roth`, `limit`
-and `cents` are always money; `paidOn`, `dueOn`, `signedOn` are always dates;
-`period`, `valid`, `work`, `span` are always spans.
+Units come from field names and never vary: `amount`, `gross`, `roth`, `limit`,
+`taxable` are always money; `paidOn`, `dueOn`, `signedOn` are always dates;
+`period`, `valid`, `work`, `span` are always spans; `year`, `row`, `sequence`,
+`forms`, `numerator`, `denominator` are plain JSON integers. Closed vocabularies
+(`kind`, `form`, `issuer`, `filingStatus`, `distributionCode`, …) are listed as
+`enum` in `schema`; anything outside the list refuses.
 
 ## Start every task with `status`
 
@@ -132,14 +135,25 @@ the year (`election.document`, `election.record`), the year's retirement
 `retirement.annual`, and remaining capacity. `EmployeeRothDeferral` and
 `EmployeeAfterTax` are different sources; use the one requested.
 
+### Provider year-end reports
+
+`retirement.supplied-report` records a provider's form as stated, never derived:
+`plan`, `year`, `artifact`, `evidence` and `report`, either
+`{"form": "F1099R", "account", "distributionCode": "G" | "H", "gross", "taxable", "basis"?}`
+(box 5 only when the form states it) or `{"form": "F1096", "forms", "gross"}`.
+`retirement.confirm-reported-conversion` then confirms a receipt's conversion
+from that report when the provider supplied no event date.
+
 ### Record a tax payment already sent
 
 `payment.record`: `account`, `sentOn`, `amount`, `evidence`, `references`
-(`{issuer, scope, value, sourceText}` from the acknowledgement), `artifacts`,
+(`[{issuer: "EFTPS" | "TWC", value}]`, the acknowledgement numbers), `artifacts`,
 optional `settlement: {settlesOn, evidence}`. Then `payment.reconcile` with the
 complete attribution: `payments: [{payment, period, evidence, entries: [{revision}], adjustments}]`.
 Entries plus evidenced adjustments must equal actual money. A negative entry
-needs `negativeApplicationEvidence`. Recording does not submit a return.
+needs `negativeApplicationEvidence`. Recording does not submit a return. A
+negative entry settled without a payment is `payment.dispose` with
+`disposition`: `Refunded`, `Credited` or `Abandoned`, plus evidence.
 
 ### Prepare and submit a form
 

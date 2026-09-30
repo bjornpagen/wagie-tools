@@ -143,7 +143,7 @@ test("public payroll commands gate fresh posting, atomically cover W-2s, and rev
 					amount: "253.00",
 					sentOn: "2026-09-11",
 					evidence,
-					references: [{ issuer: "SYNTHETIC", scope: "payroll", value: "once", sourceText: evidence }],
+					references: [{ issuer: "EFTPS", value: "once" }],
 					artifacts: []
 				})
 				const payment = resultId(paymentReceipt, "payment")
@@ -517,10 +517,10 @@ test("native payroll admission rejects mismatched days, years, deductions, overl
 					}
 				])
 				yield* rules.insert(S.ElectionDocumentAmount, [
-					{ document, kind: "Roth", cents: 2000000n },
-					{ document, kind: "Traditional", cents: 0n },
-					{ document, kind: "OptionalAfterTax", cents: 0n },
-					{ document, kind: "EmployerProfitSharing", cents: 0n }
+					{ document, kind: "Roth", amount: 2000000n },
+					{ document, kind: "Traditional", amount: 0n },
+					{ document, kind: "OptionalAfterTax", amount: 0n },
+					{ document, kind: "EmployerProfitSharing", amount: 0n }
 				])
 				yield* rules.insert(S.ElectionSource, [
 					{
@@ -951,7 +951,7 @@ test("a settled earlier-month or prior-year federal trigger survives a later tax
 						business,
 						revision: resultId(revised, "revision"),
 						account: federal.id,
-						disposition: "Synthetic separate disposition",
+						disposition: "Credited",
 						evidence
 					})
 					assert.deepEqual(

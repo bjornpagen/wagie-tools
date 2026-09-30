@@ -3,7 +3,7 @@ import { Effect, Schema } from "effect"
 import { businessCommand } from "../commands.ts"
 import { epochDay, periodSpan, type UnixEpochDay } from "../core/time.ts"
 import { MAX_U64, mintId, Refusal } from "../core/values.ts"
-import { relationRows } from "../queries.ts"
+import { exists, first, relationRows, select } from "../queries.ts"
 import { parseStrict, type Snapshot } from "../runtime.ts"
 import { commandFields, DaySpan, Id, inputFields, money, TaxBandInput } from "../schema/input.ts"
 import { annualRequirements } from "../schema/vocabulary.ts"
@@ -23,7 +23,9 @@ export const AnnualPolicyInput = Schema.Struct({
 			...Source.fields
 		})
 	),
-	limits: Schema.Array(Schema.Struct({ ...inputFields(S.PolicyLimit, ["kind", "cents"]), ...Source.fields })),
+	limits: Schema.Array(
+		Schema.Struct({ ...inputFields(S.PolicyLimit, ["kind", "amount"]), ...Source.fields })
+	),
 	lookback: Schema.optional(Schema.Struct({ span: DaySpan, ...Source.fields }))
 })
 export const AnnualEvidenceInput = Schema.Struct({
@@ -54,13 +56,12 @@ export const recordAnnualPolicy = (payload: unknown) =>
 				Effect.gen(function* () {
 					const release = input.release,
 						valid = periodSpan(Number(input.year), "Year")
-					const calendar = (yield* relationRows(snapshot, S.CalendarPeriod)).find(
-						(row) =>
-							row.release === release &&
-							row.authority === input.authority &&
-							row.kind === "Year" &&
-							row.year === input.year
-					)
+					const calendar = yield* first(snapshot, S.CalendarPeriod, {
+						release,
+						authority: input.authority,
+						kind: "Year",
+						year: input.year
+					})
 					if (!calendar)
 						return yield* fail(
 							"CalendarCoverageMissing",
@@ -124,7 +125,7 @@ export const recordAnnualPolicy = (payload: unknown) =>
 							{
 								annual,
 								kind: row.kind,
-								cents: row.cents,
+								amount: row.amount,
 								artifact: row.artifact,
 								evidence: yield* note(row.evidence)
 							}
@@ -155,9 +156,7 @@ export const recordAnnualEvidence = (payload: unknown) =>
 			input: payload,
 			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
-					const policy = (yield* relationRows(snapshot, S.AnnualPolicy)).find(
-						(row) => row.id === annual && row.business === business
-					)
+					const policy = yield* first(snapshot, S.AnnualPolicy, { id: annual, business })
 					if (!policy) return yield* fail("AnnualPolicyMissing", "Select this business's annual policy")
 					if (!includes(annualRequirements[policy.authority].evidence, input.kind))
 						return yield* fail("PolicyAuthorityMismatch", "Evidence belongs to a different authority")
@@ -177,9 +176,7 @@ export const recordAnnualEvidence = (payload: unknown) =>
 
 export const annualPolicyData = (snapshot: Snapshot, business: Uuid) =>
 	Effect.gen(function* () {
-		const policies = (yield* relationRows(snapshot, S.AnnualPolicy)).filter(
-			(row) => row.business === business
-		)
+		const policies = yield* select(snapshot, S.AnnualPolicy, { business })
 		const own = new Set(policies.map((row) => row.id))
 		const rates = (yield* relationRows(snapshot, S.PublishedRate)).filter((row) => own.has(row.annual))
 		const schedules = new Set(rates.map((row) => row.schedule))
@@ -192,7 +189,7 @@ export const annualPolicyData = (snapshot: Snapshot, business: Uuid) =>
 			lookbacks: (yield* relationRows(snapshot, S.LookbackPeriod)).filter((row) => own.has(row.annual)),
 			sources: (yield* relationRows(snapshot, S.AnnualSource)).filter((row) => own.has(row.annual)),
 			evidence: (yield* relationRows(snapshot, S.AnnualEvidence)).filter((row) => own.has(row.annual)),
-			approvals: (yield* relationRows(snapshot, S.AnnualApproval)).filter((row) => row.business === business)
+			approvals: yield* select(snapshot, S.AnnualApproval, { business })
 		}
 	})
 export type AnnualData = Effect.Success<ReturnType<typeof annualPolicyData>>
@@ -239,23 +236,19 @@ export const refreshPolicy = (payload: unknown) =>
 						return yield* fail("AnnualPolicyIncomplete", `Missing verified inputs: ${missing.join(", ")}`)
 					const covers = (span: IntervalValue) =>
 						span.start <= policy.valid.start && span.end >= policy.valid.end
-					const domains = (yield* relationRows(snapshot, S.SupportedPayrollDomain)).filter(
-						(row) => row.release === release && covers(row.valid)
+					const domains = (yield* select(snapshot, S.SupportedPayrollDomain, { release })).filter((row) =>
+						covers(row.valid)
 					)
 					if (domains.length !== 1)
 						return yield* fail(
 							"PayrollPolicyMissing",
 							"Install an executable domain covering this policy year"
 						)
-					const rates = (yield* relationRows(snapshot, S.RateVersion)).filter(
-						(row) => row.release === release && row.business === business && covers(row.valid)
+					const rates = (yield* select(snapshot, S.RateVersion, { release, business })).filter((row) =>
+						covers(row.valid)
 					)
 					if (policy.authority === "FederalDC") {
-						if (
-							!(yield* relationRows(snapshot, S.MonthlyDepositor)).some(
-								(row) => row.business === business && covers(row.valid)
-							)
-						)
+						if (!(yield* select(snapshot, S.MonthlyDepositor, { business })).some((row) => covers(row.valid)))
 							return yield* fail(
 								"DepositRegimeUnsupported",
 								"Record the evidenced annual employer depositor classification"
@@ -263,7 +256,7 @@ export const refreshPolicy = (payload: unknown) =>
 						const nextDay = data.limits.find(
 							(row) => row.annual === annual && row.kind === "NextDayDepositMinimum"
 						)
-						if (domains[0]?.federalDepositLimit !== nextDay?.cents)
+						if (domains[0]?.federalDepositLimit !== nextDay?.amount)
 							return yield* fail(
 								"PolicyLimitMismatch",
 								"Executable deposit limit differs from the reviewed annual rule"
@@ -290,22 +283,20 @@ export const refreshPolicy = (payload: unknown) =>
 						}
 					} else {
 						const adopted = rates.find((row) => row.component === "SUTA")
-						if (
-							!adopted ||
-							!(yield* relationRows(snapshot, S.EmployerSchedule)).some((row) => row.version === adopted.id)
-						)
+						if (!adopted || !(yield* exists(snapshot, S.EmployerSchedule, { version: adopted.id })))
 							return yield* fail(
 								"EmployerRateMissing",
 								"Install the evidenced assigned employer rate for this year"
 							)
 						const base = data.limits.find((row) => row.annual === annual && row.kind === "StateWageBase")
-						const taxable = (yield* relationRows(snapshot, S.TaxBand)).filter(
-							(row) => row.schedule === adopted.schedule && row.role === "WithinBase"
-						)
+						const taxable = yield* select(snapshot, S.TaxBand, {
+							schedule: adopted.schedule,
+							role: "WithinBase"
+						})
 						if (
 							taxable.length !== 1 ||
 							taxable[0]?.wages.start !== 0n ||
-							taxable[0]?.wages.end !== base?.cents
+							taxable[0]?.wages.end !== base?.amount
 						)
 							return yield* fail(
 								"AnnualWageBaseMismatch",
@@ -357,9 +348,8 @@ const sameSchedule = (snapshot: Snapshot, left: Uuid, right: Uuid) =>
 
 export const approvedPoliciesAt = (snapshot: Snapshot, business: Uuid, release: Uuid, day: UnixEpochDay) =>
 	Effect.gen(function* () {
-		const approvals = (yield* relationRows(snapshot, S.AnnualApproval)).filter(
-			(row) =>
-				row.business === business && row.release === release && row.valid.start <= day && row.valid.end > day
+		const approvals = (yield* select(snapshot, S.AnnualApproval, { business, release })).filter(
+			(row) => row.valid.start <= day && row.valid.end > day
 		)
 		if (!S.Authority.handles.every((authority) => approvals.some((row) => row.authority === authority)))
 			return yield* fail(
@@ -375,7 +365,7 @@ export const ElectionDocumentInput = Schema.Struct({
 	supersedes: Schema.optional(Id),
 	amounts: Schema.Record(
 		Schema.Literals(S.ElectionContributionKind.handles),
-		money(S.ElectionDocumentAmount.fields.cents)
+		money(S.ElectionDocumentAmount.fields.amount)
 	)
 })
 
@@ -391,22 +381,16 @@ export const recordElectionDocument = (payload: unknown) =>
 			input: payload,
 			plan: ({ snapshot, draft, note, recordingDay }) =>
 				Effect.gen(function* () {
-					if (
-						!(yield* relationRows(snapshot, S.Employee)).some(
-							(row) => row.id === employee && row.business === business
-						)
-					)
+					if (!(yield* exists(snapshot, S.Employee, { id: employee, business })))
 						return yield* fail("EmployeeMissing", "Select this business's employee")
 					const signedOn = input.signedOn
 					if (signedOn > recordingDay)
 						return yield* fail("FutureEvidence", "The document has not been signed yet")
-					const documents = (yield* relationRows(snapshot, S.ElectionDocument)).filter(
-						(row) => row.employee === employee && row.year === input.year
+					const documents = yield* select(snapshot, S.ElectionDocument, { employee, year: input.year })
+					const superseded = new Set(
+						(yield* relationRows(snapshot, S.ElectionDocumentRevision)).map((row) => row.predecessor)
 					)
-					const revisions = yield* relationRows(snapshot, S.ElectionDocumentRevision)
-					const current = documents.filter(
-						(row) => !revisions.some((revision) => revision.predecessor === row.id)
-					)
+					const current = documents.filter((row) => !superseded.has(row.id))
 					if (
 						current.length &&
 						(!input.supersedes || current.length !== 1 || current[0]?.id !== input.supersedes)
@@ -443,7 +427,7 @@ export const recordElectionDocument = (payload: unknown) =>
 						S.ElectionContributionKind.handles.map((kind) => ({
 							document,
 							kind,
-							cents: input.amounts[kind]
+							amount: input.amounts[kind]
 						}))
 					)
 					return { document }

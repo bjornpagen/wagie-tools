@@ -59,7 +59,7 @@ test("annual policy stores verified public data without employer defaults and re
 								kind: row.kind,
 								artifact: row.artifact,
 								evidence,
-								denominator: "10000",
+								denominator: 10000,
 								bands: source.bands
 									.filter((b) => b.schedule === row.schedule)
 									.map((b) => ({
@@ -67,7 +67,7 @@ test("annual policy stores verified public data without employer defaults and re
 											start: formatDollars(b.wages.start),
 											end: b.wages.end === MAX_U64 ? "Infinity" : formatDollars(b.wages.end)
 										},
-										numerator: String(b.numerator),
+										numerator: Number(b.numerator),
 										role: b.role
 									}))
 							})),
@@ -75,7 +75,7 @@ test("annual policy stores verified public data without employer defaults and re
 							.filter((row) => row.annual === policy.id)
 							.map((row) => ({
 								kind: row.kind,
-								cents: formatDollars(row.cents),
+								amount: formatDollars(row.amount),
 								artifact: row.artifact,
 								evidence
 							})),

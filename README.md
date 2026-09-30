@@ -45,7 +45,7 @@ Withheld Roth blocks payroll until it has left the business: funded by a
 Mercury movement whose sent receipt is attached. The plan provider's own
 confirmation is tracked as a reminder and never gates payroll.
 
-Money uses integer cents. Civil dates use Unix epoch days; recording timestamps
+Money is integer cents inside the database and two-decimal dollars at the boundary. Civil dates use Unix epoch days; recording timestamps
 use Unix milliseconds. TypeScript brands distinguish dates, instants, and day
 counts. Entity and request IDs are UUIDv7. See the [units](docs/units.md).
 
@@ -102,18 +102,19 @@ backup also requires downloading and verifying the published bytes.
 
 Permanent evidence uses Google Drive file identities and SHA-256 hashes.
 `artifact archive` downloads and verifies each file before replacing its active
-locations; local copies become optional caches. `artifact audit --verify-drive`
+locations; local copies become optional caches. `{"read": "artifact.audit", "verify": true}`
 checks every registered document. Once configured with `private/storage.json`,
 backups require verified Drive documents and include their exact bytes and the
 application source. Restore checks all bundled document hashes and recreates
 the cache without depending on the original computer's paths. The live database
 continues to run locally. See the operating skill for archival and cleanup rules.
 
-`migrations/0001-statements/` is the current database baseline; `0000-initial/`
-is retained as the source of its cutover. BumbleDB Log 1.3.1 generates each
-snapshot and its TypeScript bindings. Fresh histories use the current snapshot;
-a schema change is a handwritten transformation between two generated bindings,
-run as an explicit native transition. See [migrations](docs/migrations.md).
+`migrations/0002-typed/` is the current database baseline. `migrations/index.ts`
+is the table of every released step (source schema, target schema, cutover), and
+`scripts/migrate.ts --step NAME` runs one against a live ledger as an explicit
+native transition. BumbleDB Log 1.3.1 generates each snapshot and its
+TypeScript bindings; a schema change is a handwritten transformation between
+two generated bindings. See [migrations](docs/migrations.md).
 
 ## Development
 

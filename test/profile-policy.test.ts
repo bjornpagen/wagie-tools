@@ -98,21 +98,21 @@ test("public setup installs immutable policies and records signed elections", as
 							})
 						),
 						rates: [
-							{ component: "EmployeeSS", cap: "184500.00", numerator: "620" },
-							{ component: "EmployerSS", cap: "184500.00", numerator: "620" },
-							{ component: "EmployeeMedicare", cap: "Infinity", numerator: "145" },
-							{ component: "EmployerMedicare", cap: "Infinity", numerator: "145" },
-							{ component: "FUTA", cap: "7000.00", numerator: "60", futaBasis: evidence },
-							{ component: "SUTA", cap: "9000.00", numerator: "270", employerNotice: evidence }
+							{ component: "EmployeeSS", cap: "184500.00", numerator: 620 },
+							{ component: "EmployerSS", cap: "184500.00", numerator: 620 },
+							{ component: "EmployeeMedicare", cap: "Infinity", numerator: 145 },
+							{ component: "EmployerMedicare", cap: "Infinity", numerator: 145 },
+							{ component: "FUTA", cap: "7000.00", numerator: 60, futaBasis: evidence },
+							{ component: "SUTA", cap: "9000.00", numerator: 270, employerNotice: evidence }
 						].map(({ component, cap, numerator, ...basis }) => ({
 							component,
 							valid: year,
-							denominator: "10000",
+							denominator: 10000,
 							bands: [
 								{ wages: { start: "0.00", end: cap }, numerator, role: "WithinBase" },
 								...(cap === "Infinity"
 									? []
-									: [{ wages: { start: cap, end: "Infinity" }, numerator: "0", role: "Excess" }])
+									: [{ wages: { start: cap, end: "Infinity" }, numerator: 0, role: "Excess" }])
 							],
 							evidence,
 							...basis
@@ -176,7 +176,7 @@ test("public setup installs immutable policies and records signed elections", as
 								? {
 										...rate,
 										employerNotice: "Different synthetic notice",
-										bands: rate.bands.map((band) => ({ ...band, numerator: "0" }))
+										bands: rate.bands.map((band) => ({ ...band, numerator: 0 }))
 									}
 								: rate
 						)
@@ -288,7 +288,7 @@ test("public setup installs immutable policies and records signed elections", as
 					S.ElectionContributionKind.handles.map((kind) => ({
 						document,
 						kind,
-						cents: kind === "Roth" ? 1900000n : 0n
+						amount: kind === "Roth" ? 1900000n : 0n
 					}))
 				)
 				assert.equal((yield* apply(history, yield* electionSetup.finish())).outcome.kind, "committed")

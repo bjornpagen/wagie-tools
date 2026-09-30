@@ -7,7 +7,7 @@ import { businessCommand } from "./commands.ts"
 import { readBytes } from "./core/files.ts"
 import { entityId, mintId, Nonblank, Refusal } from "./core/values.ts"
 import { driveId } from "./documents.ts"
-import { relationRows } from "./queries.ts"
+import { exists, first } from "./queries.ts"
 import { parseStrict, type Snapshot } from "./runtime.ts"
 import { commandFields, Id, inputFields } from "./schema/input.ts"
 import * as S from "./schema.ts"
@@ -40,7 +40,7 @@ const content = (file: string) =>
 
 export const verifyDocument = (snapshot: Snapshot, artifact: Uuid, file: string) =>
 	Effect.gen(function* () {
-		const expected = (yield* relationRows(snapshot, S.Artifact)).find((row) => row.id === artifact)
+		const expected = yield* first(snapshot, S.Artifact, { id: artifact })
 		if (!expected)
 			return yield* Effect.fail(new Refusal({ code: "ArtifactMissing", message: `No artifact ${artifact}` }))
 		const measured = yield* content(file)
@@ -66,9 +66,7 @@ export const recordArtifact = (payload: unknown) =>
 			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
 					const measured = yield* content(input.file)
-					const existing = (yield* relationRows(snapshot, S.Artifact)).find(
-						(row) => row.sha256 === measured.sha256
-					)
+					const existing = yield* first(snapshot, S.Artifact, { sha256: measured.sha256 })
 					if (existing && existing.mediaType !== input.mediaType)
 						return yield* Effect.fail(
 							new Refusal({
@@ -81,18 +79,12 @@ export const recordArtifact = (payload: unknown) =>
 						yield* draft.insert(S.Artifact, [
 							{ id: artifact, sha256: measured.sha256, mediaType: input.mediaType }
 						])
-					const verified = (yield* relationRows(snapshot, S.VerifiedArtifact)).find(
-						(row) => row.artifact === artifact
-					)
+					const verified = yield* first(snapshot, S.VerifiedArtifact, { artifact })
 					if (verified) yield* draft.delete(S.VerifiedArtifact, [verified])
 					yield* draft.insert(S.VerifiedArtifact, [{ artifact, length: measured.length }])
 					const locator = pathToFileURL(resolve(input.file)).href
-					const knownLocation = (yield* relationRows(snapshot, S.ArtifactLocation)).find(
-						(row) => row.artifact === artifact && row.locator === locator
-					)
-					const archived = (yield* relationRows(snapshot, S.DriveCopy)).some(
-						(row) => row.artifact === artifact
-					)
+					const knownLocation = yield* first(snapshot, S.ArtifactLocation, { artifact, locator })
+					const archived = yield* exists(snapshot, S.DriveCopy, { artifact })
 					if (!knownLocation && !archived)
 						yield* draft.insert(S.ArtifactLocation, [
 							{ artifact, locator, evidence: yield* note(input.evidence) }
@@ -120,16 +112,14 @@ export const locateArtifact = (payload: unknown) =>
 			input: payload,
 			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
-					if ((yield* relationRows(snapshot, S.DriveCopy)).some((row) => row.artifact === artifact))
+					if (yield* exists(snapshot, S.DriveCopy, { artifact }))
 						return yield* Effect.fail(
 							new Refusal({
 								code: "ArchivedLocation",
 								message: "Use artifact archive to replace a permanent Drive location after checking its bytes"
 							})
 						)
-					const existing = (yield* relationRows(snapshot, S.ArtifactLocation)).find(
-						(row) => row.artifact === artifact && row.locator === input.locator
-					)
+					const existing = yield* first(snapshot, S.ArtifactLocation, { artifact, locator: input.locator })
 					if (!existing)
 						yield* draft.insert(S.ArtifactLocation, [
 							{ artifact, locator: input.locator, evidence: yield* note(input.evidence) }
@@ -153,7 +143,7 @@ export const verifyArtifact = (payload: unknown) =>
 			input: payload,
 			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
-					const expected = (yield* relationRows(snapshot, S.Artifact)).find((row) => row.id === artifact)
+					const expected = yield* first(snapshot, S.Artifact, { id: artifact })
 					if (!expected)
 						return yield* Effect.fail(
 							new Refusal({ code: "ArtifactMissing", message: `No artifact ${artifact}` })
@@ -166,21 +156,12 @@ export const verifyArtifact = (payload: unknown) =>
 								message: "The retrieved bytes do not match this artifact's SHA-256"
 							})
 						)
-					const previous = (yield* relationRows(snapshot, S.VerifiedArtifact)).find(
-						(row) => row.artifact === artifact
-					)
+					const previous = yield* first(snapshot, S.VerifiedArtifact, { artifact })
 					if (previous) yield* draft.delete(S.VerifiedArtifact, [previous])
 					yield* draft.insert(S.VerifiedArtifact, [{ artifact, length: measured.length }])
 					const locator = pathToFileURL(resolve(input.file)).href
-					const archived = (yield* relationRows(snapshot, S.DriveCopy)).some(
-						(row) => row.artifact === artifact
-					)
-					if (
-						!archived &&
-						!(yield* relationRows(snapshot, S.ArtifactLocation)).some(
-							(row) => row.artifact === artifact && row.locator === locator
-						)
-					)
+					const archived = yield* exists(snapshot, S.DriveCopy, { artifact })
+					if (!archived && !(yield* exists(snapshot, S.ArtifactLocation, { artifact, locator })))
 						yield* draft.insert(S.ArtifactLocation, [
 							{ artifact, locator, evidence: yield* note(input.evidence) }
 						])
@@ -219,9 +200,7 @@ export const recordMailing = (payload: unknown) =>
 								message: "Record the actual date after the packet was mailed"
 							})
 						)
-					const existing = (yield* relationRows(snapshot, S.CertifiedMailing)).find(
-						(row) => row.carrier === input.carrier && row.number === number
-					)
+					const existing = yield* first(snapshot, S.CertifiedMailing, { carrier: input.carrier, number })
 					if (existing && (existing.business !== business || existing.mailedOn !== mailedOn))
 						return yield* Effect.fail(
 							new Refusal({

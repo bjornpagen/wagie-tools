@@ -73,7 +73,7 @@ export const seedAnnualPolicies = (history: LedgerHistory, business: Uuid, relea
 			}
 			for (const kind of required.limits)
 				yield* draft.insert(S.PolicyLimit, [
-					{ annual, kind, cents: limits[kind], artifact, evidence: say(evidence) }
+					{ annual, kind, amount: limits[kind], artifact, evidence: say(evidence) }
 				])
 			for (const kind of required.evidence)
 				yield* draft.insert(S.AnnualEvidence, [

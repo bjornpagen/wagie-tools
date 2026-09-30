@@ -1,5 +1,6 @@
 import {
 	Compute,
+	type Fact,
 	type ParamsRecord,
 	type QueryRelation,
 	type QueryTemplate,
@@ -14,7 +15,7 @@ import type { Snapshot } from "./runtime.ts"
 import * as S from "./schema.ts"
 import { AssessmentRevision, Component, CorrectionAssessment, ledger, RevisionAccount } from "./schema.ts"
 
-type StoredRelation = Extract<(typeof S.relations)[keyof typeof S.relations], { kind: "relation" }>
+export type StoredRelation = Extract<(typeof S.relations)[keyof typeof S.relations], { kind: "relation" }>
 /** Read-only schema inventory. Fields come from the database declaration;
  * there is no parallel serialization model or generic mutation endpoint.
  */
@@ -28,6 +29,53 @@ const allRowsQuery = <Rels extends SchemaRelations, R extends QueryRelation<Rels
 	})
 export const relationRows = <R extends StoredRelation>(snapshot: Snapshot, relation: R) =>
 	rows(snapshot, allRowsQuery(S.ledger, relation), {})
+
+/** One native template per (relation, bound columns): every row whose named
+ * columns equal the parameters. Compiled once, executed with parameters, so a
+ * lookup never scans and decodes a whole relation to keep a few rows. */
+type Where<R extends StoredRelation> = Partial<Fact<R>>
+type Template = QueryTemplate<typeof ledger, ParamsRecord, Record<string, unknown>>
+const selections = new WeakMap<StoredRelation, Map<string, Template>>()
+const selection = (relation: StoredRelation, columns: readonly string[]): Template => {
+	const byColumns = selections.get(relation) ?? new Map<string, Template>()
+	selections.set(relation, byColumns)
+	const signature = columns.join("\u0000")
+	const known = byColumns.get(signature)
+	if (known) return known
+	// The rule is authored generically: the relation and its columns are only
+	// known at run time, so the builder's static judgments are bypassed here and
+	// the result is typed at the one exported call site below.
+	const template = query(ledger).rule((r) => {
+		const row = v(relation as typeof S.Statement) as unknown as Record<string, never>
+		let chain = r.match(relation as typeof S.Statement, row as never) as unknown as {
+			where: (condition: unknown) => typeof chain
+			find: (row: unknown) => unknown
+		}
+		for (const column of columns) chain = chain.where(r.eq(row[column] as never, r.param(column)))
+		return chain.find(row) as never
+	}) as unknown as Template
+	byColumns.set(signature, template)
+	return template
+}
+/** Rows of `relation` whose columns equal `where`; `{}` is the whole relation. */
+export const select = <R extends StoredRelation>(
+	snapshot: Snapshot,
+	relation: R,
+	where: Where<R>
+): Effect.Effect<readonly Fact<R>[], unknown> => {
+	const columns = Object.keys(where).sort()
+	return columns.length === 0
+		? (relationRows(snapshot, relation) as Effect.Effect<readonly Fact<R>[], unknown>)
+		: (rows(snapshot, selection(relation, columns), where as ParamsRecord) as Effect.Effect<
+				readonly Fact<R>[],
+				unknown
+			>)
+}
+export const first = <R extends StoredRelation>(snapshot: Snapshot, relation: R, where: Where<R>) =>
+	Effect.map(select(snapshot, relation, where), (found) => found[0])
+/** Whether any row matches `where`. */
+export const exists = <R extends StoredRelation>(snapshot: Snapshot, relation: R, where: Where<R>) =>
+	Effect.map(select(snapshot, relation, where), (found) => found.length > 0)
 
 const { assessmentAmounts, taxableAmounts } = postedAssessment
 

@@ -38,9 +38,12 @@ branded type before using calendar operations.
 
 Money uses integer cents inside the database. At the JSON boundary money is a
 string of dollars with exactly two decimals (`"8662.71"`), dates are
-`YYYY-MM-DD`, and spans are `{start, endExclusive}`. `src/schema/units.ts` maps
-every integer field name to its unit; the same name never carries two units, and
-an unclassified integer refuses to cross the boundary.
+`YYYY-MM-DD`, spans are `{start, endExclusive}`, and counts (`year`, `row`,
+`sequence`, `forms`, `numerator`, `denominator`) are JSON integers.
+`src/schema/units.ts` maps every integer field name to its unit; the same name
+never carries two units, and an unclassified integer refuses to cross the
+boundary. Closed vocabularies cross as their handle strings and appear as JSON
+Schema `enum`s.
 
 Money uses integer cents. Wage-base intervals have native `u64` cent coordinates;
 their measured widths are cents. A rate has an integer numerator and a positive

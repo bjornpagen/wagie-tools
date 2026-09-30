@@ -249,6 +249,19 @@ export const ElectionContributionKind = closed("ElectionContributionKind", [
 ])
 /** An open question whose answer is evidence. The kind decides which work it gates. */
 export const QuestionKind = closed("QuestionKind", ["Review", "PlanSetup", "Bookkeeping", "TaxAccount"])
+/** Form W-4 step 1(c). */
+export const FilingStatus = closed("FilingStatus", ["Single", "MarriedFilingJointly", "HeadOfHousehold"])
+export const AddressKind = closed("AddressKind", ["Business", "Mailing"])
+/** Which Form 1099-R box a supplied conversion figure fills. */
+export const ConversionTaxField = closed("ConversionTaxField", ["Basis", "Taxable"])
+/** How a negative liability entry was settled without a payment application. */
+export const Disposition = closed("Disposition", ["Refunded", "Credited", "Abandoned"])
+/** Who issued a tax payment's acknowledgement number. */
+export const PaymentIssuer = closed("PaymentIssuer", ["EFTPS", "TWC"])
+/** A provider-supplied year-end report whose figures the ledger records as stated. */
+export const ReportForm = closed("ReportForm", ["F1099R", "F1096"])
+/** Form 1099-R box 7 codes the ledger records: G direct rollover, H Roth direct rollover. */
+export const DistributionCode = closed("DistributionCode", ["G", "H"])
 
 export const components = Component.handles
 export const componentPolicy = Component.axioms

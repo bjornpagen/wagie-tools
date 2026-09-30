@@ -8,7 +8,7 @@ import { Effect, Schema } from "effect"
 import { businessCommand } from "./commands.ts"
 import { io } from "./core/files.ts"
 import { mintId, Nonblank, Refusal } from "./core/values.ts"
-import { relationRows } from "./queries.ts"
+import { exists, first, relationRows, select } from "./queries.ts"
 import { parseStrict, type Snapshot } from "./runtime.ts"
 import { commandFields, Id } from "./schema/input.ts"
 import * as S from "./schema.ts"
@@ -80,12 +80,12 @@ export const archiveArtifact = (payload: unknown, download: Download = downloadD
 			input: payload,
 			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
-					const artifact = (yield* relationRows(snapshot, S.Artifact)).find((r) => r.id === input.artifact)
+					const artifact = yield* first(snapshot, S.Artifact, { id: input.artifact })
 					if (!artifact)
 						return yield* Effect.fail(
 							new Refusal({ code: "ArtifactMissing", message: "Select a registered artifact" })
 						)
-					if ((yield* relationRows(snapshot, S.DriveCopy)).some((r) => r.artifact === artifact.id))
+					if (yield* exists(snapshot, S.DriveCopy, { artifact: artifact.id }))
 						return yield* Effect.fail(
 							new Refusal({ code: "ArtifactArchived", message: "This artifact already has its Drive copy" })
 						)
@@ -97,9 +97,7 @@ export const archiveArtifact = (payload: unknown, download: Download = downloadD
 								message: "Drive bytes do not match the registered SHA-256"
 							})
 						)
-					const previous = (yield* relationRows(snapshot, S.ArtifactLocation)).filter(
-						(r) => r.artifact === artifact.id
-					)
+					const previous = yield* select(snapshot, S.ArtifactLocation, { artifact: artifact.id })
 					const copy = yield* mintId
 					yield* draft.delete(S.ArtifactLocation, previous)
 					yield* draft.insert(S.DriveCopy, [
@@ -208,10 +206,11 @@ export const attachBankArtifact = (payload: unknown) =>
 			input: payload,
 			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
-					const bank = (yield* relationRows(snapshot, S.BankMovement)).find(
-						(r) => r.id === input.movement && r.business === input.business
-					)
-					const artifact = (yield* relationRows(snapshot, S.Artifact)).find((r) => r.id === input.artifact)
+					const bank = yield* first(snapshot, S.BankMovement, {
+						id: input.movement,
+						business: input.business
+					})
+					const artifact = yield* first(snapshot, S.Artifact, { id: input.artifact })
 					if (!bank || !artifact)
 						return yield* Effect.fail(
 							new Refusal({
@@ -219,12 +218,8 @@ export const attachBankArtifact = (payload: unknown) =>
 								message: "Select an existing business movement and artifact"
 							})
 						)
-					const existing = (yield* relationRows(snapshot, S.BankObservation)).find(
-						(r) => r.artifact === artifact.id && r.row === 1n
-					)
-					const linked = (yield* relationRows(snapshot, S.BankSource)).find(
-						(r) => r.observation === existing?.id
-					)
+					const existing = yield* first(snapshot, S.BankObservation, { artifact: artifact.id, row: 1n })
+					const linked = existing && (yield* first(snapshot, S.BankSource, { observation: existing.id }))
 					if (existing) {
 						if (linked?.movement !== bank.id)
 							return yield* Effect.fail(

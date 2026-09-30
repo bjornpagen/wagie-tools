@@ -23,6 +23,7 @@ import {
 	type TerminalReceipt
 } from "@bjornpagen/bumbledb-log"
 import { Context, Effect, Layer, Result, Schema, type Scope } from "effect"
+import { currentDirectory } from "../migrations/current.ts"
 import { exists, privateDirectory, readBytes, readText, retainOnce } from "./core/files.ts"
 import { epochDay, today, type UnixEpochDay } from "./core/time.ts"
 import { EntityId, entityId, json, mintId, Refusal } from "./core/values.ts"
@@ -33,9 +34,7 @@ export type LedgerHistory = Omit<History<typeof ledger>, "close">
 export type Draft = Effect.Success<ReturnType<typeof ChangeSet.builder<typeof ledger>>>
 export const repositoryRoot = fileURLToPath(new URL("../", import.meta.url))
 export const defaultBindingPath = path.join(repositoryRoot, "private", "binding.json")
-export const currentSchemaPath = fileURLToPath(
-	new URL("../migrations/0001-statements/schema.json", import.meta.url)
-)
+export const currentSchemaPath = fileURLToPath(new URL(`../${currentDirectory}/schema.json`, import.meta.url))
 const BindingData = Schema.Struct({
 	kind: Schema.Literal("local"),
 	directory: Schema.String,

@@ -45,3 +45,14 @@ export function signed(value: bigint): bigint {
 }
 export const json = (value: unknown) =>
 	JSON.stringify(value, (_, item: unknown) => (typeof item === "bigint" ? item.toString() : item), 2)
+
+/** JSON whose object keys are sorted, so two facts with the same columns
+ * print identically however they were assembled. */
+export const canonicalJson = (value: unknown): string =>
+	JSON.stringify(value, (_, item: unknown) =>
+		typeof item === "bigint"
+			? item.toString()
+			: item !== null && typeof item === "object" && !Array.isArray(item)
+				? Object.fromEntries(Object.entries(item).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+				: item
+	)

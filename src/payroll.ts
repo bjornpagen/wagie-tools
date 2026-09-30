@@ -10,7 +10,15 @@ import { AmendmentDeadlineInput, revisionFilingFacts } from "./filings.ts"
 import { solveRothOnlyGross } from "./gross-up.ts"
 import { ObservedAssessmentInput, observedSetFacts } from "./observations.ts"
 import { approvedPoliciesAt } from "./policy/annual.ts"
-import { currentRevisions, initialFederalAccruals, relationRows, rows } from "./queries.ts"
+import {
+	currentRevisions,
+	exists,
+	first,
+	initialFederalAccruals,
+	relationRows,
+	rows,
+	select
+} from "./queries.ts"
 import { captureRecoveryClaims, recoveryFacts, settlePaycheck } from "./recoveries.ts"
 import { type Draft, fingerprint, latest, parseStrict, resolveRequest, type Snapshot } from "./runtime.ts"
 import { commandFields, DaySpan, Id, inputFields, money } from "./schema/input.ts"
@@ -88,25 +96,23 @@ function required<A>(value: A | undefined, code: string, message: string): A {
 const policyAt = (snapshot: Snapshot, business: Uuid, day: UnixEpochDay) =>
 	Effect.gen(function* () {
 		const binding = required(
-			(yield* relationRows(snapshot, S.PolicyBinding)).find((row) => row.business === business),
+			yield* first(snapshot, S.PolicyBinding, { business }),
 			"PolicyMissing",
 			"Activate an evidenced policy release"
 		)
 		const domain = required(
-			(yield* relationRows(snapshot, S.SupportedPayrollDomain)).find(
-				(row) => row.release === binding.release && row.state === "TX" && contains(row.valid, day)
+			(yield* select(snapshot, S.SupportedPayrollDomain, { release: binding.release, state: "TX" })).find(
+				(row) => contains(row.valid, day)
 			),
 			"PayrollPolicyMissing",
 			"The selected policy does not support this pay date"
 		)
 		const calendar = required(
-			(yield* relationRows(snapshot, S.CalendarPeriod)).find(
-				(row) =>
-					row.release === binding.release &&
-					row.authority === "FederalDC" &&
-					row.kind === "Year" &&
-					contains(row.span, day)
-			),
+			(yield* select(snapshot, S.CalendarPeriod, {
+				release: binding.release,
+				authority: "FederalDC",
+				kind: "Year"
+			})).find((row) => contains(row.span, day)),
 			"CalendarCoverageMissing",
 			"Install the canonical pay-year calendar"
 		)
@@ -132,13 +138,11 @@ export const calculatePayroll = (payload: unknown) =>
 				Effect.gen(function* () {
 					const evidence = yield* note(input.evidence)
 					required(
-						(yield* relationRows(snapshot, S.Employee)).find(
-							(row) => row.id === employee && row.business === business
-						),
+						yield* first(snapshot, S.Employee, { id: employee, business }),
 						"EmployeeMissing",
 						"Select an employee belonging to this business"
 					)
-					const allWages = (yield* relationRows(snapshot, S.Wage)).filter((row) => row.employee === employee)
+					const allWages = yield* select(snapshot, S.Wage, { employee })
 					const purpose = input.purpose
 					const target =
 						purpose.kind === "TaxRevision"
@@ -189,10 +193,10 @@ export const calculatePayroll = (payload: unknown) =>
 									(purpose.kind !== "TaxRevision" || purpose.sameDayBefore.includes(row.id))))
 					)
 					const prior = priorWages.reduce((total, row) => unsigned(total + row.gross), 0n)
-					const availableRules = (yield* relationRows(snapshot, S.RateVersion)).filter(
-						(row) =>
-							row.release === policy.release && row.business === business && contains(row.valid, payDay)
-					)
+					const availableRules = (yield* select(snapshot, S.RateVersion, {
+						release: policy.release,
+						business
+					})).filter((row) => contains(row.valid, payDay))
 					const recoveries =
 						purpose.kind === "TaxRevision"
 							? []
@@ -230,12 +234,12 @@ export const calculatePayroll = (payload: unknown) =>
 						sourceStamp: snapshot.stateStamp,
 						evidence: input.evidence
 					}
-					const availableScopes = (yield* relationRows(snapshot, S.TaxBaseScope)).filter(
-						(row) => row.business === business && row.employee === employee && row.year === BigInt(year)
-					)
-					const availableSupports = (yield* relationRows(snapshot, S.SupportedProgram)).filter(
-						(row) => row.domain === policy.domain.id
-					)
+					const availableScopes = yield* select(snapshot, S.TaxBaseScope, {
+						business,
+						employee,
+						year: BigInt(year)
+					})
+					const availableSupports = yield* select(snapshot, S.SupportedProgram, { domain: policy.domain.id })
 					const set = yield* mintId,
 						calculation = yield* mintId
 					yield* draft.insert(S.AssessmentSet, [
@@ -274,8 +278,8 @@ export const calculatePayroll = (payload: unknown) =>
 							recoveries.map((row) => ({ ...row, calculation, set }))
 						)
 						const depositor = required(
-							(yield* relationRows(snapshot, S.MonthlyDepositor)).find(
-								(row) => row.business === business && contains(row.valid, payDay)
+							(yield* select(snapshot, S.MonthlyDepositor, { business })).find((row) =>
+								contains(row.valid, payDay)
 							),
 							"DepositRegimeUnsupported",
 							"Record the employer's applicable monthly-depositor classification"
@@ -365,7 +369,7 @@ export const calculatePayroll = (payload: unknown) =>
 									yield* draft.insert(S.StateBaseScope, [{ scope, state: "TX" }])
 							}
 							yield* draft.insert(S.CalculationWageBase, [
-								{ set, scope, cents: gross, earning, context: json(context) }
+								{ set, scope, gross, earning, context: json(context) }
 							])
 							captured.set(definition.program, scope)
 						}
@@ -396,7 +400,7 @@ export const calculatePayroll = (payload: unknown) =>
 								paidOn,
 								schedule: rule.schedule,
 								earning,
-								cents: gross
+								gross
 							}
 						])
 					}
@@ -408,14 +412,12 @@ export const calculatePayroll = (payload: unknown) =>
 export const inspectCalculation = (snapshot: Snapshot, business: Uuid, calculation: Uuid) =>
 	Effect.gen(function* () {
 		const saved = required(
-			(yield* relationRows(snapshot, S.PayrollCalculation)).find(
-				(row) => row.id === calculation && row.business === business
-			),
+			yield* first(snapshot, S.PayrollCalculation, { id: calculation, business }),
 			"CalculationMissing",
 			"No calculation for this business"
 		)
 		const input = required(
-			(yield* relationRows(snapshot, S.AssessmentSet)).find((row) => row.id === saved.set),
+			yield* first(snapshot, S.AssessmentSet, { id: saved.set }),
 			"AssessmentSetMissing",
 			"The calculation input is missing"
 		)
@@ -429,16 +431,12 @@ export const inspectCalculation = (snapshot: Snapshot, business: Uuid, calculati
 				})
 			)
 		const taxableWages = yield* rows(snapshot, projection.calculatedTaxableWages, {})
-		const proposal = (yield* relationRows(snapshot, S.ProposedWage)).find(
-			(row) => row.calculation === saved.id
-		)
-		const claims = (yield* relationRows(snapshot, S.CalculationRecoveryClaim)).filter(
-			(row) => row.calculation === saved.id
-		)
+		const proposal = yield* first(snapshot, S.ProposedWage, { calculation: saved.id })
+		const claims = yield* select(snapshot, S.CalculationRecoveryClaim, { calculation: saved.id })
 		// Native set order is unspecified. Reestablish the debt allocation order.
 		const wages = yield* relationRows(snapshot, S.Wage)
 		const wageDays = new Map(wages.map((row) => [row.id, row.paidOn.start]))
-		claims.sort((a, b) => {
+		const ordered = [...claims].sort((a, b) => {
 			const left = required(wageDays.get(a.owedOnWage), "RecoveryScope", "Missing original wage")
 			const right = required(wageDays.get(b.owedOnWage), "RecoveryScope", "Missing original wage")
 			return left < right
@@ -454,7 +452,7 @@ export const inspectCalculation = (snapshot: Snapshot, business: Uuid, calculati
 						.filter((row) => componentPolicy[row.component].payer === "Employee")
 						.reduce((n, row) => n + row.amount, 0n),
 					proposal.roth,
-					claims.map(({ calculation: _calculation, set: _set, ...row }) => row)
+					ordered.map(({ calculation: _calculation, set: _set, ...row }) => row)
 				)
 			: undefined
 		return { calculation: saved, input, amounts, taxableWages, paycheck }
@@ -501,7 +499,7 @@ const freshCalculation = (
 					message: "The ledger or employer recording day changed; calculate a fresh intent"
 				})
 			)
-		if ((yield* relationRows(snapshot, S.AssessmentRevision)).some((row) => row.set === saved.set))
+		if (yield* exists(snapshot, S.AssessmentRevision, { set: saved.set }))
 			return yield* Effect.fail(
 				new Refusal({
 					code: "CalculationAlreadyPosted",
@@ -513,9 +511,7 @@ const freshCalculation = (
 
 const revisionFacts = (snapshot: Snapshot, draft: Draft, revision: Fact<typeof S.AssessmentRevision>) =>
 	Effect.gen(function* () {
-		const taxAccounts = (yield* relationRows(snapshot, S.TaxAccount)).filter(
-			(row) => row.business === revision.business
-		)
+		const taxAccounts = yield* select(snapshot, S.TaxAccount, { business: revision.business })
 		yield* draft.insert(S.AssessmentRevision, [revision])
 		const links: Fact<typeof S.RevisionAccount>[] = []
 		for (const family of S.AccountFamily.handles) {
@@ -558,15 +554,13 @@ export const postPayroll = (payload: unknown) =>
 						year = toCalendarDate(payDay).year
 					yield* requirePayrollReady(snapshot, business, payDay > recordingDay ? payDay : recordingDay)
 					const proposal = required(
-						(yield* relationRows(snapshot, S.ProposedWage)).find((row) => row.calculation === calculation.id),
+						yield* first(snapshot, S.ProposedWage, { calculation: calculation.id }),
 						"ProposalMissing",
 						"The new-wage proposal is missing"
 					)
 					const policy = yield* policyAt(snapshot, business, payDay)
 					const budget = required(
-						(yield* relationRows(snapshot, S.AnnualBudget)).find(
-							(row) => row.employee === set.employee && row.year === BigInt(year)
-						),
+						yield* first(snapshot, S.AnnualBudget, { employee: set.employee, year: BigInt(year) }),
 						"BudgetMissing",
 						"Record the evidenced annual budget before posting"
 					)
@@ -597,7 +591,7 @@ export const postPayroll = (payload: unknown) =>
 						)
 					if (proposal.roth > 0n) {
 						const plan = required(
-							(yield* relationRows(snapshot, S.RetirementPlan)).find((r) => r.employee === set.employee),
+							yield* first(snapshot, S.RetirementPlan, { employee: set.employee }),
 							"RetirementPlanMissing",
 							"Configure the owner retirement plan before new Roth payroll"
 						)
@@ -613,12 +607,8 @@ export const postPayroll = (payload: unknown) =>
 					const election =
 						proposal.roth > 0n
 							? required(
-									(yield* relationRows(snapshot, S.Election)).find(
-										(row) =>
-											row.employee === set.employee &&
-											row.year === BigInt(year) &&
-											row.signedOn <= payDay &&
-											contains(row.effective, payDay)
+									(yield* select(snapshot, S.Election, { employee: set.employee, year: BigInt(year) })).find(
+										(row) => row.signedOn <= payDay && contains(row.effective, payDay)
 									),
 									"ElectionMissing",
 									"Record the applicable signed election and employee allowance before new Roth payroll"
@@ -763,7 +753,7 @@ export const postPayroll = (payload: unknown) =>
 					}
 					if (proposal.roth > 0n) {
 						const plan = required(
-							(yield* relationRows(snapshot, S.RetirementPlan)).find((r) => r.employee === set.employee),
+							yield* first(snapshot, S.RetirementPlan, { employee: set.employee }),
 							"RetirementPlanMissing",
 							"Configure the owner retirement plan"
 						)
@@ -848,18 +838,14 @@ export const revisePayrollTax = (payload: unknown) =>
 								recordingDay
 							)
 							const proposal = required(
-								(yield* relationRows(snapshot, S.ProposedRevision)).find(
-									(row) => row.calculation === calculation.id
-								),
+								yield* first(snapshot, S.ProposedRevision, { calculation: calculation.id }),
 								"ProposalMissing",
 								"The tax revision proposal is missing"
 							)
 							return { set, proposal, calculation: calculation.id }
 						}
 						const wage = required(
-							(yield* relationRows(snapshot, S.Wage)).find(
-								(row) => row.id === source.wage && row.business === business
-							),
+							yield* first(snapshot, S.Wage, { id: source.wage, business }),
 							"WageMissing",
 							"External reassessment requires an existing paid wage"
 						)
@@ -937,7 +923,7 @@ export const payrollReadback = (receipt: Awaited<Effect.Success<ReturnType<typeo
 			snapshot = yield* latest
 		const calculation =
 			typeof result.calculation === "string"
-				? (yield* relationRows(snapshot, S.PayrollCalculation)).find((row) => row.id === result.calculation)
+				? yield* first(snapshot, S.PayrollCalculation, { id: entityId(result.calculation) })
 				: undefined
 		const figures = calculation
 			? yield* inspectCalculation(snapshot, calculation.business, calculation.id)

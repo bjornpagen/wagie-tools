@@ -3,7 +3,7 @@ import { Effect, Schema } from "effect"
 import { businessCommand } from "../commands.ts"
 import { epochDay } from "../core/time.ts"
 import { MAX_U64, mintId, Nonblank, Refusal } from "../core/values.ts"
-import { relationRows } from "../queries.ts"
+import { exists, first, relationRows, select } from "../queries.ts"
 import { fingerprint, parseStrict, type Snapshot } from "../runtime.ts"
 import { commandFields, DollarRange, inputFields, TaxBandInput } from "../schema/input.ts"
 import { componentPolicy, components, formPolicy, forms, submissionSlots } from "../schema/vocabulary.ts"
@@ -63,9 +63,7 @@ export const installPolicy = (payload: unknown) =>
 				Effect.gen(function* () {
 					const { request: _, ...content } = input,
 						sha256 = fingerprint(content)
-					const existing = (yield* relationRows(snapshot, S.PolicyRelease)).find(
-						(row) => row.sha256 === sha256
-					)
+					const existing = yield* first(snapshot, S.PolicyRelease, { sha256 })
 					if (existing) return { release: existing.id, sha256 }
 					const release = yield* mintId
 					yield* draft.insert(S.PolicyRelease, [
@@ -100,9 +98,7 @@ export const installPolicy = (payload: unknown) =>
 						for (const slot of rule.slots)
 							yield* draft.insert(S.DocumentRequirement, [{ policy, slot, role: slot }])
 					}
-					const taxAccounts = (yield* relationRows(snapshot, S.TaxAccount)).filter(
-						(row) => row.business === business
-					)
+					const taxAccounts = yield* select(snapshot, S.TaxAccount, { business })
 					for (const definition of input.deposits) {
 						const account = taxAccounts.find((row) => row.family === definition.family)
 						if (!account)
@@ -286,11 +282,8 @@ export const installPolicy = (payload: unknown) =>
 						])
 						const classification = payroll.monthlyDepositor,
 							classified = classification.valid
-						const old = (yield* relationRows(snapshot, S.MonthlyDepositor)).find(
-							(row) =>
-								row.business === business &&
-								row.valid.start <= classified.start &&
-								row.valid.end >= classified.end
+						const old = (yield* select(snapshot, S.MonthlyDepositor, { business })).find(
+							(row) => row.valid.start <= classified.start && row.valid.end >= classified.end
 						)
 						if (!old)
 							yield* draft.insert(S.MonthlyDepositor, [
@@ -330,13 +323,11 @@ export const activatePolicy = (payload: unknown) =>
 			input: payload,
 			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
-					if (!(yield* relationRows(snapshot, S.PolicyRelease)).some((row) => row.id === release))
+					if (!(yield* exists(snapshot, S.PolicyRelease, { id: release })))
 						return yield* Effect.fail(
 							new Refusal({ code: "PolicyMissing", message: "Install the checked policy release first" })
 						)
-					const own = (yield* relationRows(snapshot, S.DepositPolicy)).filter(
-						(row) => row.release === release && row.business === business
-					)
+					const own = yield* select(snapshot, S.DepositPolicy, { release, business })
 					if (!S.AccountFamily.handles.every((family) => own.some((row) => row.family === family)))
 						return yield* Effect.fail(
 							new Refusal({
@@ -344,9 +335,7 @@ export const activatePolicy = (payload: unknown) =>
 								message: "The release must include this business's complete deposit-account policy"
 							})
 						)
-					const filingRules = (yield* relationRows(snapshot, S.FilingRule)).filter(
-						(row) => row.release === release
-					)
+					const filingRules = yield* select(snapshot, S.FilingRule, { release })
 					const missingForms = forms.filter(
 						(form) =>
 							formPolicy[form].due !== "RecordedEvent" && !filingRules.some((rule) => rule.form === form)
@@ -360,12 +349,9 @@ export const activatePolicy = (payload: unknown) =>
 						)
 					// Activation may replace the current policy, but must retain
 					// a checkpoint for every already posted liability's pay date.
-					const posted = (yield* relationRows(snapshot, S.RevisionAccount)).filter(
-						(row) => row.business === business
-					)
-					const revisions = yield* relationRows(snapshot, S.AssessmentRevision)
+					const posted = yield* select(snapshot, S.RevisionAccount, { business })
 					for (const entry of posted) {
-						const revision = revisions.find((row) => row.id === entry.revision)
+						const revision = yield* first(snapshot, S.AssessmentRevision, { id: entry.revision })
 						if (
 							!revision ||
 							!own.some(
@@ -382,12 +368,8 @@ export const activatePolicy = (payload: unknown) =>
 								})
 							)
 					}
-					const coverage = (yield* relationRows(snapshot, S.PolicyCoverage)).filter(
-						(row) => row.release === release && row.business === business
-					)
-					const payrollDomains = (yield* relationRows(snapshot, S.SupportedPayrollDomain)).filter(
-						(row) => row.release === release
-					)
+					const coverage = yield* select(snapshot, S.PolicyCoverage, { release, business })
+					const payrollDomains = yield* select(snapshot, S.SupportedPayrollDomain, { release })
 					for (const domain of payrollDomains) {
 						const missing = components.filter(
 							(component) =>
@@ -419,9 +401,7 @@ export const activatePolicy = (payload: unknown) =>
 								})
 							)
 					}
-					const old = (yield* relationRows(snapshot, S.PolicyBinding)).find(
-						(row) => row.business === business
-					)
+					const old = yield* first(snapshot, S.PolicyBinding, { business })
 					if (old) yield* draft.delete(S.PolicyBinding, [old])
 					yield* draft.insert(S.PolicyBinding, [{ business, release, evidence: yield* note(input.evidence) }])
 					return { business, release }
@@ -431,16 +411,14 @@ export const activatePolicy = (payload: unknown) =>
 
 export const inspectPolicy = (snapshot: Snapshot, business: Uuid) =>
 	Effect.gen(function* () {
-		const binding = (yield* relationRows(snapshot, S.PolicyBinding)).find((row) => row.business === business)
+		const binding = yield* first(snapshot, S.PolicyBinding, { business })
 		return {
 			binding,
 			annual: yield* annualPolicyData(snapshot, business),
 			releases: yield* relationRows(snapshot, S.PolicyRelease),
 			domains: yield* relationRows(snapshot, S.SupportedPayrollDomain),
-			rates: (yield* relationRows(snapshot, S.RateVersion)).filter((row) => row.business === business),
-			deposits: (yield* relationRows(snapshot, S.DepositPolicy)).filter((row) => row.business === business),
-			monthlyDepositor: (yield* relationRows(snapshot, S.MonthlyDepositor)).filter(
-				(row) => row.business === business
-			)
+			rates: yield* select(snapshot, S.RateVersion, { business }),
+			deposits: yield* select(snapshot, S.DepositPolicy, { business }),
+			monthlyDepositor: yield* select(snapshot, S.MonthlyDepositor, { business })
 		}
 	})

@@ -3,7 +3,7 @@ import { Effect, Schema } from "effect"
 import { businessCommand } from "./commands.ts"
 import { epochDay, type UnixEpochDay } from "./core/time.ts"
 import { json, mintId, Refusal, signed, unsigned } from "./core/values.ts"
-import { currentAssessments, relationRows, rows } from "./queries.ts"
+import { currentAssessments, exists, first, relationRows, rows } from "./queries.ts"
 import { type Draft, parseStrict, type Snapshot } from "./runtime.ts"
 import { commandFields, inputField, inputFields, money } from "./schema/input.ts"
 import { componentPolicy, withholdingPolicy } from "./schema/vocabulary.ts"
@@ -191,9 +191,7 @@ export const recordRecovery = (payload: unknown) =>
 			input: payload,
 			plan: ({ snapshot, draft, recordingDay, note }) =>
 				Effect.gen(function* () {
-					const wage = (yield* relationRows(snapshot, S.Wage)).find(
-						(row) => row.id === input.wage && row.business === business
-					)
+					const wage = yield* first(snapshot, S.Wage, { id: input.wage, business })
 					if (!wage || wage.paidOn.start > recordingDay)
 						return yield* Effect.fail(
 							new Refusal({
@@ -201,9 +199,7 @@ export const recordRecovery = (payload: unknown) =>
 								message: "Select an existing paid wage for this business"
 							})
 						)
-					const actual = (yield* relationRows(snapshot, S.Deduction)).find(
-						(row) => row.wage === wage.id && row.kind === "Recovery"
-					)
+					const actual = yield* first(snapshot, S.Deduction, { wage: wage.id, kind: "Recovery" })
 					if (!actual || actual.amount === 0n)
 						return yield* Effect.fail(
 							new Refusal({
@@ -211,7 +207,7 @@ export const recordRecovery = (payload: unknown) =>
 								message: "This wage has no actual recovery deduction to attribute"
 							})
 						)
-					if ((yield* relationRows(snapshot, S.Recovery)).some((row) => row.fromWage === wage.id))
+					if (yield* exists(snapshot, S.Recovery, { fromWage: wage.id }))
 						return yield* Effect.fail(
 							new Refusal({
 								code: "RecoveryAlreadyAttributed",

@@ -2,7 +2,7 @@ import type { Uuid } from "@bjornpagen/bumbledb"
 import { Effect } from "effect"
 import { distributionPosition, receiptDiscrepancies, retirementPosition } from "./bookkeeping.ts"
 import { epochDay, parseCalendarDate, periodSpan, toCalendarDate, type UnixEpochDay } from "./core/time.ts"
-import { relationRows } from "./queries.ts"
+import { relationRows, select } from "./queries.ts"
 import { questions } from "./questions.ts"
 import type { Snapshot } from "./runtime.ts"
 import * as S from "./schema.ts"
@@ -17,7 +17,7 @@ export const bookkeepingWork = (snapshot: Snapshot, business: Uuid, asOf: UnixEp
 		const work: WorkItem[] = [],
 			year = toCalendarDate(asOf).year,
 			span = periodSpan(year, "Year")
-		const plans = (yield* relationRows(snapshot, S.RetirementPlan)).filter((r) => r.business === business)
+		const plans = yield* select(snapshot, S.RetirementPlan, { business })
 		const cancelled = new Set(
 			(yield* relationRows(snapshot, S.ContributionCancellation)).map((r) => r.contribution)
 		)
@@ -236,9 +236,9 @@ export const bookkeepingWork = (snapshot: Snapshot, business: Uuid, asOf: UnixEp
 				)
 
 		const distributionYears = new Set(
-			(yield* relationRows(snapshot, S.OwnerDistribution))
-				.filter((r) => r.business === business)
-				.map((r) => toCalendarDate(epochDay(r.paidOn)).year)
+			(yield* select(snapshot, S.OwnerDistribution, { business })).map(
+				(r) => toCalendarDate(epochDay(r.paidOn)).year
+			)
 		)
 		for (const distributionYear of distributionYears) {
 			const position = yield* distributionPosition(snapshot, business, distributionYear)

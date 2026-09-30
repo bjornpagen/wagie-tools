@@ -119,9 +119,7 @@ test("payment commands deduplicate external events, expose conflicts, and exactl
 				amount: "1234.57",
 				sentOn: "2026-09-10",
 				evidence,
-				references: [
-					{ issuer: "EFTPS", scope: "Synthetic account", value: "SYNTHETIC-ACK", sourceText: evidence }
-				],
+				references: [{ issuer: "EFTPS", value: "SYNTHETIC-ACK" }],
 				artifacts: [],
 				settlement: { settlesOn: "2026-09-11", evidence }
 			}

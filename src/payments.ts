@@ -3,16 +3,14 @@ import { Effect, Schema } from "effect"
 import { businessCommand } from "./commands.ts"
 import { entityId, json, mintId, Nonblank, Refusal, signed } from "./core/values.ts"
 import { entryKey } from "./deposits.ts"
-import { liabilityEntries, relationRows, rows } from "./queries.ts"
+import { first, liabilityEntries, relationRows, rows, select } from "./queries.ts"
 import { askQuestion, questions } from "./questions.ts"
 import { paymentEquation } from "./reconciliation.ts"
 import { parseStrict } from "./runtime.ts"
 import { commandFields, Id, inputFields } from "./schema/input.ts"
 import * as S from "./schema.ts"
 
-const ReferenceInput = Schema.Struct(
-	inputFields(S.PaymentReference, ["issuer", "scope", "value", "sourceText"])
-)
+const ReferenceInput = Schema.Struct(inputFields(S.PaymentReference, ["issuer", "value"]))
 export const PaymentRecordInput = Schema.Struct({
 	...commandFields,
 	...inputFields(S.TaxPayment, ["account", "sentOn", "amount", "evidence"]),
@@ -21,7 +19,7 @@ export const PaymentRecordInput = Schema.Struct({
 	settlement: Schema.optional(Schema.Struct(inputFields(S.PaymentSettlement, ["settlesOn", "evidence"])))
 })
 
-const referenceKey = (row: typeof ReferenceInput.Type) => json([row.issuer, row.scope, row.value])
+const referenceKey = (row: typeof ReferenceInput.Type) => json([row.issuer, row.value])
 const unique = <A>(values: readonly A[], key: (value: A) => string, label: string) => {
 	const keys = values.map(key)
 	if (new Set(keys).size !== keys.length)
@@ -59,15 +57,18 @@ export const recordPayment = (payload: unknown) =>
 								message: "Record money already sent; its settlement cannot precede its send date"
 							})
 						)
-					const payments = yield* relationRows(snapshot, S.TaxPayment)
-					const references = yield* relationRows(snapshot, S.PaymentReference)
-					const settlements = yield* relationRows(snapshot, S.PaymentSettlement)
+					// A reference identifies a payment within its account.
+					const references = yield* select(snapshot, S.PaymentReference, { account })
 					const presented = new Set(input.references.map(referenceKey))
 					const identified = new Set(
 						references.filter((row) => presented.has(referenceKey(row))).map((row) => row.payment)
 					)
-					const existing = payments.find((row) => identified.has(row.id))
-					const originalSettlement = existing && settlements.find((row) => row.payment === existing.id)
+					const existing = yield* Effect.map(
+						Effect.forEach([...identified], (id) => first(snapshot, S.TaxPayment, { id })),
+						(found) => found.find((row) => row !== undefined)
+					)
+					const originalSettlement =
+						existing && (yield* first(snapshot, S.PaymentSettlement, { payment: existing.id }))
 					const conflict =
 						identified.size > 1 ||
 						(existing &&
@@ -94,7 +95,7 @@ export const recordPayment = (payload: unknown) =>
 						])
 					for (const reference of input.references) {
 						if (!references.some((row) => referenceKey(row) === referenceKey(reference)))
-							yield* draft.insert(S.PaymentReference, [{ payment, ...reference }])
+							yield* draft.insert(S.PaymentReference, [{ payment, account, ...reference }])
 					}
 					yield* draft.insert(
 						S.PaymentEvidence,

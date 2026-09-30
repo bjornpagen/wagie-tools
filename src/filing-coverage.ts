@@ -4,7 +4,7 @@ import { businessCommand, type Note } from "./commands.ts"
 import { civilDaySpan, epochDay, periodSpan, toCalendarDate } from "./core/time.ts"
 import { mintId, Refusal } from "./core/values.ts"
 import { followingBusinessDay, nominalDeadline } from "./policy/calendar.ts"
-import { currentRevisions, relationRows, rows } from "./queries.ts"
+import { currentRevisions, first, relationRows, rows, select } from "./queries.ts"
 import { type Draft, parseStrict, type Snapshot } from "./runtime.ts"
 import { commandFields, Id, inputFields, YearNumber } from "./schema/input.ts"
 import { formPolicy, forms, retirementForms } from "./schema/vocabulary.ts"
@@ -35,7 +35,7 @@ export const ensureFilingFacts = (
 	Effect.gen(function* () {
 		const business = options.business,
 			horizon = periodSpan(options.throughYear, "Year").end
-		const binding = (yield* relationRows(snapshot, S.PolicyBinding)).find((row) => row.business === business)
+		const binding = yield* first(snapshot, S.PolicyBinding, { business })
 		if (!binding)
 			return yield* Effect.fail(
 				new Refusal({
@@ -47,18 +47,10 @@ export const ensureFilingFacts = (
 		const requirementEnds = yield* relationRows(snapshot, S.RequirementEnd)
 		const existingScopes = yield* relationRows(snapshot, S.FilingScope)
 		const existingOriginals = yield* relationRows(snapshot, S.OriginalFiling)
-		const existingBusiness = (yield* relationRows(snapshot, S.BusinessSubject)).find(
-			(row) => row.business === business
-		)
-		const existingEmployees = (yield* relationRows(snapshot, S.EmployeeSubject)).filter(
-			(row) => row.business === business
-		)
-		const currentRules = (yield* relationRows(snapshot, S.FilingRule)).filter(
-			(row) => row.release === binding.release
-		)
-		const calendar = (yield* relationRows(snapshot, S.CalendarPeriod)).filter(
-			(row) => row.release === binding.release
-		)
+		const existingBusiness = yield* first(snapshot, S.BusinessSubject, { business })
+		const existingEmployees = yield* select(snapshot, S.EmployeeSubject, { business })
+		const currentRules = yield* select(snapshot, S.FilingRule, { release: binding.release })
+		const calendar = yield* select(snapshot, S.CalendarPeriod, { release: binding.release })
 		const wages = (yield* rows(snapshot, currentRevisions, {})).filter((row) => row.business === business)
 		const paid = [
 			...wages.map((row) => ({
@@ -264,36 +256,34 @@ export const expectRetirementFiling = (payload: unknown) =>
 			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
 					const evidence = yield* note(input.evidence)
-					const plan = (yield* relationRows(snapshot, S.RetirementPlan)).find(
-						(r) => r.id === input.plan && r.business === business
-					)
+					const plan = yield* first(snapshot, S.RetirementPlan, { id: input.plan, business })
 					if (!plan)
 						throw new Refusal({ code: "PlanMissing", message: "Select this business's retirement plan" })
 					const span = periodSpan(input.year, "Year"),
-						existingSubject = (yield* relationRows(snapshot, S.PlanSubject)).find((r) => r.plan === plan.id),
+						existingSubject = yield* first(snapshot, S.PlanSubject, { plan: plan.id }),
 						subject = existingSubject?.subject ?? (yield* mintId)
 					if (!existingSubject) {
 						yield* draft.insert(S.FilingSubject, [{ id: subject, business, kind: "Plan" }])
 						yield* draft.insert(S.PlanSubject, [{ subject, plan: plan.id, business }])
 					}
-					const binding = (yield* relationRows(snapshot, S.PolicyBinding)).find(
-						(r) => r.business === business
-					)
-					const calendar = (yield* relationRows(snapshot, S.CalendarPeriod)).find(
-						(r) =>
-							r.release === binding?.release &&
-							r.authority === "FederalDC" &&
-							r.kind === "Year" &&
-							r.year === BigInt(input.year)
-					)
+					const binding = yield* first(snapshot, S.PolicyBinding, { business })
+					const calendar =
+						binding &&
+						(yield* first(snapshot, S.CalendarPeriod, {
+							release: binding.release,
+							authority: "FederalDC",
+							kind: "Year",
+							year: BigInt(input.year)
+						}))
 					if (!calendar)
 						throw new Refusal({
 							code: "CalendarCoverageMissing",
 							message: "Install the filing year's reviewed calendar"
 						})
-					const existingRequirement = (yield* relationRows(snapshot, S.FilingRequirement)).find(
-							(r) => r.business === business && r.form === input.form
-						),
+					const existingRequirement = yield* first(snapshot, S.FilingRequirement, {
+							business,
+							form: input.form
+						}),
 						requirement = existingRequirement?.id ?? (yield* mintId)
 					if (!existingRequirement)
 						yield* draft.insert(S.FilingRequirement, [
@@ -306,9 +296,7 @@ export const expectRetirementFiling = (payload: unknown) =>
 								evidence
 							}
 						])
-					const existingScope = (yield* relationRows(snapshot, S.FilingScope)).find(
-							(r) => r.requirement === requirement && r.subject === subject
-						),
+					const existingScope = yield* first(snapshot, S.FilingScope, { requirement, subject }),
 						scope = existingScope?.id ?? (yield* mintId)
 					const covered = existingScope
 						? civilDaySpan(
@@ -320,9 +308,7 @@ export const expectRetirementFiling = (payload: unknown) =>
 					yield* draft.insert(S.FilingScope, [
 						{ id: scope, requirement, subject, business, form: input.form, kind: "Year", span: covered }
 					])
-					const existing = (yield* relationRows(snapshot, S.OriginalFiling)).find(
-						(r) => r.scope === scope && r.canonical === calendar.id
-					)
+					const existing = yield* first(snapshot, S.OriginalFiling, { scope, canonical: calendar.id })
 					if (existing) return { filing: existing.filing }
 					const filing = yield* mintId
 					yield* draft.insert(S.Filing, [

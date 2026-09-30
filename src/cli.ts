@@ -1,12 +1,11 @@
 import { NativeRuntime } from "@bjornpagen/bumbledb"
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
 import { type Cause, Console, Effect, Schema } from "effect"
-import { businessFacts } from "./commands.ts"
 import { encodeOutput } from "./core/boundary.ts"
 import { io, readText } from "./core/files.ts"
 import { entityId, json, mintId, Refusal } from "./core/values.ts"
-import { archives, backups, decodeInput, readAsOf, reads, refuseUnknown, writes } from "./ops.ts"
-import { relationRows, rows } from "./queries.ts"
+import { catalog, decodeInput, ops, type Performed, readAsOf, reads, refuseUnknown } from "./ops.ts"
+import { first, relationRows } from "./queries.ts"
 import { defaultBindingPath, latest, ledgerLayer } from "./runtime.ts"
 import * as S from "./schema.ts"
 
@@ -66,42 +65,25 @@ const print = (value: unknown, texts: ReadonlyMap<string, string>) =>
 
 const apply = (args: readonly string[]) =>
 	Effect.gen(function* () {
-		const { op, ...payload } = yield* readPayload(flag(args, "input"))
+		const { op: name, ...payload } = yield* readPayload(flag(args, "input"))
 		const binding = flag(args, "binding") ?? defaultBindingPath
-		if (typeof op !== "string")
+		if (typeof name !== "string")
 			return yield* Effect.fail(new Refusal({ code: "InvalidInput", message: 'Name the write in "op"' }))
-		if (op === "db.backup") {
-			const input = decodeInput(backups["db.backup"].input, payload)
-			return yield* Effect.gen(function* () {
-				yield* print(yield* backups["db.backup"].run(input), yield* statements)
-			}).pipe(Effect.scoped, Effect.provide(ledgerLayer(binding)))
-		}
-		if (op === "db.verify-backup")
-			return yield* print(
-				yield* archives["db.verify-backup"].run(decodeInput(archives["db.verify-backup"].input, payload)),
-				new Map()
+		const op = ops[name]
+		if (!op) return yield* refuseUnknown("write", name, Object.keys(ops))
+		const show = ({ output, exitCode }: Performed, texts: ReadonlyMap<string, string>) =>
+			Effect.gen(function* () {
+				yield* print(output, texts)
+				if (exitCode) process.exitCode = exitCode
+			})
+		if (op.scope === "archive")
+			return yield* Effect.scoped(
+				Effect.gen(function* () {
+					yield* show(yield* op.perform(payload), new Map())
+				})
 			)
-		if (op === "db.restore")
-			return yield* print(
-				yield* archives["db.restore"].run(decodeInput(archives["db.restore"].input, payload)),
-				new Map()
-			)
-		if (!(op in writes))
-			return yield* refuseUnknown("write", op, [
-				...Object.keys(writes),
-				...Object.keys(backups),
-				...Object.keys(archives)
-			])
-		const write = writes[op as keyof typeof writes]
 		return yield* Effect.gen(function* () {
-			const receipt = yield* write.run(payload)
-			const result = "readback" in write ? yield* write.readback(receipt) : receipt
-			yield* print(result, yield* statements)
-			if (
-				(receipt.outcome.kind === "committed" || receipt.outcome.kind === "no-change") &&
-				receipt.outcome.result.kind === "ReconciliationRequired"
-			)
-				process.exitCode = 1
+			yield* show(yield* op.perform(payload), yield* statements)
 		}).pipe(Effect.scoped, Effect.provide(ledgerLayer(binding)))
 	})
 
@@ -118,7 +100,7 @@ const read = (args: readonly string[]) =>
 			const company =
 				input.business === undefined
 					? undefined
-					: (yield* rows(yield* latest, businessFacts, {})).find((row) => row.id === input.business)
+					: yield* first(yield* latest, S.Business, { id: entityId(input.business) })
 			if (input.business !== undefined && !company)
 				return yield* Effect.fail(
 					new Refusal({ code: "BusinessMissing", message: `No business ${input.business}` })
@@ -131,34 +113,19 @@ const read = (args: readonly string[]) =>
 const schema = (args: readonly string[]) =>
 	Effect.gen(function* () {
 		const name = args[0]
-		const all = {
-			...Object.fromEntries(Object.entries(writes).map(([key, value]) => [key, { kind: "write", ...value }])),
-			...Object.fromEntries(
-				[...Object.entries(backups), ...Object.entries(archives)].map(([key, value]) => [
-					key,
-					{ kind: "write", ...value }
-				])
-			),
-			...Object.fromEntries(Object.entries(reads).map(([key, value]) => [key, { kind: "read", ...value }]))
-		}
-		const describe = (key: string) => {
-			const entry = all[key]
-			if (!entry) throw new Refusal({ code: "UnknownOperation", message: `No op or read "${key}"` })
-			return {
-				name: key,
+		if (name === undefined)
+			return yield* Console.log(
+				json(Object.values(catalog).map(({ name, kind, summary }) => ({ name, kind, summary })))
+			)
+		const entry = catalog[name]
+		if (!entry) return yield* refuseUnknown("op or read", name, Object.keys(catalog))
+		yield* Console.log(
+			json({
+				name: entry.name,
 				kind: entry.kind,
 				summary: entry.summary,
 				input: Schema.toJsonSchemaDocument(Schema.toEncoded(entry.input))
-			}
-		}
-		yield* Console.log(
-			JSON.stringify(
-				name
-					? describe(name)
-					: Object.keys(all).map((key) => ({ name: key, kind: all[key]?.kind, summary: all[key]?.summary })),
-				null,
-				2
-			)
+			})
 		)
 	})
 

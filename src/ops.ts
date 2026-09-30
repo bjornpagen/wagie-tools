@@ -43,6 +43,7 @@ import {
 	reviseDeadline,
 	submitFiling
 } from "./filings.ts"
+import type { WriteName } from "./op-names.ts"
 import {
 	DispositionInput,
 	disposeLiability,
@@ -280,7 +281,7 @@ export const writes = {
 		run: attachBankArtifact
 	},
 	"bank.movement": bookkeeping("BankMovement", "Record an actual Mercury movement by its transaction ID"),
-	"bank.distribution": bookkeeping("Distribution", "Allocate a movement's cents to an owner distribution"),
+	"bank.distribution": bookkeeping("Distribution", "Allocate part of a movement to an owner distribution"),
 	"bank.distribution-return": bookkeeping(
 		"DistributionReturn",
 		"Link an inflow returning part of a distribution"
@@ -310,7 +311,7 @@ export const writes = {
 		"Confirm a whole receipt's conversion from a supplied report"
 	),
 	"retirement.balance": bookkeeping("Balance", "Record a dated provider balance")
-} satisfies Record<string, Write>
+} satisfies Record<WriteName, Write>
 
 type ReadContext = { readonly asOf: UnixEpochDay }
 type Read = {
@@ -445,31 +446,91 @@ export const reads = {
 
 /** Maintenance outside the domain command log. A backup reads the open
  * ledger; verifying and restoring an archive never open the live ledger. */
-export const backups = {
-	"db.backup": {
-		summary: "Capture, verify and package a native backup of the open ledger",
-		input: Schema.Struct({ operation: EntityId, output: Nonblank }),
-		run: (input: { operation: string; output: string }) => backupLedger(input)
-	}
-} as const
-export const archives = {
-	"db.verify-backup": {
-		summary: "Restore an archive in isolation and compare every fact",
-		input: Schema.Struct({ archive: Nonblank }),
-		run: (input: { archive: string }) => verifyArchive(input.archive)
-	},
-	"db.restore": {
-		summary: "Restore an archive into a new directory and binding",
-		input: Schema.Struct({
-			operation: EntityId,
-			archive: Nonblank,
-			directory: Nonblank,
-			bindingOutput: Nonblank
-		}),
-		run: (input: { operation: string; archive: string; directory: string; bindingOutput: string }) =>
-			restoreArchive(input)
-	}
-} as const
+/** `ledger` ops open the configured ledger; `archive` ops work on files alone. */
+type Maintenance<Scope extends Op["scope"]> = {
+	readonly summary: string
+	readonly scope: Scope
+	readonly input: Schema.Top
+	readonly run: (payload: unknown) => Effect.Effect<unknown, unknown, EnvOf<Scope>>
+}
+type EnvOf<Scope extends Op["scope"]> = Scope extends "ledger" ? Env : ArchiveEnv
+const maintenanceOf = <S extends Schema.Top, Scope extends Op["scope"]>(
+	summary: string,
+	scope: Scope,
+	input: S,
+	run: (input: S["Type"]) => Effect.Effect<unknown, unknown, EnvOf<Scope>>
+): Maintenance<Scope> => ({ summary, scope, input, run: (payload) => run(decodeInput(input, payload)) })
+const maintenance = {
+	"db.backup": maintenanceOf(
+		"Capture, verify and package a native backup of the open ledger",
+		"ledger",
+		Schema.Struct({ operation: EntityId, output: Nonblank }),
+		backupLedger
+	),
+	"db.verify-backup": maintenanceOf(
+		"Restore an archive in isolation and compare every fact",
+		"archive",
+		Schema.Struct({ archive: Nonblank }),
+		(input) => verifyArchive(input.archive)
+	),
+	"db.restore": maintenanceOf(
+		"Restore an archive into a new directory and binding",
+		"archive",
+		Schema.Struct({ operation: EntityId, archive: Nonblank, directory: Nonblank, bindingOutput: Nonblank }),
+		restoreArchive
+	)
+}
+
+/** What `wagie apply` performs: the output to print and whether the process
+ * should exit nonzero (a committed `ReconciliationRequired` opened a question
+ * instead of doing what was asked). */
+export type Performed = { readonly output: unknown; readonly exitCode: 0 | 1 }
+type ArchiveEnv = Exclude<Env, Ledger>
+export type Op = {
+	readonly summary: string
+	readonly input: Schema.Top
+} & (
+	| {
+			readonly scope: "ledger"
+			readonly perform: (payload: unknown) => Effect.Effect<Performed, unknown, Env>
+	  }
+	| {
+			readonly scope: "archive"
+			readonly perform: (payload: unknown) => Effect.Effect<Performed, unknown, ArchiveEnv>
+	  }
+)
+const writeOp = (write: Write): Op => ({
+	summary: write.summary,
+	scope: "ledger",
+	input: write.input,
+	perform: (payload) =>
+		Effect.gen(function* () {
+			const receipt = yield* write.run(payload)
+			const output = write.readback ? yield* write.readback(receipt) : receipt
+			const reconciliation =
+				(receipt.outcome.kind === "committed" || receipt.outcome.kind === "no-change") &&
+				receipt.outcome.result.kind === "ReconciliationRequired"
+			return { output, exitCode: reconciliation ? 1 : 0 }
+		})
+})
+const maintenanceOp = (entry: Maintenance<"ledger"> | Maintenance<"archive">): Op => ({
+	summary: entry.summary,
+	input: entry.input,
+	...(entry.scope === "ledger"
+		? {
+				scope: "ledger",
+				perform: (payload: unknown) => Effect.map(entry.run(payload), (output) => ({ output, exitCode: 0 }))
+			}
+		: {
+				scope: "archive",
+				perform: (payload: unknown) => Effect.map(entry.run(payload), (output) => ({ output, exitCode: 0 }))
+			})
+})
+/** Every `apply` op by name: the domain writes and ledger maintenance. */
+export const ops: Record<string, Op> = {
+	...Object.fromEntries(Object.entries(writes).map(([name, write]) => [name, writeOp(write)])),
+	...Object.fromEntries(Object.entries(maintenance).map(([name, entry]) => [name, maintenanceOp(entry)]))
+}
 
 export const readAsOf = (asOf: UnixEpochDay | undefined, timeZone: string) =>
 	asOf === undefined ? today(timeZone) : Effect.succeed(asOf)
@@ -481,5 +542,21 @@ export const refuseUnknown = (kind: string, name: string, known: readonly string
 
 export const decodeInput = <S extends Schema.Top>(schema: S, payload: unknown): S["Type"] =>
 	parseStrict(schema as never, payload) as S["Type"]
+
+/** `wagie schema`: every op and read with its JSON Schema. */
+export const catalog = {
+	...Object.fromEntries(
+		Object.entries(ops).map(([name, op]) => [
+			name,
+			{ name, kind: "write", summary: op.summary, input: op.input }
+		])
+	),
+	...Object.fromEntries(
+		Object.entries(reads).map(([name, entry]) => [
+			name,
+			{ name, kind: "read", summary: entry.summary, input: entry.input }
+		])
+	)
+} as Record<string, { name: string; kind: "write" | "read"; summary: string; input: Schema.Top }>
 
 export { BookkeepingInput }

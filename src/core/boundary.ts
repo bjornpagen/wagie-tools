@@ -65,7 +65,9 @@ export const encodeOutput = (value: unknown, statements: ReadonlyMap<string, str
 				case "DayPoint":
 					return day(item)
 				case "Count":
-					return item.toString()
+					if (item > BigInt(Number.MAX_SAFE_INTEGER) || item < BigInt(Number.MIN_SAFE_INTEGER))
+						throw new Refusal({ code: "CountRange", message: `Count ${path} exceeds a JSON integer` })
+					return Number(item)
 				default:
 					throw new Refusal({
 						code: "UnitUnclassified",

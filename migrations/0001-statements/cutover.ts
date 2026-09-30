@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import {
 	ChangeSet,
 	type Fact,
@@ -10,11 +11,9 @@ import {
 } from "@bjornpagen/bumbledb"
 import type { Population, PublishedSnapshot } from "@bjornpagen/bumbledb-log"
 import { Effect } from "effect"
-import { filingActivityOf, filingDigestOf } from "../../src/bookkeeping.ts"
 import { statementId } from "../../src/commands.ts"
-import { epochDay, toCalendarDate } from "../../src/core/time.ts"
-import { Refusal } from "../../src/core/values.ts"
-import { driveId } from "../../src/documents.ts"
+import { epochDay, periodSpan, toCalendarDate } from "../../src/core/time.ts"
+import { json, Refusal } from "../../src/core/values.ts"
 import * as old from "../0000-initial/schema.ts"
 import * as next from "./schema.ts"
 
@@ -242,6 +241,62 @@ const gainId = [
 ] as const
 
 const DriveEvidence = /^\{[\s\S]*"kind":\s*"VerifiedDriveArtifact"[\s\S]*\}$/
+const driveId = (locator: string) =>
+	/^https:\/\/drive\.google\.com\/file\/d\/([A-Za-z0-9_-]{10,200})\/view$/.exec(locator)?.[1]
+
+/** The 0001 filing digest, frozen here: a retirement filing's basis is the
+ * fingerprint of its plan-year event rows in canonical order. Later schemas
+ * re-derive it with their own function; this one stays as released. */
+type R1 = typeof next.schema.relations
+const filingDigest0001 = (
+	plan: Uuid,
+	year: number,
+	rows: {
+		receipts: readonly Fact<R1["PlanReceipt"]>[]
+		receiptDates: readonly Fact<R1["PlanReceiptDate"]>[]
+		receiptAllocations: readonly Fact<R1["ReceiptAllocation"]>[]
+		conversions: readonly Fact<R1["RothConversion"]>[]
+		conversionReceipts: readonly Fact<R1["ConversionReceipt"]>[]
+		reportedConversions: readonly Fact<R1["ReportedReceiptConversion"]>[]
+		suppliedTax: readonly Fact<R1["SuppliedConversionTax"]>[]
+		suppliedReports: readonly Fact<R1["RetirementReport"]>[]
+		contributions: readonly Fact<R1["RetirementContribution"]>[]
+	}
+) => {
+	const span = periodSpan(year, "Year")
+	const receipts = rows.receipts.filter((r) => r.plan === plan && r.year === BigInt(year))
+	const conversions = rows.conversions.filter(
+		(r) => r.plan === plan && r.convertedOn >= span.start && r.convertedOn < span.end
+	)
+	const contributionIds = new Set(
+		rows.contributions.filter((r) => r.plan === plan && r.year === BigInt(year)).map((r) => r.id)
+	)
+	const conversionIds = new Set(conversions.map((r) => r.id)),
+		receiptIds = new Set(receipts.map((r) => r.id))
+	const canonical = <T>(values: readonly T[]) => [...values].sort((a, b) => json(a).localeCompare(json(b)))
+	return createHash("sha256")
+		.update(
+			json({
+				receipts: canonical(receipts),
+				receiptDates: canonical(rows.receiptDates.filter((r) => receiptIds.has(r.receipt))),
+				receiptAllocations: canonical(
+					rows.receiptAllocations.filter(
+						(r) => contributionIds.has(r.contribution) || receiptIds.has(r.receipt)
+					)
+				),
+				conversions: canonical(conversions),
+				conversionReceipts: canonical(
+					rows.conversionReceipts.filter((r) => conversionIds.has(r.conversion) || receiptIds.has(r.receipt))
+				),
+				reportedConversions: canonical(rows.reportedConversions.filter((r) => receiptIds.has(r.receipt))),
+				suppliedTax: canonical(rows.suppliedTax.filter((r) => conversionIds.has(r.conversion))),
+				suppliedReports: canonical(
+					rows.suppliedReports.filter((r) => r.plan === plan && r.year === BigInt(year))
+				)
+			})
+		)
+		.digest("hex")
+}
 
 export const populateStatements = (source: Old, target: Next, mint: Effect.Effect<Uuid>) =>
 	Effect.gen(function* () {
@@ -282,19 +337,17 @@ export const populateStatements = (source: Old, target: Next, mint: Effect.Effec
 						message: `Filing basis ${basis.version} has no plan filing`
 					})
 				)
-			const digest = filingDigestOf(
-				filingActivityOf(plan, toCalendarDate(epochDay(filing.period.start)).year, {
-					receipts: rowsOf("PlanReceipt"),
-					receiptDates: rowsOf("PlanReceiptDate"),
-					receiptAllocations: rowsOf("ReceiptAllocation"),
-					conversions: rowsOf("RothConversion"),
-					conversionReceipts: rowsOf("ConversionReceipt"),
-					reportedConversions: rowsOf("ReportedReceiptConversion"),
-					suppliedTax: rowsOf("SuppliedConversionTax"),
-					suppliedReports: rowsOf("RetirementReport"),
-					contributions: rowsOf("RetirementContribution")
-				})
-			)
+			const digest = filingDigest0001(plan, toCalendarDate(epochDay(filing.period.start)).year, {
+				receipts: rowsOf("PlanReceipt"),
+				receiptDates: rowsOf("PlanReceiptDate"),
+				receiptAllocations: rowsOf("ReceiptAllocation"),
+				conversions: rowsOf("RothConversion"),
+				conversionReceipts: rowsOf("ConversionReceipt"),
+				reportedConversions: rowsOf("ReportedReceiptConversion"),
+				suppliedTax: rowsOf("SuppliedConversionTax"),
+				suppliedReports: rowsOf("RetirementReport"),
+				contributions: rowsOf("RetirementContribution")
+			})
 			bases.push({ version: basis.version, filing: basis.filing, digest })
 		}
 		yield* write(next.schema.relations.RetirementFilingBasis, bases)

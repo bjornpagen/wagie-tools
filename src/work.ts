@@ -2,19 +2,28 @@ import type { Uuid } from "@bjornpagen/bumbledb"
 import { Effect } from "effect"
 import { retirementFilingDigest } from "./bookkeeping.ts"
 import { bookkeepingWork } from "./bookkeeping-work.ts"
+import { formatDollars } from "./core/boundary.ts"
 import { epochDay, periodSpan, toCalendarDate, type UnixEpochDay } from "./core/time.ts"
 import { Refusal } from "./core/values.ts"
 import { depositRegister, entryKey } from "./deposits.ts"
 import { inspectDocuments } from "./documents.ts"
 import { annualPolicyData, missingAnnualInputs } from "./policy/annual.ts"
-import { currentAssessments, currentRevisions, liabilityEntries, relationRows, rows } from "./queries.ts"
+import {
+	currentAssessments,
+	currentRevisions,
+	first,
+	liabilityEntries,
+	relationRows,
+	rows,
+	select
+} from "./queries.ts"
 import { questions } from "./questions.ts"
 import { paymentEquation } from "./reconciliation.ts"
 import { employeeTaxPositions, recoveryEquation } from "./recoveries.ts"
 import type { Snapshot } from "./runtime.ts"
 import { formPolicy } from "./schema/vocabulary.ts"
 import * as S from "./schema.ts"
-import { type WorkItem, workItem } from "./work-rules.ts"
+import { type NextIntent, type WorkItem, workItem } from "./work-rules.ts"
 
 export type { WorkItem } from "./work-rules.ts"
 export type ReadinessIssue = { readonly id: string; readonly kind: string; readonly detail: string }
@@ -29,56 +38,56 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 		// that exact state; independent snapshots may run concurrently.
 		const data = yield* Effect.all(
 			{
-				subjects: relationRows(snapshot, S.FilingSubject),
-				planSubjects: relationRows(snapshot, S.PlanSubject),
+				subjects: select(snapshot, S.FilingSubject, { business }),
+				planSubjects: select(snapshot, S.PlanSubject, { business }),
 				retirementBases: relationRows(snapshot, S.RetirementFilingBasis),
 				formAdjustments: relationRows(snapshot, S.FormAdjustment),
 				adjustmentBases: relationRows(snapshot, S.FilingAdjustmentBasis),
 				deductions: relationRows(snapshot, S.Deduction),
 				recoveries: relationRows(snapshot, S.Recovery),
 				assessed: rows(snapshot, currentAssessments, {}),
-				employeeSubjects: relationRows(snapshot, S.EmployeeSubject),
+				employeeSubjects: select(snapshot, S.EmployeeSubject, { business }),
 				budgets: relationRows(snapshot, S.AnnualBudget),
 				commitments: relationRows(snapshot, S.BudgetCommitment),
 				assignments: relationRows(snapshot, S.BudgetAssignment),
 				bases: relationRows(snapshot, S.FilingBasis),
-				corrections: relationRows(snapshot, S.CorrectionFiling),
+				corrections: select(snapshot, S.CorrectionFiling, { business }),
 				revisions: rows(snapshot, currentRevisions, {}),
-				filings: relationRows(snapshot, S.Filing),
-				versions: relationRows(snapshot, S.FilingVersion),
-				submissions: relationRows(snapshot, S.Submission),
+				filings: select(snapshot, S.Filing, { business }),
+				versions: select(snapshot, S.FilingVersion, { business }),
+				submissions: select(snapshot, S.Submission, { business }),
 				rejections: relationRows(snapshot, S.Rejection),
 				deadlines: relationRows(snapshot, S.DeadlineRevision),
-				requirements: relationRows(snapshot, S.FilingRequirement),
+				requirements: select(snapshot, S.FilingRequirement, { business }),
 				ends: relationRows(snapshot, S.RequirementEnd),
-				scopes: relationRows(snapshot, S.FilingScope),
-				payments: relationRows(snapshot, S.TaxPayment),
-				reconciliations: relationRows(snapshot, S.PaymentReconciliation),
-				allocations: relationRows(snapshot, S.PaymentAllocation),
+				scopes: select(snapshot, S.FilingScope, { business }),
+				payments: select(snapshot, S.TaxPayment, { business }),
+				reconciliations: select(snapshot, S.PaymentReconciliation, { business }),
+				allocations: select(snapshot, S.PaymentAllocation, { business }),
 				adjustments: relationRows(snapshot, S.PaymentAdjustment),
 				dispositions: relationRows(snapshot, S.SignedDisposition),
-				amendments: relationRows(snapshot, S.AmendmentLiability),
-				employees: relationRows(snapshot, S.Employee),
+				amendments: select(snapshot, S.AmendmentLiability, { business }),
+				employees: select(snapshot, S.Employee, { business }),
 				elections: relationRows(snapshot, S.Election),
 				electionDocuments: relationRows(snapshot, S.ElectionDocument),
-				businesses: relationRows(snapshot, S.Business),
-				accounts: relationRows(snapshot, S.TaxAccount),
-				bindings: relationRows(snapshot, S.PolicyBinding),
+				company: first(snapshot, S.Business, { id: business }),
+				accounts: select(snapshot, S.TaxAccount, { business }),
+				active: first(snapshot, S.PolicyBinding, { business }),
 				entries: rows(snapshot, liabilityEntries, {})
 			},
 			{ concurrency: 1 }
 		)
-		const company = data.businesses.find((row) => row.id === business)
+		const company = data.company
 		if (!company)
 			return yield* Effect.fail(new Refusal({ code: "BusinessMissing", message: `No business ${business}` }))
 		const year = BigInt(toCalendarDate(asOf).year)
 		const yearSpan = periodSpan(Number(year), "Year")
-		const employees = data.employees.filter((row) => row.business === business)
+		const employees = data.employees
 		const employeeIds = new Set(employees.map((row) => row.id))
 		const work: WorkItem[] = []
 		const readiness: ReadinessIssue[] = []
 		const annual = yield* annualPolicyData(snapshot, business)
-		const active = data.bindings.find((row) => row.business === business)
+		const active = data.active
 		for (const policyYear of [year, year + 1n]) {
 			const valid = periodSpan(Number(policyYear), "Year")
 			for (const authority of S.Authority.handles) {
@@ -131,7 +140,7 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 			const previous = deadlines.get(deadline.filing)
 			if (!previous || previous.sequence < deadline.sequence) deadlines.set(deadline.filing, deadline)
 		}
-		const filings = data.filings.filter((row) => row.business === business)
+		const filings = data.filings
 		for (const filing of filings) {
 			const version = currentVersions.get(filing.id)
 			const completed =
@@ -197,9 +206,7 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 		}
 		const requirements = data.requirements.filter(
 			(row) =>
-				row.business === business &&
-				row.startsOn <= asOf &&
-				!data.ends.some((end) => end.requirement === row.id && end.endsBefore <= asOf)
+				row.startsOn <= asOf && !data.ends.some((end) => end.requirement === row.id && end.endsBefore <= asOf)
 		)
 		for (const [form, policy] of Object.entries(formPolicy)) {
 			if (policy.due === "RecordedEvent") continue
@@ -214,7 +221,6 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 			const scopes = data.scopes.filter((row) => row.requirement === requirement.id)
 			const expectedSubjects = data.subjects.filter(
 				(row) =>
-					row.business === business &&
 					row.kind === requirement.subjectKind &&
 					(row.kind === "Business" ||
 						data.employeeSubjects.some(
@@ -228,7 +234,7 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 								)
 						))
 			)
-			const ensure = { op: "filings.ensure", input: { throughYear: Number(year) } }
+			const ensure: NextIntent = { op: "filings.ensure", input: { throughYear: Number(year) } }
 			if (requirement.subjectKind === "Business" && !expectedSubjects.length)
 				setup("filing-subject", requirement.id, `Missing ${requirement.form} business subject`, ensure)
 			for (const subject of expectedSubjects) {
@@ -265,7 +271,7 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 			}
 		}
 		for (const family of S.AccountFamily.handles)
-			if (!data.accounts.some((row) => row.business === business && row.family === family))
+			if (!data.accounts.some((row) => row.family === family))
 				setup("tax-account", family, `Missing ${family} tax account`, { op: "business.configure", input: {} })
 		for (const employee of employees) {
 			if (!data.budgets.some((row) => row.employee === employee.id && row.year === year))
@@ -293,7 +299,7 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 		const allocated = new Set<string>()
 		const acceptedReconciliations = new Set<Uuid>()
 		const unresolvedAccounts = new Set<Uuid>()
-		for (const payment of data.payments.filter((row) => row.business === business)) {
+		for (const payment of data.payments) {
 			const reconciliation = data.reconciliations.find((row) => row.payment === payment.id)
 			const allocations = reconciliation
 				? data.allocations.filter((row) => row.reconciliation === reconciliation.id)
@@ -363,8 +369,8 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 				})
 			)
 		}
-		const amendmentEntries = new Set(data.amendments.filter((row) => row.business === business).map(entryKey))
-		for (const amendment of data.amendments.filter((row) => row.business === business)) {
+		const amendmentEntries = new Set(data.amendments.map(entryKey))
+		for (const amendment of data.amendments) {
 			const entry = byEntry.get(entryKey(amendment))
 			const filing = filings.find((row) => row.id === amendment.filing)
 			if (!entry || !filing)
@@ -410,10 +416,10 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 				})
 			)
 		}
-		const install = { op: "policy.install", input: {} }
+		const install: NextIntent = { op: "policy.install", input: {} }
 		for (const entry of deposits.uncovered)
 			setup("deposit-coverage", entryKey(entry), "Missing deposit coverage for a posted liability", install)
-		for (const account of data.accounts.filter((row) => row.business === business)) {
+		for (const account of data.accounts) {
 			if (
 				!deposits.checkpoints.some(
 					(row) => row.account === account.id && row.span.start <= asOf && asOf < row.span.end
@@ -455,7 +461,7 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 				readiness.push({
 					id: deduction.wage,
 					kind: "RecoveryUnattributed",
-					detail: `${equation.difference} cents of actual recovery deductions need attribution: recovery.record`
+					detail: `$${formatDollars(equation.difference)} of actual recovery deductions need attribution: recovery.record`
 				})
 		}
 		for (const position of employeeTaxPositions(data.assessed, data.deductions, data.recoveries).filter(
@@ -465,7 +471,7 @@ export const workRegister = (snapshot: Snapshot, business: Uuid, asOf: UnixEpoch
 				readiness.push({
 					id: `${position.wage}/${position.component}`,
 					kind: position.remaining > 0n ? "EmployeeTaxOwed" : "EmployeeTaxExcess",
-					detail: `${position.remaining} cents between current ${position.component} assessment and actual withholding/recoveries`
+					detail: `$${formatDollars(position.remaining)} between current ${position.component} assessment and actual withholding/recoveries`
 				})
 		}
 		const documents = yield* inspectDocuments(snapshot)

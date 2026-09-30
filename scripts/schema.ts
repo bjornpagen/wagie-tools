@@ -3,6 +3,7 @@ import { NativeRuntime } from "@bjornpagen/bumbledb"
 import { schemaBindings, schemaSnapshot } from "@bjornpagen/bumbledb-log/schema"
 import { NodeRuntime } from "@effect/platform-node"
 import { Console, Effect } from "effect"
+import { currentDirectory } from "../migrations/current.ts"
 import { io } from "../src/core/files.ts"
 import { Refusal } from "../src/core/values.ts"
 import ledger from "../src/schema.ts"
@@ -16,7 +17,7 @@ const program = Effect.gen(function* () {
 		["schema.ts", bindings]
 	] as const) {
 		const actual = yield* io("read current schema artifact", () =>
-			fs.readFile(new URL(`../migrations/0001-statements/${name}`, import.meta.url), "utf8")
+			fs.readFile(new URL(`../${currentDirectory}/${name}`, import.meta.url), "utf8")
 		)
 		if (actual !== expected)
 			return yield* Effect.fail(

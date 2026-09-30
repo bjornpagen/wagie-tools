@@ -4,7 +4,14 @@ import { bookkeepingReport } from "./bookkeeping.ts"
 import { netCash } from "./calculations.ts"
 import { type CivilDaySpan, periodSpan, type UnixEpochDay } from "./core/time.ts"
 import { unsigned } from "./core/values.ts"
-import { currentAssessments, currentTaxableWages, liabilityEntries, relationRows, rows } from "./queries.ts"
+import {
+	currentAssessments,
+	currentTaxableWages,
+	liabilityEntries,
+	relationRows,
+	rows,
+	select
+} from "./queries.ts"
 import type { Snapshot } from "./runtime.ts"
 import * as S from "./schema.ts"
 import { workRegister } from "./work.ts"
@@ -66,12 +73,12 @@ export const periodFigures = (snapshot: Snapshot, business: Uuid, period: CivilD
 		const entries = (yield* rows(snapshot, liabilityEntries, {})).filter((row) => wageIds.has(row.wage))
 
 		const taxable = (yield* rows(snapshot, currentTaxableWages, {})).filter((row) => wageIds.has(row.wage))
-		const people = (yield* relationRows(snapshot, S.Employee)).filter(
-			(row) => row.business === business && (employee === undefined || row.id === employee)
+		const people = (yield* select(snapshot, S.Employee, { business })).filter(
+			(row) => employee === undefined || row.id === employee
 		)
 		const employeeIds = new Set(people.map((row) => row.id))
-		const relevantFilings = (yield* relationRows(snapshot, S.Filing)).filter(
-			(row) => row.business === business && row.period.start < period.end && row.period.end > period.start
+		const relevantFilings = (yield* select(snapshot, S.Filing, { business })).filter(
+			(row) => row.period.start < period.end && row.period.end > period.start
 		)
 		const filingIds = new Set(relevantFilings.map((row) => row.id))
 		return {

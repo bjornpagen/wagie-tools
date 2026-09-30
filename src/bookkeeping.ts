@@ -1,9 +1,10 @@
 import type { Fact, IntervalValue, Uuid } from "@bjornpagen/bumbledb"
 import { Effect, Schema } from "effect"
 import { businessCommand } from "./commands.ts"
+import { formatDollars } from "./core/boundary.ts"
 import { civilDayPoint, epochDay, periodSpan, toCalendarDate, type UnixEpochDay } from "./core/time.ts"
-import { entityId, json, mintId, Nonblank, Refusal } from "./core/values.ts"
-import { relationRows } from "./queries.ts"
+import { canonicalJson, entityId, json, mintId, Nonblank, Refusal } from "./core/values.ts"
+import { exists, first, relationRows, select } from "./queries.ts"
 import { askQuestion, questions } from "./questions.ts"
 import { fingerprint, parseStrict, type Snapshot } from "./runtime.ts"
 import * as S from "./schema.ts"
@@ -23,7 +24,7 @@ const positive = (amount: bigint) => {
 /** One receipt reconciliation used by both funding admission and the register. */
 export const receiptDiscrepancies = (snapshot: Snapshot, plan: Uuid) =>
 	Effect.gen(function* () {
-		const receipts = (yield* relationRows(snapshot, S.PlanReceipt)).filter((r) => r.plan === plan)
+		const receipts = yield* select(snapshot, S.PlanReceipt, { plan })
 		const contributions = yield* relationRows(snapshot, S.RetirementContribution)
 		const allocations = yield* relationRows(snapshot, S.ReceiptAllocation)
 		const accounts = yield* relationRows(snapshot, S.PlanAccount)
@@ -63,38 +64,38 @@ export const receiptDiscrepancies = (snapshot: Snapshot, plan: Uuid) =>
 export const retirementPosition = (snapshot: Snapshot, planId: Uuid, year: number) =>
 	Effect.gen(function* () {
 		const plan = yield* required(
-			(yield* relationRows(snapshot, S.RetirementPlan)).find((r) => r.id === planId),
+			yield* first(snapshot, S.RetirementPlan, { id: planId }),
 			"Select a retirement plan"
 		)
-		const annual = (yield* relationRows(snapshot, S.RetirementAnnual)).find(
-			(r) => r.plan === plan.id && r.year === BigInt(year)
-		)
-		const wages = (yield* relationRows(snapshot, S.Wage)).filter(
-			(r) => r.employee === plan.employee && r.year === BigInt(year)
-		)
-		const deductions = (yield* relationRows(snapshot, S.Deduction)).filter(
-			(r) => r.employee === plan.employee && r.year === BigInt(year) && r.kind === "Roth"
-		)
+		const annual = yield* first(snapshot, S.RetirementAnnual, { plan: plan.id, year: BigInt(year) })
+		const wages = yield* select(snapshot, S.Wage, { employee: plan.employee, year: BigInt(year) })
+		const deductions = yield* select(snapshot, S.Deduction, {
+			employee: plan.employee,
+			year: BigInt(year),
+			kind: "Roth"
+		})
 		const cancelled = new Set(
 			(yield* relationRows(snapshot, S.ContributionCancellation)).map((r) => r.contribution)
 		)
-		const contributions = (yield* relationRows(snapshot, S.RetirementContribution)).filter(
-			(r) => r.plan === plan.id && r.year === BigInt(year) && !cancelled.has(r.id)
-		)
+		const contributions = (yield* select(snapshot, S.RetirementContribution, {
+			plan: plan.id,
+			year: BigInt(year)
+		})).filter((r) => !cancelled.has(r.id))
 		const roth = sum(deductions)
 		const afterTax = sum(contributions.filter((r) => r.source === "EmployeeAfterTax"))
 		const compensation = wages.reduce((n, r) => n + r.gross, 0n)
 		const superseded = new Set(
 			(yield* relationRows(snapshot, S.ElectionDocumentRevision)).map((r) => r.predecessor)
 		)
-		const election = (yield* relationRows(snapshot, S.ElectionDocument)).find(
-			(r) => r.employee === plan.employee && r.year === BigInt(year) && !superseded.has(r.id)
-		)
+		const election = (yield* select(snapshot, S.ElectionDocument, {
+			employee: plan.employee,
+			year: BigInt(year)
+		})).find((r) => !superseded.has(r.id))
 		const elected = yield* relationRows(snapshot, S.ElectionDocumentAmount)
-		const rothTarget = elected.find((r) => r.document === election?.id && r.kind === "Roth")?.cents
+		const rothTarget = elected.find((r) => r.document === election?.id && r.kind === "Roth")?.amount
 		const afterTaxTarget = elected.find(
 			(r) => r.document === election?.id && r.kind === "OptionalAfterTax"
-		)?.cents
+		)?.amount
 		const statutory = annual
 			? {
 					deferralsRemaining: annual.deferralLimit - annual.outsideDeferrals - roth,
@@ -181,7 +182,7 @@ export const admitContribution = (
 			return yield* Effect.fail(
 				new Refusal({
 					code: "ContributionCapacity",
-					message: `${permitted} cents permitted by the current election, compensation, and shared annual limits`
+					message: `$${formatDollars(permitted)} permitted by the current election, compensation, and shared annual limits`
 				})
 			)
 		if (source === "EmployeeAfterTax") {
@@ -199,11 +200,11 @@ export const admitContribution = (
 export const distributionPosition = (snapshot: Snapshot, business: Uuid, year: number) =>
 	Effect.gen(function* () {
 		const span = periodSpan(year, "Year")
-		const distributions = (yield* relationRows(snapshot, S.OwnerDistribution)).filter(
-			(r) => r.business === business && r.paidOn >= span.start && r.paidOn < span.end
+		const distributions = (yield* select(snapshot, S.OwnerDistribution, { business })).filter(
+			(r) => r.paidOn >= span.start && r.paidOn < span.end
 		)
-		const returns = (yield* relationRows(snapshot, S.DistributionReturn)).filter(
-			(r) => r.business === business && r.paidOn >= span.start && r.paidOn < span.end
+		const returns = (yield* select(snapshot, S.DistributionReturn, { business })).filter(
+			(r) => r.paidOn >= span.start && r.paidOn < span.end
 		)
 		const allocated = new Set(distributions.map((r) => r.allocation))
 		const funding = (yield* relationRows(snapshot, S.ContributionFunding)).filter((r) =>
@@ -215,9 +216,7 @@ export const distributionPosition = (snapshot: Snapshot, business: Uuid, year: n
 				Object.entries(facts).map(([k, v]) => [k, [...v].sort((a, b) => json(a).localeCompare(json(b)))])
 			)
 		)
-		const reviews = (yield* relationRows(snapshot, S.DistributionReview)).filter(
-			(r) => r.business === business && r.year === BigInt(year)
-		)
+		const reviews = yield* select(snapshot, S.DistributionReview, { business, year: BigInt(year) })
 		return {
 			...facts,
 			year,
@@ -235,11 +234,9 @@ export const retirementActivity = (snapshot: Snapshot, plan: Uuid, year: number)
 	Effect.gen(function* () {
 		const position = yield* retirementPosition(snapshot, plan, year)
 		const span = periodSpan(year, "Year")
-		const receipts = (yield* relationRows(snapshot, S.PlanReceipt)).filter(
-			(r) => r.plan === plan && r.year === BigInt(year)
-		)
-		const conversions = (yield* relationRows(snapshot, S.RothConversion)).filter(
-			(r) => r.plan === plan && r.convertedOn >= span.start && r.convertedOn < span.end
+		const receipts = yield* select(snapshot, S.PlanReceipt, { plan, year: BigInt(year) })
+		const conversions = (yield* select(snapshot, S.RothConversion, { plan })).filter(
+			(r) => r.convertedOn >= span.start && r.convertedOn < span.end
 		)
 		const contributionIds = new Set(position.contributions.map((r) => r.id)),
 			conversionIds = new Set(conversions.map((r) => r.id)),
@@ -266,9 +263,40 @@ export const retirementActivity = (snapshot: Snapshot, plan: Uuid, year: number)
 			suppliedTax: (yield* relationRows(snapshot, S.SuppliedConversionTax)).filter((r) =>
 				conversionIds.has(r.conversion)
 			),
-			suppliedReports: (yield* relationRows(snapshot, S.RetirementReport)).filter(
-				(r) => r.plan === plan && r.year === BigInt(year)
+			...(yield* suppliedReportsOf(
+				yield* select(snapshot, S.RetirementReport, { plan, year: BigInt(year) }),
+				(relation, report) => select(snapshot, relation, { report } as Partial<Fact<typeof relation>>)
+			))
+		}
+	})
+
+/** A plan-year's provider reports with their typed figures. */
+export type SuppliedReports = {
+	suppliedReports: readonly Fact<typeof S.RetirementReport>[]
+	reported1099R: readonly Fact<typeof S.Reported1099R>[]
+	reported1099RBasis: readonly Fact<typeof S.Reported1099RBasis>[]
+	reported1096: readonly Fact<typeof S.Reported1096>[]
+}
+const suppliedReportsOf = (
+	reports: readonly Fact<typeof S.RetirementReport>[],
+	armsOf: <R extends typeof S.Reported1099R | typeof S.Reported1099RBasis | typeof S.Reported1096>(
+		relation: R,
+		report: Uuid
+	) => Effect.Effect<readonly Fact<R>[], unknown>
+): Effect.Effect<SuppliedReports, unknown> =>
+	Effect.gen(function* () {
+		const arms = <R extends typeof S.Reported1099R | typeof S.Reported1099RBasis | typeof S.Reported1096>(
+			relation: R
+		) =>
+			Effect.map(
+				Effect.forEach(reports, (report) => armsOf(relation, report.id)),
+				(found) => found.flat()
 			)
+		return {
+			suppliedReports: reports,
+			reported1099R: yield* arms(S.Reported1099R),
+			reported1099RBasis: yield* arms(S.Reported1099RBasis),
+			reported1096: yield* arms(S.Reported1096)
 		}
 	})
 
@@ -287,7 +315,18 @@ export const operations = {
 	}),
 	SuppliedReport: Schema.Struct({
 		kind: Schema.Literal("SuppliedReport"),
-		...inputFields(S.RetirementReport, ["plan", "year", "artifact", "supplied"])
+		...inputFields(S.RetirementReport, ["plan", "year", "artifact"]),
+		report: Schema.Union([
+			Schema.Struct({
+				form: Schema.Literal("F1099R"),
+				...inputFields(S.Reported1099R, ["account", "distributionCode", "gross", "taxable"]),
+				basis: Schema.optional(money(S.Reported1099RBasis.fields.amount))
+			}),
+			Schema.Struct({
+				form: Schema.Literal("F1096"),
+				...inputFields(S.Reported1096, ["forms", "gross"])
+			})
+		])
 	}),
 	ConfirmReportedConversion: Schema.Struct({
 		kind: Schema.Literal("ConfirmReportedConversion"),
@@ -386,9 +425,7 @@ export const operations = {
 	}),
 	SuppliedTax: Schema.Struct({
 		kind: Schema.Literal("SuppliedTax"),
-		...inputFields(S.SuppliedConversionTax, ["conversion", "field", "amount"], {
-			field: Schema.Literals(["Basis", "Taxable"])
-		})
+		...inputFields(S.SuppliedConversionTax, ["conversion", "field", "amount"])
 	}),
 	Balance: Schema.Struct({
 		kind: Schema.Literal("Balance"),
@@ -417,17 +454,13 @@ export const recordBookkeeping = (payload: unknown) =>
 				Effect.gen(function* () {
 					const op = input.operation,
 						evidence = yield* note(input.evidence)
-					const plans = (yield* relationRows(snapshot, S.RetirementPlan)).filter(
-						(r) => r.business === business
-					)
+					const plans = yield* select(snapshot, S.RetirementPlan, { business })
 					const ownPlan = (id: string) =>
 						required(
 							plans.find((r) => r.id === id),
 							"Select this business's retirement plan"
 						)
-					const movements = (yield* relationRows(snapshot, S.BankMovement)).filter(
-						(r) => r.business === business
-					)
+					const movements = yield* select(snapshot, S.BankMovement, { business })
 					const ownMovement = (id: string) =>
 						required(
 							movements.find((r) => r.id === id),
@@ -463,9 +496,7 @@ export const recordBookkeeping = (payload: unknown) =>
 						])
 					const operation = (plan: Uuid, provider: string, reference: string) =>
 						Effect.gen(function* () {
-							const old = (yield* relationRows(snapshot, S.ProviderOperation)).find(
-								(r) => r.plan === plan && r.provider === provider && r.reference === reference
-							)
+							const old = yield* first(snapshot, S.ProviderOperation, { plan, provider, reference })
 							if (old) return old.id
 							const operationId = yield* mintId
 							yield* draft.insert(S.ProviderOperation, [
@@ -489,7 +520,7 @@ export const recordBookkeeping = (payload: unknown) =>
 								})
 							const convertedOn = actualDay(details.convertedOn),
 								conversionId = yield* mintId
-							if ((yield* relationRows(snapshot, S.RothConversion)).some((r) => r.operation === operationId))
+							if (yield* exists(snapshot, S.RothConversion, { operation: operationId }))
 								throw new Refusal({
 									code: "DuplicateConversion",
 									message: "This provider operation already has its conversion"
@@ -520,8 +551,8 @@ export const recordBookkeeping = (payload: unknown) =>
 					switch (op.kind) {
 						case "AllocateReceipt": {
 							const receipt = yield* required(
-								(yield* relationRows(snapshot, S.PlanReceipt)).find(
-									(r) => r.id === op.receipt && plans.some((p) => p.id === r.plan)
+								(yield* select(snapshot, S.PlanReceipt, { id: op.receipt })).find((r) =>
+									plans.some((p) => p.id === r.plan)
 								),
 								"Select this plan's receipt"
 							)
@@ -537,23 +568,40 @@ export const recordBookkeeping = (payload: unknown) =>
 							break
 						}
 						case "SuppliedReport": {
-							const plan = yield* ownPlan(op.plan)
+							const plan = yield* ownPlan(op.plan),
+								report = op.report
 							yield* draft.insert(S.RetirementReport, [
-								{
-									id,
-									plan: plan.id,
-									year: op.year,
-									artifact: op.artifact,
-									supplied: op.supplied,
-									evidence
-								}
+								{ id, plan: plan.id, year: op.year, artifact: op.artifact, form: report.form, evidence }
 							])
+							switch (report.form) {
+								case "F1099R": {
+									const account = yield* ownAccount(report.account)
+									yield* draft.insert(S.Reported1099R, [
+										{
+											report: id,
+											plan: plan.id,
+											account: account.id,
+											distributionCode: report.distributionCode,
+											gross: report.gross,
+											taxable: report.taxable
+										}
+									])
+									if (report.basis !== undefined)
+										yield* draft.insert(S.Reported1099RBasis, [{ report: id, amount: report.basis }])
+									break
+								}
+								case "F1096":
+									yield* draft.insert(S.Reported1096, [
+										{ report: id, forms: report.forms, gross: report.gross }
+									])
+									break
+							}
 							break
 						}
 						case "ConfirmReportedConversion": {
 							const receipt = yield* required(
-								(yield* relationRows(snapshot, S.PlanReceipt)).find(
-									(r) => r.id === op.receipt && plans.some((p) => p.id === r.plan)
+								(yield* select(snapshot, S.PlanReceipt, { id: op.receipt })).find((r) =>
+									plans.some((p) => p.id === r.plan)
 								),
 								"Select this plan's receipt"
 							)
@@ -575,9 +623,7 @@ export const recordBookkeeping = (payload: unknown) =>
 
 						case "Plan": {
 							const employee = yield* required(
-								(yield* relationRows(snapshot, S.Employee)).find(
-									(r) => r.id === op.employee && r.business === business
-								),
+								yield* first(snapshot, S.Employee, { id: op.employee, business }),
 								"Select the sole owner employee"
 							)
 							yield* draft.insert(S.Owner, [{ business, employee: employee.id, evidence }])
@@ -622,9 +668,7 @@ export const recordBookkeeping = (payload: unknown) =>
 							break
 						}
 						case "BankMovement": {
-							const old = (yield* relationRows(snapshot, S.MercuryTransaction)).find(
-								(r) => r.reference === op.reference
-							)
+							const old = yield* first(snapshot, S.MercuryTransaction, { reference: op.reference })
 							if (old) {
 								const movement = yield* ownMovement(old.movement)
 								if (
@@ -654,21 +698,12 @@ export const recordBookkeeping = (payload: unknown) =>
 								}
 							])
 							yield* draft.insert(S.MercuryTransaction, [{ movement: id, reference: op.reference }])
-							yield* draft.insert(S.BankReference, [
-								{
-									movement: id,
-									issuer: "Mercury",
-									scope: business,
-									value: op.reference,
-									sourceText: input.evidence
-								}
-							])
 							break
 						}
 						case "Distribution": {
 							const movement = yield* ownMovement(op.movement),
 								owner = yield* required(
-									(yield* relationRows(snapshot, S.Owner)).find((r) => r.business === business),
+									yield* first(snapshot, S.Owner, { business }),
 									"Record the sole owner"
 								),
 								amount = positive(op.amount),
@@ -689,9 +724,7 @@ export const recordBookkeeping = (payload: unknown) =>
 						}
 						case "DistributionReturn": {
 							const distribution = yield* required(
-									(yield* relationRows(snapshot, S.OwnerDistribution)).find(
-										(r) => r.id === op.distribution && r.business === business
-									),
+									yield* first(snapshot, S.OwnerDistribution, { id: op.distribution, business }),
 									"Select the original distribution"
 								),
 								movement = yield* ownMovement(op.movement),
@@ -730,14 +763,13 @@ export const recordBookkeeping = (payload: unknown) =>
 								amount = positive(op.amount)
 							if (op.source === "EmployeeRothDeferral") {
 								const deduction = yield* required(
-									(yield* relationRows(snapshot, S.Deduction)).find(
-										(r) =>
-											r.wage === op.wage &&
-											r.employee === plan.employee &&
-											r.year === op.year &&
-											r.kind === "Roth" &&
-											r.amount === amount
-									),
+									yield* first(snapshot, S.Deduction, {
+										wage: op.wage,
+										employee: plan.employee,
+										year: op.year,
+										kind: "Roth",
+										amount
+									}),
 									"Link the exact existing Roth payroll deduction"
 								)
 								yield* draft.insert(S.ContributionDeduction, [
@@ -816,9 +848,9 @@ export const recordBookkeeping = (payload: unknown) =>
 							let allocation: Uuid
 							if (contribution.source === "EmployeeAfterTax") {
 								const distribution = yield* required(
-									(yield* relationRows(snapshot, S.OwnerDistribution)).find(
-										(r) => r.id === op.distribution && r.business === business
-									),
+									op.distribution === undefined
+										? undefined
+										: yield* first(snapshot, S.OwnerDistribution, { id: op.distribution, business }),
 									"After-tax funding must reuse its existing distribution"
 								)
 								const cash = yield* required(
@@ -841,7 +873,7 @@ export const recordBookkeeping = (payload: unknown) =>
 								operationId = yield* operation(plan.id, op.provider, op.reference)
 							if (account.plan !== plan.id)
 								throw new Refusal({ code: "AccountScope", message: "Select an account in this plan" })
-							if ((yield* relationRows(snapshot, S.PlanReceipt)).some((r) => r.operation === operationId))
+							if (yield* exists(snapshot, S.PlanReceipt, { operation: operationId }))
 								throw new Refusal({
 									code: "DuplicateReceipt",
 									message: "This provider operation already has its receipt"
@@ -886,8 +918,8 @@ export const recordBookkeeping = (payload: unknown) =>
 						}
 						case "SuppliedTax": {
 							const converted = yield* required(
-								(yield* relationRows(snapshot, S.RothConversion)).find(
-									(r) => r.id === op.conversion && plans.some((p) => p.id === r.plan)
+								(yield* select(snapshot, S.RothConversion, { id: op.conversion })).find((r) =>
+									plans.some((p) => p.id === r.plan)
 								),
 								"Select this plan's conversion"
 							)
@@ -915,20 +947,23 @@ export const recordBookkeeping = (payload: unknown) =>
 		})
 	})
 
-/** Filing evidence freezes exact events and supplied facts, never calculated tax boxes. */
-/** The frozen basis of a retirement filing: every event fact for the plan's
- * year, in a canonical order, so the digest depends on the facts alone. */
-export const filingDigestOf = (activity: {
-	receipts: readonly Fact<typeof S.PlanReceipt>[]
-	receiptDates: readonly Fact<typeof S.PlanReceiptDate>[]
-	receiptAllocations: readonly Fact<typeof S.ReceiptAllocation>[]
-	conversions: readonly Fact<typeof S.RothConversion>[]
-	conversionReceipts: readonly Fact<typeof S.ConversionReceipt>[]
-	reportedConversions: readonly Fact<typeof S.ReportedReceiptConversion>[]
-	suppliedTax: readonly Fact<typeof S.SuppliedConversionTax>[]
-	suppliedReports: readonly Fact<typeof S.RetirementReport>[]
-}) => {
-	const canonical = <T>(rows: readonly T[]) => [...rows].sort((a, b) => json(a).localeCompare(json(b)))
+/** The frozen basis of a retirement filing: every event and supplied fact for
+ * the plan's year, never a calculated tax box. Rows are printed with sorted
+ * keys and sorted, so the digest depends on the facts alone, not on how any
+ * caller assembled them. */
+export const filingDigestOf = (
+	activity: {
+		receipts: readonly Fact<typeof S.PlanReceipt>[]
+		receiptDates: readonly Fact<typeof S.PlanReceiptDate>[]
+		receiptAllocations: readonly Fact<typeof S.ReceiptAllocation>[]
+		conversions: readonly Fact<typeof S.RothConversion>[]
+		conversionReceipts: readonly Fact<typeof S.ConversionReceipt>[]
+		reportedConversions: readonly Fact<typeof S.ReportedReceiptConversion>[]
+		suppliedTax: readonly Fact<typeof S.SuppliedConversionTax>[]
+	} & SuppliedReports
+) => {
+	const canonical = <T>(rows: readonly T[]) =>
+		rows.map(canonicalJson).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
 	return fingerprint({
 		receipts: canonical(activity.receipts),
 		receiptDates: canonical(activity.receiptDates),
@@ -937,12 +972,15 @@ export const filingDigestOf = (activity: {
 		conversionReceipts: canonical(activity.conversionReceipts),
 		reportedConversions: canonical(activity.reportedConversions),
 		suppliedTax: canonical(activity.suppliedTax),
-		suppliedReports: canonical(activity.suppliedReports)
+		suppliedReports: canonical(activity.suppliedReports),
+		reported1099R: canonical(activity.reported1099R),
+		reported1099RBasis: canonical(activity.reported1099RBasis),
+		reported1096: canonical(activity.reported1096)
 	})
 }
 
 /** Which rows of a plan's year enter its filing basis; shared with the
- * 0001 cutover, which must re-derive stored digests over migrated rows. */
+ * cutovers, which must re-derive stored digests over migrated rows. */
 export const filingActivityOf = (
 	plan: Uuid,
 	year: number,
@@ -954,9 +992,8 @@ export const filingActivityOf = (
 		conversionReceipts: readonly Fact<typeof S.ConversionReceipt>[]
 		reportedConversions: readonly Fact<typeof S.ReportedReceiptConversion>[]
 		suppliedTax: readonly Fact<typeof S.SuppliedConversionTax>[]
-		suppliedReports: readonly Fact<typeof S.RetirementReport>[]
 		contributions: readonly Fact<typeof S.RetirementContribution>[]
-	}
+	} & SuppliedReports
 ) => {
 	const span = periodSpan(year, "Year")
 	const receipts = rows.receipts.filter((r) => r.plan === plan && r.year === BigInt(year))
@@ -966,8 +1003,10 @@ export const filingActivityOf = (
 	const contributionIds = new Set(
 		rows.contributions.filter((r) => r.plan === plan && r.year === BigInt(year)).map((r) => r.id)
 	)
+	const suppliedReports = rows.suppliedReports.filter((r) => r.plan === plan && r.year === BigInt(year))
 	const conversionIds = new Set(conversions.map((r) => r.id)),
-		receiptIds = new Set(receipts.map((r) => r.id))
+		receiptIds = new Set(receipts.map((r) => r.id)),
+		reportIds = new Set(suppliedReports.map((r) => r.id))
 	return {
 		receipts,
 		receiptDates: rows.receiptDates.filter((r) => receiptIds.has(r.receipt)),
@@ -980,7 +1019,10 @@ export const filingActivityOf = (
 		),
 		reportedConversions: rows.reportedConversions.filter((r) => receiptIds.has(r.receipt)),
 		suppliedTax: rows.suppliedTax.filter((r) => conversionIds.has(r.conversion)),
-		suppliedReports: rows.suppliedReports.filter((r) => r.plan === plan && r.year === BigInt(year))
+		suppliedReports,
+		reported1099R: rows.reported1099R.filter((r) => reportIds.has(r.report)),
+		reported1099RBasis: rows.reported1099RBasis.filter((r) => reportIds.has(r.report)),
+		reported1096: rows.reported1096.filter((r) => reportIds.has(r.report))
 	}
 }
 
@@ -991,7 +1033,7 @@ export const retirementFilingDigest = (snapshot: Snapshot, plan: Uuid, period: I
 	})
 export const bookkeepingReport = (snapshot: Snapshot, business: Uuid, year: number) =>
 	Effect.gen(function* () {
-		const plans = (yield* relationRows(snapshot, S.RetirementPlan)).filter((r) => r.business === business)
+		const plans = yield* select(snapshot, S.RetirementPlan, { business })
 		const retirement = yield* Effect.forEach(plans, (p) => retirementActivity(snapshot, p.id, year), {
 			concurrency: 1
 		})
@@ -1000,8 +1042,8 @@ export const bookkeepingReport = (snapshot: Snapshot, business: Uuid, year: numb
 		const allocations = yield* relationRows(snapshot, S.CashAllocation)
 		const payroll = yield* relationRows(snapshot, S.PayrollTransaction)
 		const distributions = yield* relationRows(snapshot, S.OwnerDistribution)
-		const bank = (yield* relationRows(snapshot, S.BankMovement))
-			.filter((r) => r.business === business && r.paidOn >= span.start && r.paidOn < span.end)
+		const bank = (yield* select(snapshot, S.BankMovement, { business }))
+			.filter((r) => r.paidOn >= span.start && r.paidOn < span.end)
 			.map((movement) => ({
 				...movement,
 				mercuryReference: mercury.find((r) => r.movement === movement.id)?.reference,

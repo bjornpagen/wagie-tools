@@ -1,9 +1,9 @@
 import type { Uuid } from "@bjornpagen/bumbledb"
 import { Effect, Schema } from "effect"
-import { businessCommand, businessFacts, statementWriter } from "./commands.ts"
+import { businessCommand, statementWriter } from "./commands.ts"
 import { civilDaySpan, epochDay, today } from "./core/time.ts"
 import { mintId, Nonblank, Refusal } from "./core/values.ts"
-import { relationRows, rows } from "./queries.ts"
+import { exists, first, relationRows, select } from "./queries.ts"
 import { parseStrict, planAndCommit, type Snapshot } from "./runtime.ts"
 import { commandFields, Day, Id, inputFields } from "./schema/input.ts"
 import * as S from "./schema.ts"
@@ -42,9 +42,7 @@ export const ElectionInput = Schema.Struct({
 
 const employeeFor = (snapshot: Snapshot, business: Uuid, employee: Uuid) =>
 	Effect.gen(function* () {
-		const row = (yield* relationRows(snapshot, S.Employee)).find(
-			(row) => row.id === employee && row.business === business
-		)
+		const row = yield* first(snapshot, S.Employee, { id: employee, business })
 		if (!row)
 			return yield* Effect.fail(
 				new Refusal({ code: "EmployeeMissing", message: "Select an employee of this business" })
@@ -70,9 +68,9 @@ export const configureBusiness = (payload: unknown) =>
 			plan: (snapshot, draft) =>
 				Effect.gen(function* () {
 					const note = statementWriter(draft)
-					const existing = (yield* rows(snapshot, businessFacts, {})).find((row) =>
-						input.business ? row.id === input.business : row.ein === input.ein
-					)
+					const existing = input.business
+						? yield* first(snapshot, S.Business, { id: input.business })
+						: yield* first(snapshot, S.Business, { ein: input.ein })
 					if (input.business && !existing)
 						return yield* Effect.fail(
 							new Refusal({ code: "BusinessMissing", message: "The selected business does not exist" })
@@ -88,16 +86,14 @@ export const configureBusiness = (payload: unknown) =>
 							timeZone: input.timeZone
 						}
 					])
-					const oldAddresses = yield* relationRows(snapshot, S.BusinessAddress)
+					const oldAddresses = yield* select(snapshot, S.BusinessAddress, { business })
 					for (const address of input.addresses) {
-						const old = oldAddresses.find((row) => row.business === business && row.kind === address.kind)
+						const old = oldAddresses.find((row) => row.kind === address.kind)
 						if (old) yield* draft.delete(S.BusinessAddress, [old])
 						yield* draft.insert(S.BusinessAddress, [{ business, ...address }])
 					}
 					if (input.stateAccount) {
-						const old = (yield* relationRows(snapshot, S.StateAccount)).find(
-							(row) => row.business === business && row.state === input.state
-						)
+						const old = yield* first(snapshot, S.StateAccount, { business, state: input.state })
 						if (old) yield* draft.delete(S.StateAccount, [old])
 						yield* draft.insert(S.StateAccount, [
 							{
@@ -108,9 +104,9 @@ export const configureBusiness = (payload: unknown) =>
 							}
 						])
 					}
-					const existingAccounts = yield* relationRows(snapshot, S.TaxAccount)
+					const existingAccounts = yield* select(snapshot, S.TaxAccount, { business })
 					for (const family of S.AccountFamily.handles)
-						if (!existingAccounts.some((row) => row.business === business && row.family === family))
+						if (!existingAccounts.some((row) => row.family === family))
 							yield* draft.insert(S.TaxAccount, [
 								{ id: yield* mintId, business, family, evidence: yield* note(input.evidence) }
 							])
@@ -132,9 +128,7 @@ export const recordEmployee = (payload: unknown) =>
 				Effect.gen(function* () {
 					const existing = input.employee
 						? yield* employeeFor(snapshot, business, input.employee)
-						: (yield* relationRows(snapshot, S.Employee)).find(
-								(row) => row.business === business && row.ssn === input.ssn
-							)
+						: yield* first(snapshot, S.Employee, { business, ssn: input.ssn })
 					const employee = existing?.id ?? (yield* mintId)
 					if (existing) yield* draft.delete(S.Employee, [existing])
 					yield* draft.insert(S.Employee, [
@@ -170,9 +164,7 @@ export const recordBudget = (payload: unknown) =>
 			plan: ({ snapshot, draft, note }) =>
 				Effect.gen(function* () {
 					yield* employeeFor(snapshot, business, employee)
-					const existing = (yield* relationRows(snapshot, S.AnnualBudget)).find(
-						(row) => row.employee === employee && row.year === year
-					)
+					const existing = yield* first(snapshot, S.AnnualBudget, { employee, year })
 					const budget = existing?.id ?? (yield* mintId)
 					if (existing) yield* draft.delete(S.AnnualBudget, [existing])
 					yield* draft.insert(S.AnnualBudget, [
@@ -194,8 +186,7 @@ export const assignCompensation = (payload: unknown) =>
 			input: payload,
 			plan: ({ snapshot, draft }) =>
 				Effect.gen(function* () {
-					const all = yield* relationRows(snapshot, S.BudgetCommitment)
-					const commitment = all.find((row) => row.id === input.commitment)
+					const commitment = yield* first(snapshot, S.BudgetCommitment, { id: input.commitment })
 					if (!commitment)
 						return yield* Effect.fail(
 							new Refusal({
@@ -204,9 +195,10 @@ export const assignCompensation = (payload: unknown) =>
 							})
 						)
 					yield* employeeFor(snapshot, business, commitment.employee)
-					const budget = (yield* relationRows(snapshot, S.AnnualBudget)).find(
-						(row) => row.employee === commitment.employee && row.year === commitment.year
-					)
+					const budget = yield* first(snapshot, S.AnnualBudget, {
+						employee: commitment.employee,
+						year: commitment.year
+					})
 					if (!budget)
 						return yield* Effect.fail(
 							new Refusal({
@@ -214,9 +206,7 @@ export const assignCompensation = (payload: unknown) =>
 								message: "Record the evidenced annual budget before assignment; the movement remains recorded"
 							})
 						)
-					const assigned = (yield* relationRows(snapshot, S.BudgetAssignment)).find(
-						(row) => row.commitment === commitment.id
-					)
+					const assigned = yield* first(snapshot, S.BudgetAssignment, { commitment: commitment.id })
 					if (!assigned)
 						yield* draft.insert(S.BudgetAssignment, [
 							{
@@ -246,9 +236,7 @@ export const recordElection = (payload: unknown) =>
 			input: payload,
 			plan: ({ snapshot, draft, recordingDay }) =>
 				Effect.gen(function* () {
-					const document = (yield* relationRows(snapshot, S.ElectionDocument)).find(
-						(row) => row.id === input.document
-					)
+					const document = yield* first(snapshot, S.ElectionDocument, { id: input.document })
 					if (!document)
 						return yield* Effect.fail(
 							new Refusal({
@@ -258,11 +246,7 @@ export const recordElection = (payload: unknown) =>
 						)
 					const { employee, year, signedOn, evidence } = document
 					yield* employeeFor(snapshot, business, employee)
-					if (
-						(yield* relationRows(snapshot, S.ElectionDocumentRevision)).some(
-							(row) => row.predecessor === document.id
-						)
-					)
+					if (yield* exists(snapshot, S.ElectionDocumentRevision, { predecessor: document.id }))
 						return yield* Effect.fail(
 							new Refusal({ code: "ElectionSuperseded", message: "Select the current signed document" })
 						)
@@ -273,22 +257,18 @@ export const recordElection = (payload: unknown) =>
 								message: "An election cannot take effect before signing or assert a future signing"
 							})
 						)
-					const annual = (yield* relationRows(snapshot, S.RetirementAnnual)).find(
-						(row) => row.employee === employee && row.year === year
-					)
-					const binding = (yield* relationRows(snapshot, S.PolicyBinding)).find(
-						(row) => row.business === business
-					)
-					const policy = (yield* relationRows(snapshot, S.DeferralPolicy)).find(
-						(row) => row.release === binding?.release && row.year === year
-					)
-					const calendar = (yield* relationRows(snapshot, S.CalendarPeriod)).find(
-						(row) =>
-							row.release === binding?.release &&
-							row.year === year &&
-							row.kind === "Year" &&
-							row.authority === "FederalDC"
-					)
+					const annual = yield* first(snapshot, S.RetirementAnnual, { employee, year })
+					const binding = yield* first(snapshot, S.PolicyBinding, { business })
+					const policy =
+						binding && (yield* first(snapshot, S.DeferralPolicy, { release: binding.release, year }))
+					const calendar =
+						binding &&
+						(yield* first(snapshot, S.CalendarPeriod, {
+							release: binding.release,
+							year,
+							kind: "Year",
+							authority: "FederalDC"
+						}))
 					if (!annual || !policy || !calendar)
 						return yield* Effect.fail(
 							new Refusal({
@@ -316,9 +296,10 @@ export const recordElection = (payload: unknown) =>
 								message: "The effective date must fall within the document's calendar year"
 							})
 						)
-					const elected = (yield* relationRows(snapshot, S.ElectionDocumentAmount)).find(
-						(row) => row.document === document.id && row.kind === "Roth"
-					)
+					const elected = yield* first(snapshot, S.ElectionDocumentAmount, {
+						document: document.id,
+						kind: "Roth"
+					})
 					if (!elected)
 						return yield* Effect.fail(
 							new Refusal({
@@ -327,9 +308,7 @@ export const recordElection = (payload: unknown) =>
 							})
 						)
 					const limit = annual.deferralLimit - annual.outsideDeferrals
-					const existing = (yield* relationRows(snapshot, S.EmployeeAllowance)).find(
-						(row) => row.employee === employee && row.year === year
-					)
+					const existing = yield* first(snapshot, S.EmployeeAllowance, { employee, year })
 					if (existing && (existing.limit !== limit || existing.policy !== policy.id))
 						return yield* Effect.fail(
 							new Refusal({
@@ -352,8 +331,8 @@ export const recordElection = (payload: unknown) =>
 							}
 						])
 					// A replacement closes the prior authorization; historical uses stay attached.
-					for (const old of (yield* relationRows(snapshot, S.Election)).filter(
-						(row) => row.employee === employee && row.year === year && row.effective.end > input.effectiveOn
+					for (const old of (yield* select(snapshot, S.Election, { employee, year })).filter(
+						(row) => row.effective.end > input.effectiveOn
 					)) {
 						if (old.effective.start >= input.effectiveOn)
 							return yield* Effect.fail(
@@ -377,7 +356,7 @@ export const recordElection = (payload: unknown) =>
 							maximum: limit,
 							signedOn,
 							effective: civilDaySpan(input.effectiveOn, epochDay(calendar.span.end)),
-							limit: elected.cents,
+							limit: elected.amount,
 							evidence
 						}
 					])
@@ -390,7 +369,7 @@ export const recordElection = (payload: unknown) =>
 							year,
 							signedOn,
 							kind: "Roth",
-							limit: elected.cents
+							limit: elected.amount
 						}
 					])
 					return { election, allowance, employee, year }
@@ -400,10 +379,10 @@ export const recordElection = (payload: unknown) =>
 
 export const inspectProfiles = (snapshot: Snapshot, business: Uuid) =>
 	Effect.gen(function* () {
-		const company = (yield* rows(snapshot, businessFacts, {})).find((row) => row.id === business)
+		const company = yield* first(snapshot, S.Business, { id: business })
 		if (!company)
 			return yield* Effect.fail(new Refusal({ code: "BusinessMissing", message: "No matching business" }))
-		const people = (yield* relationRows(snapshot, S.Employee)).filter((row) => row.business === business),
+		const people = yield* select(snapshot, S.Employee, { business }),
 			ids = new Set(people.map((row) => row.id))
 		const documents = (yield* relationRows(snapshot, S.ElectionDocument)).filter((row) =>
 			ids.has(row.employee)
@@ -430,13 +409,9 @@ export const inspectProfiles = (snapshot: Snapshot, business: Uuid) =>
 			electionDocumentAmounts: (yield* relationRows(snapshot, S.ElectionDocumentAmount)).filter((row) =>
 				documentIds.has(row.document)
 			),
-			addresses: (yield* relationRows(snapshot, S.BusinessAddress)).filter(
-				(row) => row.business === business
-			),
-			accounts: (yield* relationRows(snapshot, S.TaxAccount)).filter((row) => row.business === business),
-			stateAccounts: (yield* relationRows(snapshot, S.StateAccount)).filter(
-				(row) => row.business === business
-			),
+			addresses: yield* select(snapshot, S.BusinessAddress, { business }),
+			accounts: yield* select(snapshot, S.TaxAccount, { business }),
+			stateAccounts: yield* select(snapshot, S.StateAccount, { business }),
 			budgets: (yield* relationRows(snapshot, S.AnnualBudget)).filter((row) => ids.has(row.employee))
 		}
 	})

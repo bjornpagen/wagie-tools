@@ -22,6 +22,7 @@ import {
 } from "@bjornpagen/bumbledb"
 import {
 	AccountFamily,
+	AddressKind,
 	AssessmentOrigin,
 	Authority,
 	annualRequirements,
@@ -36,18 +37,23 @@ import {
 	Component,
 	ContributionOrigin,
 	ContributionSource,
+	ConversionTaxField,
 	componentPolicy,
 	components,
 	DeductionKind,
+	Disposition,
+	DistributionCode,
 	DocumentRole,
 	DueRule,
 	ElectionContributionKind,
 	FilingKind,
+	FilingStatus,
 	Form,
 	formPolicy,
 	forms,
 	GrossSuggestionMethod,
 	Payer,
+	PaymentIssuer,
 	PeriodKind,
 	PlanAccountKind,
 	PolicyEvidenceKind,
@@ -56,6 +62,7 @@ import {
 	PublishedRateKind,
 	payrollForms,
 	QuestionKind,
+	ReportForm,
 	RevisionKind,
 	State,
 	SubjectKind,
@@ -66,6 +73,7 @@ import {
 
 export {
 	AccountFamily,
+	AddressKind,
 	AssessmentOrigin,
 	Authority,
 	BandRole,
@@ -79,14 +87,19 @@ export {
 	Component,
 	ContributionOrigin,
 	ContributionSource,
+	ConversionTaxField,
 	DeductionKind,
+	Disposition,
+	DistributionCode,
 	DocumentRole,
 	DueRule,
 	ElectionContributionKind,
 	FilingKind,
+	FilingStatus,
 	Form,
 	GrossSuggestionMethod,
 	Payer,
+	PaymentIssuer,
 	PeriodKind,
 	PlanAccountKind,
 	PolicyEvidenceKind,
@@ -94,6 +107,7 @@ export {
 	Program,
 	PublishedRateKind,
 	QuestionKind,
+	ReportForm,
 	RevisionKind,
 	State,
 	SubjectKind,
@@ -289,18 +303,31 @@ export const ConversionReceipt = relation("ConversionReceipt", {
 })
 export const SuppliedConversionTax = relation("SuppliedConversionTax", {
 	conversion: uuid,
-	field: str,
+	field: closedId(ConversionTaxField),
 	amount: u64,
 	evidence: uuid
 })
+/** A provider's year-end report, recorded as stated. The form decides which
+ * typed arm carries its figures; the ledger never derives boxes from events. */
 export const RetirementReport = relation("RetirementReport", {
 	id: uuid,
 	plan: uuid,
 	year: i64,
 	artifact: uuid,
-	supplied: str,
+	form: closedId(ReportForm),
 	evidence: uuid
 })
+export const Reported1099R = relation("Reported1099R", {
+	report: uuid,
+	plan: uuid,
+	account: uuid,
+	distributionCode: closedId(DistributionCode),
+	gross: u64,
+	taxable: u64
+})
+/** Box 5 (employee contributions or designated Roth basis) when the form states it. */
+export const Reported1099RBasis = relation("Reported1099RBasis", { report: uuid, amount: u64 })
+export const Reported1096 = relation("Reported1096", { report: uuid, forms: u64, gross: u64 })
 // A supplied historical report can confirm a full receipt's conversion without
 // inventing an event date. It cannot also consume dated conversion allocations.
 export const ReportedReceiptConversion = relation("ReportedReceiptConversion", {
@@ -333,7 +360,7 @@ export const Business = relation("Business", {
 })
 export const BusinessAddress = relation("BusinessAddress", {
 	business: uuid,
-	kind: str,
+	kind: closedId(AddressKind),
 	street: str,
 	city: str,
 	state: str,
@@ -353,7 +380,7 @@ export const Employee = relation("Employee", {
 	lastName: str,
 	ssn: str,
 	address: str,
-	filingStatus: str
+	filingStatus: closedId(FilingStatus)
 })
 export const TaxAccount = relation("TaxAccount", {
 	id: uuid,
@@ -383,13 +410,6 @@ export const BudgetAssignment = relation("BudgetAssignment", {
 	employee: uuid,
 	year: i64,
 	amount: u64
-})
-export const BankReference = relation("BankReference", {
-	movement: uuid,
-	issuer: str,
-	scope: str,
-	value: str,
-	sourceText: str
 })
 export const Wage = relation("Wage", {
 	id: uuid,
@@ -517,7 +537,7 @@ export const PublishedRate = relation("PublishedRate", {
 export const PolicyLimit = relation("PolicyLimit", {
 	annual: uuid,
 	kind: closedId(PolicyLimitKind),
-	cents: u64,
+	amount: u64,
 	artifact: uuid,
 	evidence: uuid
 })
@@ -570,7 +590,7 @@ export const ElectionDocumentRevision = relation("ElectionDocumentRevision", {
 export const ElectionDocumentAmount = relation("ElectionDocumentAmount", {
 	document: uuid,
 	kind: closedId(ElectionContributionKind),
-	cents: u64
+	amount: u64
 })
 
 export const EmployerRateNotice = relation("EmployerRateNotice", {
@@ -745,14 +765,14 @@ export const CalculationBasis = relation("CalculationBasis", {
 	paidOn: interval(i64, 1n),
 	schedule: uuid,
 	earning: interval(u64),
-	cents: u64
+	gross: u64
 })
 // Components sharing a base program share one captured earning interval.
 // Context evidence records the inspected wages; it is not an editable YTD override.
 export const CalculationWageBase = relation("CalculationWageBase", {
 	set: uuid,
 	scope: uuid,
-	cents: u64,
+	gross: u64,
 	earning: interval(u64),
 	context: str
 })
@@ -812,12 +832,12 @@ export const PaymentSettlement = relation("PaymentSettlement", {
 	settlesOn: i64,
 	evidence: uuid
 })
+/** An acknowledgement number the issuer assigned to the payment, unique per account. */
 export const PaymentReference = relation("PaymentReference", {
 	payment: uuid,
-	issuer: str,
-	scope: str,
-	value: str,
-	sourceText: str
+	account: uuid,
+	issuer: closedId(PaymentIssuer),
+	value: str
 })
 export const PaymentEvidence = relation("PaymentEvidence", { payment: uuid, artifact: uuid })
 export const PaymentReconciliation = relation("PaymentReconciliation", {
@@ -852,8 +872,8 @@ export const PaymentAdjustment = relation("PaymentAdjustment", {
 export const SignedDisposition = relation("SignedDisposition", {
 	revision: uuid,
 	account: uuid,
-	evidence: uuid,
-	disposition: str
+	disposition: closedId(Disposition),
+	evidence: uuid
 })
 
 export const CalendarCoverage = relation("CalendarCoverage", {
@@ -1016,7 +1036,7 @@ export const FilingVersion = relation("FilingVersion", {
 	evidence: uuid
 })
 export const PreparedVersion = relation("PreparedVersion", { version: uuid, snapshot: str })
-export const AttestedVersion = relation("AttestedVersion", { version: uuid, attestation: str })
+export const AttestedVersion = relation("AttestedVersion", { version: uuid, evidence: uuid })
 // One scoped association supplies both captured return bases and amendment
 // liabilities. Its ownership/period proof is shared by those two uses.
 export const FilingRevision = relation("FilingRevision", {
@@ -1056,10 +1076,7 @@ export const AmendmentLiability = relation("AmendmentLiability", {
 	family: closedId(AccountFamily),
 	evidence: uuid
 })
-export const GrandfatheredEligibility = relation("GrandfatheredEligibility", {
-	filing: uuid,
-	attestation: str
-})
+export const GrandfatheredEligibility = relation("GrandfatheredEligibility", { filing: uuid, evidence: uuid })
 export const CertifiedMailing = relation("CertifiedMailing", {
 	id: uuid,
 	business: uuid,
@@ -1194,6 +1211,12 @@ export const relations = {
 	ConversionReceipt,
 	SuppliedConversionTax,
 	RetirementReport,
+	Reported1099R,
+	Reported1099RBasis,
+	Reported1096,
+	ReportForm,
+	DistributionCode,
+	ConversionTaxField,
 	ReportedReceiptConversion,
 	PlanBalance,
 	PlanSubject,
@@ -1223,13 +1246,14 @@ export const relations = {
 	DueRule,
 	Business,
 	BusinessAddress,
+	AddressKind,
 	StateAccount,
 	Employee,
+	FilingStatus,
 	TaxAccount,
 	AnnualBudget,
 	BudgetCommitment,
 	BudgetAssignment,
-	BankReference,
 	Wage,
 	RegularWork,
 	RegularCommitment,
@@ -1294,12 +1318,14 @@ export const relations = {
 	TaxPayment,
 	PaymentSettlement,
 	PaymentReference,
+	PaymentIssuer,
 	PaymentEvidence,
 	PaymentReconciliation,
 	PaymentAllocation,
 	PaymentAdjustment,
 	QuestionKind,
 	SignedDisposition,
+	Disposition,
 	CalendarCoverage,
 	CalendarPeriod,
 	BusinessDay,
@@ -1376,6 +1402,9 @@ const budgetCommitmentIdKey = key(BudgetCommitment, ["id"])
 const regularCommitmentCommitmentKey = key(RegularCommitment, ["commitment"])
 const observedCompensationCommitmentKey = key(ObservedCompensation, ["commitment"])
 
+const retirementReportIdKey = key(RetirementReport, ["id"])
+const reported1099RReportKey = key(Reported1099R, ["report"])
+const reported1096ReportKey = key(Reported1096, ["report"])
 const questionIdKey = key(Question, ["id"])
 const questionArms = [
 	key(EmployeeQuestion, ["question"]),
@@ -1402,7 +1431,6 @@ export const identityLaws = [
 	key(BudgetCommitment, ["id", "employee", "year", "amount"]),
 	key(BudgetCommitment, ["id", "employee", "amount"]),
 	key(BudgetAssignment, ["commitment"]),
-	key(BankReference, ["issuer", "scope", "value"]),
 	key(Wage, ["id"]),
 	key(Wage, ["id", "business"]),
 	key(Wage, ["initialRevision", "id"]),
@@ -1459,7 +1487,7 @@ export const identityLaws = [
 	key(ElectionDocumentRevision, ["predecessor"]),
 	key(ElectionDocument, ["employee", "artifact"]),
 	key(ElectionDocumentAmount, ["document", "kind"]),
-	key(ElectionDocumentAmount, ["document", "kind", "cents"]),
+	key(ElectionDocumentAmount, ["document", "kind", "amount"]),
 	key(CalendarPeriod, ["id", "authority", "year", "span"]),
 	key(PayrollCalculation, ["id", "release", "business", "paidOn"]),
 
@@ -1518,12 +1546,12 @@ export const identityLaws = [
 	key(AppliedRule, ["set", "component"]),
 	key(AppliedRule, ["set", "component", "schedule"]),
 	key(CalculationBasis, ["id"]),
-	key(CalculationBasis, ["id", "cents", "earning"]),
+	key(CalculationBasis, ["id", "gross", "earning"]),
 	key(CalculationBasis, ["set", "component"]),
 	key(CalculationBasis, ["id", "schedule", "earning"]),
 	key(CalculationBasis, ["id", "set", "component"]),
 	key(CalculationWageBase, ["set", "scope"]),
-	key(CalculationWageBase, ["set", "scope", "cents", "earning"]),
+	key(CalculationWageBase, ["set", "scope", "gross", "earning"]),
 	key(AssessmentRevision, ["id"]),
 	key(AssessmentRevision, ["set"]),
 	key(AssessmentRevision, ["id", "wage"]),
@@ -1544,8 +1572,9 @@ export const identityLaws = [
 	key(TaxPayment, ["id"]),
 	key(TaxPayment, ["id", "business"]),
 	key(TaxPayment, ["id", "business", "account"]),
+	key(TaxPayment, ["id", "account"]),
 	key(PaymentSettlement, ["payment"]),
-	key(PaymentReference, ["issuer", "scope", "value"]),
+	key(PaymentReference, ["issuer", "account", "value"]),
 	key(PaymentEvidence, ["payment", "artifact"]),
 	key(PaymentReconciliation, ["id"]),
 	key(PaymentReconciliation, ["payment"]),
@@ -1784,7 +1813,9 @@ export const laws = [
 	key(ProviderOperation, ["id"]),
 	key(PlanReceipt, ["id"]),
 	key(RothConversion, ["id"]),
-	key(RetirementReport, ["id"]),
+	retirementReportIdKey,
+	reported1099RReportKey,
+	reported1096ReportKey,
 	key(PlanBalance, ["id"]),
 	key(BankMovement, ["id", "business"]),
 	key(BankMovement, ["id", "amount"]),
@@ -1902,8 +1933,18 @@ export const laws = [
 	contained(on(ConversionReceipt, ["conversion", "plan"]), on(RothConversion, ["id", "plan"])),
 	contained(on(ConversionReceipt, ["receipt", "plan"]), on(PlanReceipt, ["id", "plan"])),
 	contained(on(SuppliedConversionTax, "conversion"), on(RothConversion, "id")),
+	contained(on(SuppliedConversionTax, "field"), on(ConversionTaxField, "id")),
 	contained(on(RetirementReport, "plan"), on(RetirementPlan, "id")),
 	contained(on(RetirementReport, "artifact"), on(Artifact, "id")),
+	...alternatives(retirementReportIdKey, "form", ReportForm, {
+		F1099R: reported1099RReportKey,
+		F1096: reported1096ReportKey
+	}),
+	contained(on(Reported1099R, ["report", "plan"]), on(RetirementReport, ["id", "plan"])),
+	contained(on(Reported1099R, ["account", "plan"]), on(PlanAccount, ["id", "plan"])),
+	contained(on(Reported1099R, "distributionCode"), on(DistributionCode, "id")),
+	key(Reported1099RBasis, ["report"]),
+	contained(on(Reported1099RBasis, "report"), on(Reported1099R, "report")),
 	contained(on(PlanBalance, "account"), on(PlanAccount, "id")),
 	contained(on(PlanSubject, ["plan", "business"]), on(RetirementPlan, ["id", "business"])),
 	contained(on(PlanSubject, ["subject", "business"]), on(FilingSubject, ["id", "business"])),
@@ -2061,6 +2102,8 @@ export const laws = [
 	}),
 
 	contained(on(Business, "state"), on(State, "id")),
+	contained(on(BusinessAddress, "kind"), on(AddressKind, "id")),
+	contained(on(Employee, "filingStatus"), on(FilingStatus, "id")),
 	contained(on(StateAccount, "state"), on(State, "id")),
 	contained(on(TaxAccount, "family"), on(AccountFamily, "id")),
 	contained(on(Deduction, "kind"), on(DeductionKind, "id")),
@@ -2133,7 +2176,6 @@ export const laws = [
 		weight: weigh("amount"),
 		within: within(0n, ref("limit"))
 	}),
-	contained(on(BankReference, "movement"), on(BankMovement, "id")),
 	contained(on(Wage, ["employee", "business"]), on(Employee, ["id", "business"])),
 	contained(
 		on(Wage, ["calendar", "year", "paidOn"]),
@@ -2166,7 +2208,7 @@ export const laws = [
 	),
 	contained(
 		on(ElectionSource, ["document", "kind", "limit"]),
-		on(ElectionDocumentAmount, ["document", "kind", "cents"])
+		on(ElectionDocumentAmount, ["document", "kind", "amount"])
 	),
 	contained(
 		on(ElectionSource, ["annual", "employee", "year"]),
@@ -2370,8 +2412,8 @@ export const laws = [
 	contained(on(CalculationWageBase, "set"), on(PayrollCalculation, "set")),
 	contained(on(CalculationWageBase, "scope"), on(TaxBaseScope, "id")),
 	contained(
-		on(CalculationBasis, ["set", "scope", "cents", "earning"]),
-		on(CalculationWageBase, ["set", "scope", "cents", "earning"])
+		on(CalculationBasis, ["set", "scope", "gross", "earning"]),
+		on(CalculationWageBase, ["set", "scope", "gross", "earning"])
 	),
 	capacity(on(CalculationWageBase, ["set", "scope"]), {
 		from: on(CalculationBasis, ["set", "scope"]),
@@ -2379,16 +2421,16 @@ export const laws = [
 	}),
 	capacity(on(CalculationWageBase, ["set", "scope"]), {
 		from: on(CalculationWageBase, ["set", "scope"]),
-		weight: weigh("cents"),
+		weight: weigh("gross"),
 		within: within(0n, duration("earning"))
 	}),
 	capacity(on(CalculationWageBase, ["set", "scope"]), {
 		from: on(CalculationWageBase, ["set", "scope"]),
 		weight: weigh(duration("earning")),
-		within: within(0n, ref("cents"))
+		within: within(0n, ref("gross"))
 	}),
 	contained(
-		on(CalculationBasis, ["set", "business", "employee", "cents", "paidOn"]),
+		on(CalculationBasis, ["set", "business", "employee", "gross", "paidOn"]),
 		on(AssessmentSet, ["id", "business", "employee", "gross", "paidOn"])
 	),
 	contained(
@@ -2415,13 +2457,13 @@ export const laws = [
 	contained(on(CalculationBasis, ["schedule", "earning"]), on(RateSchedule, ["id", "domain"])),
 	capacity(on(CalculationBasis, "id"), {
 		from: on(CalculationBasis, "id"),
-		weight: weigh("cents"),
+		weight: weigh("gross"),
 		within: within(0n, duration("earning"))
 	}),
 	capacity(on(CalculationBasis, "id"), {
 		from: on(CalculationBasis, "id"),
 		weight: weigh(duration("earning")),
-		within: within(0n, ref("cents"))
+		within: within(0n, ref("gross"))
 	}),
 	contained(
 		on(AssessmentRevision, ["wage", "business", "employee", "gross", "paidOn"]),
@@ -2453,7 +2495,8 @@ export const laws = [
 	contained(on(ArtifactLocation, "artifact"), on(Artifact, "id")),
 	contained(on(TaxPayment, ["account", "business"]), on(TaxAccount, ["id", "business"])),
 	contained(on(PaymentSettlement, "payment"), on(TaxPayment, "id")),
-	contained(on(PaymentReference, "payment"), on(TaxPayment, "id")),
+	contained(on(PaymentReference, ["payment", "account"]), on(TaxPayment, ["id", "account"])),
+	contained(on(PaymentReference, "issuer"), on(PaymentIssuer, "id")),
 	contained(on(PaymentEvidence, "payment"), on(TaxPayment, "id")),
 	contained(on(PaymentEvidence, "artifact"), on(Artifact, "id")),
 	contained(
@@ -2478,6 +2521,7 @@ export const laws = [
 	),
 	contained(on(PaymentAdjustment, "reconciliation"), on(PaymentReconciliation, "id")),
 	contained(on(SignedDisposition, ["revision", "account"]), on(RevisionAccount, ["revision", "account"])),
+	contained(on(SignedDisposition, "disposition"), on(Disposition, "id")),
 	contained(on(CalendarCoverage, "release"), on(PolicyRelease, "id")),
 	mirrors(
 		on(CalendarCoverage, ["release", "authority", "kind", "span"]),

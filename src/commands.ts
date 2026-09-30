@@ -1,17 +1,12 @@
 import { createHash } from "node:crypto"
-import { query, type Uuid, v } from "@bjornpagen/bumbledb"
+import type { Uuid } from "@bjornpagen/bumbledb"
 import type { CommandResult } from "@bjornpagen/bumbledb-log"
 import { Effect, type Scope } from "effect"
 import { today, type UnixEpochDay } from "./core/time.ts"
 import { Refusal } from "./core/values.ts"
-import { rows } from "./queries.ts"
+import { first } from "./queries.ts"
 import { type Draft, latest, planAndCommit, previousRequest, type Snapshot } from "./runtime.ts"
 import * as S from "./schema.ts"
-
-export const businessFacts = query(S.ledger).rule((r) => {
-	const row = v(S.Business)
-	return r.match(S.Business, row).find(row)
-})
 
 /** Statement identity is content: a UUIDv8 carrying the text's SHA-256, so
  * identical prose written by any command, at any time, is the same fact. */
@@ -57,7 +52,7 @@ export const businessCommand = <A, E, R>(options: {
 	Effect.gen(function* () {
 		const previous = yield* previousRequest(options.request, options.action, options.input)
 		if (previous) return previous
-		const company = (yield* rows(yield* latest, businessFacts, {})).find((row) => row.id === options.business)
+		const company = yield* first(yield* latest, S.Business, { id: options.business })
 		if (!company)
 			return yield* Effect.fail(
 				new Refusal({ code: "BusinessMissing", message: `No business ${options.business}` })
@@ -69,9 +64,7 @@ export const businessCommand = <A, E, R>(options: {
 			timeZone: company.timeZone,
 			plan: (snapshot, draft) =>
 				Effect.gen(function* () {
-					const current = (yield* rows(snapshot, businessFacts, {})).find(
-						(row) => row.id === options.business
-					)
+					const current = yield* first(snapshot, S.Business, { id: options.business })
 					if (!current || current.timeZone !== company.timeZone)
 						return yield* Effect.fail(
 							new Refusal({

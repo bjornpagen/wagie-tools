@@ -8,7 +8,7 @@ import {
 	type UnixEpochDay
 } from "./core/time.ts"
 import { Refusal } from "./core/values.ts"
-import { relationRows, rows } from "./queries.ts"
+import { first, rows, select } from "./queries.ts"
 import type { Snapshot } from "./runtime.ts"
 import * as S from "./schema.ts"
 import { requirePayrollReady } from "./work.ts"
@@ -52,18 +52,15 @@ export const suggestGross = (
 ) =>
 	Effect.gen(function* () {
 		yield* requirePayrollReady(snapshot, business, payDay > recordingDay ? payDay : recordingDay)
-		const binding = (yield* relationRows(snapshot, S.PolicyBinding)).find((row) => row.business === business)
-		const policy = (yield* relationRows(snapshot, S.GrossSuggestionPolicy)).find(
-			(row) => row.release === binding?.release
-		)
-		const year = (yield* relationRows(snapshot, S.CalendarPeriod)).find(
-			(row) =>
-				row.release === binding?.release &&
-				row.authority === "FederalDC" &&
-				row.kind === "Year" &&
-				row.span.start <= payDay &&
-				row.span.end > payDay
-		)
+		const binding = yield* first(snapshot, S.PolicyBinding, { business })
+		const policy = binding && (yield* first(snapshot, S.GrossSuggestionPolicy, { release: binding.release }))
+		const year =
+			binding &&
+			(yield* select(snapshot, S.CalendarPeriod, {
+				release: binding.release,
+				authority: "FederalDC",
+				kind: "Year"
+			})).find((row) => row.span.start <= payDay && row.span.end > payDay)
 		if (!policy || !year)
 			return yield* Effect.fail(
 				new Refusal({

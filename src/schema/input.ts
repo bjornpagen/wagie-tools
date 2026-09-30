@@ -30,7 +30,17 @@ import { unitFor } from "./units.ts"
  */
 export function inputField<F extends AnyField>(field: F): Schema.Codec<Infer<F>, unknown> {
 	const value = fieldSchema(field)
-	const wire = field.kind === "str" ? Nonblank : field.kind === "uuid" ? EntityId : Schema.Unknown
+	const closed = "closed" in field ? (field.closed as { handles: readonly string[] }).handles : undefined
+	const wire =
+		field.kind === "str"
+			? Nonblank
+			: field.kind === "uuid"
+				? EntityId
+				: closed
+					? Schema.Literals(closed as [string, ...string[]])
+					: field.kind === "bool"
+						? Schema.Boolean
+						: Schema.Unknown
 	return wire.pipe(
 		Schema.decodeTo(value, {
 			decode: SchemaGetter.transformOrFail((input) => {
@@ -55,6 +65,10 @@ export function inputField<F extends AnyField>(field: F): Schema.Codec<Infer<F>,
 
 export const Id = inputField(uuid)
 export const commandFields = { request: Id, business: Id }
+/** A plain integer at the boundary: a year, a row, a sequence, a form count. */
+export const Count = Schema.Int.check(
+	Schema.isBetween({ minimum: Number.MIN_SAFE_INTEGER, maximum: Number.MAX_SAFE_INTEGER })
+).pipe(Schema.decodeTo(Schema.BigInt, SchemaTransformation.transform({ decode: BigInt, encode: Number })))
 export const YearNumber = Schema.Int.check(Schema.isBetween({ minimum: 2, maximum: 9997 }))
 export const Year = YearNumber.pipe(
 	Schema.decodeTo(Schema.BigInt, SchemaTransformation.transform({ decode: BigInt, encode: Number }))
@@ -136,8 +150,10 @@ function columnCodec(name: string, field: AnyField): Schema.Codec<unknown, unkno
 			return (isInterval ? DayPoint : Day) as Schema.Codec<unknown, unknown>
 		case "DayRange":
 			return DaySpan as Schema.Codec<unknown, unknown>
+		case "Count":
+			return (name === "year" ? Year : Count) as Schema.Codec<unknown, unknown>
 		default:
-			return name === "year" ? (Year as Schema.Codec<unknown, unknown>) : inputField(field)
+			return inputField(field)
 	}
 }
 

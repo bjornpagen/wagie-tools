@@ -81,7 +81,7 @@ export const candidate = (
 			if (!capturedScopes.has(rule.scope)) {
 				capturedScopes.add(rule.scope)
 				yield* draft.insert(S.CalculationWageBase, [
-					{ set, scope: rule.scope, cents: gross, earning, context: evidence }
+					{ set, scope: rule.scope, gross, earning, context: evidence }
 				])
 			}
 			if (corrupt === "sharedBase" && component === "EmployerSS") {
@@ -114,7 +114,7 @@ export const candidate = (
 					paidOn,
 					schedule: rule.schedule,
 					earning,
-					cents: gross
+					gross
 				}
 			])
 		}

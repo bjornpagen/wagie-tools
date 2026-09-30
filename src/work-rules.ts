@@ -1,4 +1,5 @@
 import type { UnixEpochDay } from "./core/time.ts"
+import type { WriteName } from "./op-names.ts"
 
 /** Every kind of work the register can derive, as data: what it is, what it
  * holds back, and whether it is an obligation or a reminder. The evaluator in
@@ -40,7 +41,13 @@ export type WorkRule = keyof typeof workRules
 /** The next write that moves an item forward, as an op name from the op table
  * and the input fields the ledger already knows. The caller supplies the rest
  * (request id, evidence, and facts only the outside world has). */
-export type NextIntent = { readonly op: string; readonly input: Readonly<Record<string, unknown>> }
+export type NextIntent = {
+	readonly op: WriteName | ReadName
+	readonly input: Readonly<Record<string, unknown>>
+}
+/** Reads that answer an item the ledger cannot move forward itself: a
+ * submitted filing, or a capacity excess the owner must review in the report. */
+type ReadName = "filings.inspect" | "report"
 
 export type WorkItem = {
 	readonly id: string

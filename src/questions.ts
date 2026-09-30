@@ -2,7 +2,7 @@ import type { Uuid } from "@bjornpagen/bumbledb"
 import { Effect, Schema } from "effect"
 import { businessCommand, type Note } from "./commands.ts"
 import { mintId, Nonblank, Refusal } from "./core/values.ts"
-import { relationRows } from "./queries.ts"
+import { relationRows, select } from "./queries.ts"
 import { type Draft, parseStrict, type Snapshot } from "./runtime.ts"
 import { commandFields, Id, inputFields } from "./schema/input.ts"
 import * as S from "./schema.ts"
@@ -68,7 +68,7 @@ export const askQuestion = (
 /** Every question of a business, decoded once into its arm. */
 export const questions = (snapshot: Snapshot, business: Uuid) =>
 	Effect.gen(function* () {
-		const headers = (yield* relationRows(snapshot, S.Question)).filter((row) => row.business === business)
+		const headers = yield* select(snapshot, S.Question, { business })
 		const employees = new Map((yield* relationRows(snapshot, S.EmployeeQuestion)).map((r) => [r.question, r]))
 		const plans = new Map((yield* relationRows(snapshot, S.PlanQuestion)).map((r) => [r.question, r]))
 		const books = new Map((yield* relationRows(snapshot, S.BookkeepingQuestion)).map((r) => [r.question, r]))

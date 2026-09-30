@@ -415,7 +415,14 @@ test("partial receipts survive year end, late allocation reconciles them, and su
 						plan,
 						year: 2026,
 						artifact,
-						supplied: "Synthetic externally supplied conversion report"
+						report: {
+							form: "F1099R",
+							account,
+							distributionCode: "G",
+							gross: "10.00",
+							taxable: "0.00",
+							basis: "10.00"
+						}
 					})
 				)
 				yield* record({ kind: "ConfirmReportedConversion", receipt: first, report: supplied })
