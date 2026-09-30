@@ -180,7 +180,7 @@ ledger keeps each one's Drive file id and SHA-256. `artifact.record` hashes a
 local file. Upload the same bytes to Drive, then `artifact.archive` (`artifact`,
 `driveFileId`, `remote`, `evidence`) downloads them by id with rclone, checks the
 hash and records the copy. A document without a Drive copy shows in
-`readiness`. `artifact.audit` with `verify: true` re-reads every document.
+`status` under `readiness`. `artifact.audit` with `verify: true` re-reads every document.
 
 ### Policy year
 
