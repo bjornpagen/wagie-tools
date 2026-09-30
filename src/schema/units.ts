@@ -93,7 +93,9 @@ export const unitOf = {
 	wageCount: "Count",
 	total: "Count",
 	missingEntries: "Count",
-	wagesCovered: "Count"
+	wagesCovered: "Count",
+	workDays: "Count",
+	remainingDays: "Count"
 } as const
 
 export type Unit = (typeof unitOf)[keyof typeof unitOf]

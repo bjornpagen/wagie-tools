@@ -108,7 +108,7 @@ export const suggestGross = (
 			work,
 			workDays,
 			remainingDays,
-			payDay,
+			paidOn: payDay,
 			state: snapshot.stateStamp
 		}
 	})
