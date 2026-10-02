@@ -155,7 +155,7 @@ const electRoth = (
 		return { plan }
 	})
 
-test("RothOnly solves the gross for exactly zero cash, and a sent Mercury receipt clears the payroll gate while Carry stays a reminder", async () => {
+test("RothOnly solves the gross for exactly zero cash, and a sent Mercury receipt clears the payroll gate; the provider confirmation is not tracked", async () => {
 	await withHistory((history, binding, directory) =>
 		atTime(
 			Date.parse("2026-09-16T17:00:00Z"),
@@ -212,9 +212,11 @@ test("RothOnly solves the gross for exactly zero cash, and a sent Mercury receip
 				assert.ok(remittance, "funded but unreceipted Roth still blocks payroll")
 				assert.equal(remittance.next.op, "artifact.attach-bank")
 				assert.equal(remittance.amount, 0n)
-				const reminder = register.work.find((item) => item.rule === "roth-plan-receipt")
-				assert.equal(reminder?.gates, "None")
-				assert.equal(reminder?.status, "Open")
+				assert.equal(
+					register.work.some((item) => item.rule.endsWith("plan-receipt")),
+					false,
+					"the provider's own confirmation is not tracked"
+				)
 
 				// Posted facts cite the posting evidence, not the calculation's draft text.
 				const posted = say("Owner approved the $8,000.00 Roth wire; Mercury sent it today")
@@ -249,7 +251,6 @@ test("RothOnly solves the gross for exactly zero cash, and a sent Mercury receip
 				register = yield* workRegister(yield* latest, business, day)
 				assert.equal(register.blockers.length, 0, "a sent receipt clears the gate")
 				assert.equal(register.work.find((item) => item.rule === "roth-remittance")?.status, "Complete")
-				assert.equal(register.work.find((item) => item.rule === "roth-plan-receipt")?.status, "Open")
 
 				// A wrong Roth still refuses cleanly.
 				refusal(

@@ -125,11 +125,12 @@ owner gross, each deduction, Roth and taxes remaining payable, then:
 2. `payroll.post` with `settlement.amount` = `roth` and the Mercury id. This one
    write creates the wage, deduction, bank movement, contribution and funding
    link. Do not also fund the contribution.
-3. Download the Mercury receipt (status Sent). `artifact.record` its file, then
-   `artifact.attach-bank` to the movement (its id is in the post readback or
-   `report`). The `roth-remittance` blocker completes here.
-4. The provider's own confirmation is a reminder (`roth-plan-receipt`), never a
-   payroll blocker. Record it when it exists: `retirement.receipt`.
+3. Download the Mercury wire receipt (Created or Sent both count).
+   `artifact.record` its file, then `artifact.attach-bank` to the movement (its
+   id is in the post readback or `report`). The `roth-remittance` blocker
+   completes here.
+4. That is the whole job. The Mercury receipt is the evidence; the plan
+   provider's own confirmation is not tracked and never asked for.
 
 Requirements the ledger enforces: a current signed election and allowance for
 the year (`election.document`, `election.record`), the year's retirement

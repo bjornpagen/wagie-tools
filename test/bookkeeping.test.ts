@@ -366,10 +366,6 @@ test("partial receipts survive year end, late allocation reconciles them, and su
 				)
 				const future = parseCalendarDate("2027-01-02")
 				let register = yield* workRegister(yield* latest, business, future)
-				assert.equal(
-					register.work.find((r) => r.id === `after-tax-plan-receipt/${contribution}`)?.amount,
-					600n
-				)
 				assert.equal(register.work.find((r) => r.id === `after-tax-conversion/${first}`)?.status, "Open")
 				assert.equal(
 					refusalCode(
@@ -386,10 +382,6 @@ test("partial receipts survive year end, late allocation reconciles them, and su
 				})
 				assert.equal((yield* relationRows(yield* latest, S.PlanReceiptDate)).length, 0)
 				register = yield* workRegister(yield* latest, business, future)
-				assert.equal(
-					register.work.find((r) => r.id === `after-tax-plan-receipt/${contribution}`)?.status,
-					"Complete"
-				)
 				assert.equal(register.work.find((r) => r.id === `after-tax-conversion/${second}`)?.status, "Open")
 				assert.equal(
 					refusalCode(

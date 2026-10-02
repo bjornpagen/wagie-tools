@@ -29,8 +29,6 @@ export const workRules = {
 	"receipt-discrepancy": { kind: "Retirement", gates: "RetirementFunding" },
 	"roth-remittance": { kind: "Retirement", gates: "Payroll" },
 	"retirement-filing-expectation": { kind: "Filing", gates: "Payroll" },
-	"roth-plan-receipt": { kind: "Reminder", gates: "None" },
-	"after-tax-plan-receipt": { kind: "Reminder", gates: "None" },
 	"after-tax-conversion": { kind: "Reminder", gates: "None" },
 	"after-tax-target": { kind: "Reminder", gates: "None" },
 	"distribution-review": { kind: "Reminder", gates: "None" }

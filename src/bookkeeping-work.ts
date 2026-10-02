@@ -9,8 +9,8 @@ import * as S from "./schema.ts"
 import { type WorkItem, workItem } from "./work-rules.ts"
 
 /** Retirement work. Withheld Roth blocks payroll only until it has left the
- * business: fully funded by Mercury movements whose sent receipts are attached.
- * Carry's own confirmation is tracked as a reminder and never gates payroll.
+ * business: fully funded by Mercury movements whose receipts are attached. The
+ * Mercury receipt is the evidence; the provider's own confirmation is not tracked.
  */
 export const bookkeepingWork = (snapshot: Snapshot, business: Uuid, asOf: UnixEpochDay) =>
 	Effect.gen(function* () {
@@ -31,7 +31,6 @@ export const bookkeepingWork = (snapshot: Snapshot, business: Uuid, asOf: UnixEp
 		const deductions = yield* relationRows(snapshot, S.Deduction),
 			wages = yield* relationRows(snapshot, S.Wage)
 		const receipts = yield* relationRows(snapshot, S.PlanReceipt),
-			allocations = yield* relationRows(snapshot, S.ReceiptAllocation),
 			conversions = yield* relationRows(snapshot, S.ConversionReceipt)
 		const reported = yield* relationRows(snapshot, S.ReportedReceiptConversion)
 		for (const question of (yield* questions(snapshot, business)).filter(
@@ -117,63 +116,6 @@ export const bookkeepingWork = (snapshot: Snapshot, business: Uuid, asOf: UnixEp
 							funded === deduction.amount
 								? { op: "artifact.attach-bank", input: {} }
 								: { op: "retirement.fund", input: { contribution: contribution?.id } }
-					})
-				)
-				const received = allocations
-					.filter(
-						(r) =>
-							r.contribution === contribution?.id &&
-							receipts.some(
-								(receipt) =>
-									receipt.id === r.receipt &&
-									receipt.source === "EmployeeRothDeferral" &&
-									receipt.year === deduction.year
-							)
-					)
-					.reduce((n, r) => n + r.amount, 0n)
-				work.push(
-					workItem({
-						rule: "roth-plan-receipt",
-						subject: deduction.wage,
-						label: "Carry has not yet confirmed this withheld Roth",
-						opensOn: epochDay(paidOn),
-						complete: received === deduction.amount,
-						amount: deduction.amount - received,
-						next: {
-							op: "retirement.receipt",
-							input: { plan: plan.id, source: "EmployeeRothDeferral", year: Number(deduction.year) }
-						}
-					})
-				)
-			}
-			for (const contribution of contributions.filter(
-				(r) => r.plan === plan.id && r.source === "EmployeeAfterTax"
-			)) {
-				const received = allocations
-					.filter(
-						(r) =>
-							r.contribution === contribution.id &&
-							receipts.some(
-								(receipt) =>
-									receipt.id === r.receipt &&
-									receipt.source === contribution.source &&
-									receipt.year === contribution.year
-							)
-					)
-					.reduce((n, r) => n + r.amount, 0n)
-				work.push(
-					workItem({
-						rule: "after-tax-plan-receipt",
-						subject: contribution.id,
-						label: "After-tax contribution awaiting plan receipt",
-						opensOn: periodSpan(Number(contribution.year), "Year").start,
-						dueOn: epochDay(periodSpan(Number(contribution.year), "Year").end - 1n),
-						complete: received === contribution.amount,
-						amount: contribution.amount - received,
-						next: {
-							op: "retirement.receipt",
-							input: { plan: plan.id, source: "EmployeeAfterTax", year: Number(contribution.year) }
-						}
 					})
 				)
 			}
