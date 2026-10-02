@@ -83,6 +83,7 @@ export const unitOf = {
 	row: "Count",
 	sequence: "Count",
 	forms: "Count",
+	revisionCount: "Count",
 	dataRevision: "Count",
 	seq: "Count",
 	receiptEpoch: "Count",
