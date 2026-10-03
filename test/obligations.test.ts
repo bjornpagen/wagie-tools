@@ -74,7 +74,8 @@ test("deadlines roll to the next business day", async () => {
 	await op(ledger, "filing.record", {
 		form: "F941",
 		period: "2026Q3",
-		...certified,
+		method: "CertifiedMail",
+		mailedOn: "2026-10-01",
 		tracking: "9400100000000000000001"
 	})
 	await op(ledger, "filing.record", {

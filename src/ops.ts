@@ -375,12 +375,16 @@ const FilingInput = Schema.Union([
 type FilingInput = typeof FilingInput.Type
 
 /** A return as filed: how, and every line as the ledger computes it now.
- * What is filed must equal the ledger; fix the ledger first if it doesn't. */
+ * What is filed must equal the ledger; fix the ledger first if it doesn't.
+ * A return is filed once its period is over: filed early, it would freeze a
+ * period's liability before its paychecks were all paid. */
 const fileReturn =
 	(request: FilingInput) =>
 	(facts: Facts): Db.Plan<object> => {
 		const { form, period, method } = request
 		requirePeriod(period, S.Form.axioms[form].period)
+		if ((request.method === "CertifiedMail" ? request.mailedOn : request.on) < period.end)
+			refuse("PeriodOpen", `${form} ${formatPeriod(period)} can be filed once the period is over`)
 		const id = filingId(form, period)
 		const lines = [...figures(form, periodOf(facts, period))].map(([line, value]) => ({
 			filing: id,

@@ -134,7 +134,7 @@ node src/cli.ts transfer.record '{"kind":"Distribution","mercury":"20261015MMQFM
    the 941 and the C-3, headed by who they name.
 2. Prepare both from it. Mail the 941 by certified mail; file the C-3 online.
 3. Record them. The figures stored are the report's; if the return differs,
-   fix the ledger first.
+   fix the ledger first. A return is recorded only once its period is over.
 
    ```sh
    node src/cli.ts filing.record '{"form":"F941","period":"2026Q4","method":"CertifiedMail","mailedOn":"2027-01-20","tracking":"9400100000000000000001"}'

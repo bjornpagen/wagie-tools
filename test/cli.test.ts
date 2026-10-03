@@ -238,6 +238,11 @@ test("the boundary refuses what the ledger can't hold", async () => {
 		{ form: "F941", period: "2026", method: "CertifiedMail", mailedOn: "2027-01-02", tracking: "1" },
 		"InvalidPeriod"
 	)
+	await refuses(
+		"filing.record",
+		{ form: "F941", period: "2026Q1", method: "CertifiedMail", mailedOn: "2026-03-31", tracking: "1" },
+		"PeriodOpen"
+	)
 	await refuses("tax.paid", { ...depositInput, account: "Federal940", period: "2026Q1" }, "InvalidPeriod")
 	await refuses(
 		"policy.set",
