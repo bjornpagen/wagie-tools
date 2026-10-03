@@ -145,7 +145,7 @@ const wagesPaid = (period: Period) => (period.checks.length > 0 ? 1n : 0n)
 // ── 1099-R and 1096 ─────────────────────────────────────────────────────────
 
 /** Each plan account's 1099-R, by box: one form per account, its box 7 code
- * the account's. Box 11 is the designated Roth account's alone. */
+ * the account's. Boxes 10 and 11 are the designated Roth account's alone. */
 export const boxes = {
 	Pretax: {
 		gross: "F1099R_Pretax_G_1",
@@ -164,12 +164,13 @@ export const boxes = {
 		taxable: "F1099R_Roth_H_2a",
 		total: "F1099R_Roth_H_2b",
 		basis: "F1099R_Roth_H_5",
+		converted: "F1099R_Roth_H_10",
 		firstYear: "F1099R_Roth_H_11"
 	}
 } as const satisfies { readonly [A in PlanAccountHandle]: { readonly [box: string]: LineHandle } }
 
 const plan = (period: Period) => distributions(period.facts, BigInt(yearOf(period.span.start)))
-const box = (account: PlanAccountHandle, field: "gross" | "taxable" | "basis") =>
+const box = (account: PlanAccountHandle, field: "gross" | "taxable" | "basis" | "converted") =>
 	money((period) => plan(period).find((row) => row.account === account)?.[field] ?? 0n)
 /** Box 2b, total distribution: Carry credits interest after every sweep, so no
  * plan account ends a year empty and no distribution is the whole balance. */
@@ -247,6 +248,7 @@ export const lines: { readonly [L in LineHandle]: Rule } = {
 	F1099R_Roth_H_2a: box("Roth", "taxable"),
 	F1099R_Roth_H_2b: wholeBalance,
 	F1099R_Roth_H_5: box("Roth", "basis"),
+	F1099R_Roth_H_10: box("Roth", "converted"),
 	F1099R_Roth_H_11: firstYear,
 	F1096_3: count((period) => BigInt(plan(period).filter((row) => row.gross > 0n).length)),
 	F1096_5: money((period) => sum(plan(period).map((row) => row.gross)))

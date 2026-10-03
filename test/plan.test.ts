@@ -36,13 +36,18 @@ test("each wire's basis leaves in the first sweep on or after the day it was sen
 	assert.equal(basis(swept.february), "1500.00") // the deferral and the January wire
 	assert.equal(basis(swept.march), "750.00") // February's wire and the one sent that day
 	assert.equal(basis(swept.april), "250.00") // a loss: 300.00 carried, 250.00 reported
+	const converted = (row: unknown) => (row as { converted: string }).converted
+	assert.equal(converted(swept.february), "1000.00") // the January wire, not the deferral
+	assert.equal(converted(swept.march), "750.00")
+	assert.equal(converted(swept.april), "250.00") // at most the basis reported
 	assert.deepEqual(swept.pretax, {
 		outcome: "committed",
 		account: "Pretax",
 		on: "2026-03-15",
 		gross: "2000.00",
 		taxable: "2000.00",
-		basis: "0.00"
+		basis: "0.00",
+		converted: "0.00"
 	})
 })
 
@@ -62,6 +67,7 @@ test("the 1099-R reports each account's way out; the after-tax conversions are i
 		F1099R_Roth_H_2a: "0.00",
 		F1099R_Roth_H_2b: 0,
 		F1099R_Roth_H_5: "2500.00",
+		F1099R_Roth_H_10: "2000.00",
 		F1099R_Roth_H_11: 2026
 	})
 	assert.deepEqual(forms.F1096?.lines, { F1096_3: 3, F1096_5: "6800.00" })
@@ -214,4 +220,21 @@ test("an after-tax wire is converted, and reported, in the year it was sent, wha
 		.filter((item) => item.what === "File F1099R")
 		.map((item) => item.period)
 	assert.deepEqual(due, ["2027"])
+})
+
+test("box 10 counts a sweep's conversions from its year and the four before", async () => {
+	const swept = async (on: string) => {
+		const own = await ledger2026()
+		await op(own, "transfer.record", {
+			kind: "AfterTax",
+			year: 2026,
+			mercury: sendMoney(),
+			sentOn: "2026-03-02",
+			amount: "1000.00"
+		})
+		const sweep = await op(own, "plan.rollover", { account: "Roth", on, gross: "1500.00" })
+		return [sweep.basis, sweep.converted]
+	}
+	assert.deepEqual(await swept("2030-12-31"), ["1000.00", "1000.00"])
+	assert.deepEqual(await swept("2031-01-02"), ["1000.00", "0.00"])
 })

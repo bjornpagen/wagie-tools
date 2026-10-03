@@ -1,6 +1,6 @@
 ---
 name: wagie-tools
-description: Run payroll, wires, tax payments, filings, distributions, the mega backdoor Roth and the plan's rollovers for Emu Farm LLC through the wagie-tools ledger's JSON ops.
+description: Run payroll, wires, tax payments, filings, distributions, the mega backdoor Roth and the plan's rollovers for a single-owner S corporation through the wagie-tools ledger's JSON ops.
 ---
 
 # Wagie Tools
@@ -113,9 +113,10 @@ node src/cli.ts transfer.record '{"kind":"AfterTax","year":2026,"mercury":"20261
 ## Rollover
 
 Every rollover sweeps a whole account into the owner's Roth IRA. Record each
-with the day and the amount that left; the basis it carries (the Roth deferral
-and after-tax wires since the last sweep) and its 1099-R lines follow. The
-after-tax account is never swept by hand: Carry converts it.
+with the day and the amount that left. The basis it carries (the Roth deferral
+and after-tax wires since the last sweep), the part of that basis from
+conversions made in the last five years (1099-R box 10), and its 1099-R lines
+follow. The after-tax account is never swept by hand: Carry converts it.
 
 ```sh
 node src/cli.ts plan.rollover '{"account":"Roth","on":"2026-11-02","gross":"25000.00"}'

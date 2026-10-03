@@ -9,25 +9,35 @@ import { PlanAccount, type PlanAccountHandle, type Rollover } from "./schema.ts"
  * it settles. Every sweep empties its account, so each cent of Roth basis
  * leaves in the first Roth sweep on or after the day it was sent. */
 
-/** Every wire that put Roth basis into the plan, with the day it was sent. */
+/** Every wire that put Roth basis into the plan, with the day it was sent: a
+ * Roth deferral, or an after-tax wire, which Carry converts as it settles. */
 const contributions = (facts: Facts) => {
 	const sentOn = new Map(facts.Transfer.map((row) => [row.mercury, row.sentOn]))
-	return [...facts.RothDeferral, ...facts.AfterTax].map((row) => ({
+	const sent = (converted: boolean) => (row: { transfer: string; amount: bigint }) => ({
 		sentOn: sentOn.get(row.transfer) ?? 0n,
-		amount: row.amount
-	}))
+		amount: row.amount,
+		converted
+	})
+	return [...facts.RothDeferral.map(sent(false)), ...facts.AfterTax.map(sent(true))]
 }
 
 /** Each after-tax wire as the in-plan Roth rollover Carry makes of it when
  * it settles: dated the day it was sent, whatever plan year it counts toward. */
-export const conversions = (facts: Facts) => {
-	const sentOn = new Map(facts.Transfer.map((row) => [row.mercury, row.sentOn]))
-	return facts.AfterTax.map((row) => ({ on: sentOn.get(row.transfer) ?? 0n, amount: row.amount }))
-}
+export const conversions = (facts: Facts) =>
+	contributions(facts)
+		.filter((row) => row.converted)
+		.map((row) => ({ on: row.sentOn, amount: row.amount }))
 
 /** A sweep and the basis it reports (box 5): the wires since the previous
- * sweep of a Roth-basis account, at most its gross. A taxed account has none. */
-export type Sweep = Fact<typeof Rollover> & { readonly taxable: bigint; readonly basis: bigint }
+ * sweep of a Roth-basis account, at most its gross. Of that basis, what came
+ * from conversions in the sweep's year or the four before it is allocable to
+ * an in-plan Roth rollover within 5 years (box 10). A taxed account has
+ * neither. */
+export type Sweep = Fact<typeof Rollover> & {
+	readonly taxable: bigint
+	readonly basis: bigint
+	readonly converted: bigint
+}
 
 export const sweeps = (facts: Facts): Sweep[] => {
 	const sent = contributions(facts)
@@ -37,13 +47,14 @@ export const sweeps = (facts: Facts): Sweep[] => {
 		.map((sweep) => {
 			const since = last.get(sweep.account)
 			last.set(sweep.account, sweep.on)
-			if (PlanAccount.axioms[sweep.account].taxed) return { ...sweep, taxable: sweep.gross, basis: 0n }
-			const carried = sum(
-				sent
-					.filter((row) => (since === undefined || row.sentOn > since) && row.sentOn <= sweep.on)
-					.map((row) => row.amount)
+			if (PlanAccount.axioms[sweep.account].taxed)
+				return { ...sweep, taxable: sweep.gross, basis: 0n, converted: 0n }
+			const carried = sent.filter(
+				(row) => (since === undefined || row.sentOn > since) && row.sentOn <= sweep.on
 			)
-			return { ...sweep, taxable: 0n, basis: min(sweep.gross, carried) }
+			const basis = min(sweep.gross, sum(carried.map((row) => row.amount)))
+			const recent = carried.filter((row) => row.converted && yearOf(row.sentOn) + 4 >= yearOf(sweep.on))
+			return { ...sweep, taxable: 0n, basis, converted: min(basis, sum(recent.map((row) => row.amount))) }
 		})
 }
 
@@ -79,14 +90,15 @@ export const distributions = (facts: Facts, year: bigint) => {
 					.filter((row) => BigInt(yearOf(row.on)) === year)
 					.map((row) => row.amount)
 			)
-			return { account, gross, taxable: 0n, basis: gross }
+			return { account, gross, taxable: 0n, basis: gross, converted: 0n }
 		}
 		const own = swept.filter((sweep) => sweep.account === account)
 		return {
 			account,
 			gross: sum(own.map((sweep) => sweep.gross)),
 			taxable: sum(own.map((sweep) => sweep.taxable)),
-			basis: sum(own.map((sweep) => sweep.basis))
+			basis: sum(own.map((sweep) => sweep.basis)),
+			converted: sum(own.map((sweep) => sweep.converted))
 		}
 	})
 }

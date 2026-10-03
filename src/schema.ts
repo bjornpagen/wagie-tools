@@ -164,6 +164,7 @@ export const formLines = {
 		"F1099R_Roth_H_2a",
 		"F1099R_Roth_H_2b",
 		"F1099R_Roth_H_5",
+		"F1099R_Roth_H_10",
 		"F1099R_Roth_H_11"
 	],
 	F1096: ["F1096_3", "F1096_5"]

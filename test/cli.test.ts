@@ -84,7 +84,8 @@ test("each write round-trips and an identical re-run is no change", async () => 
 	assert.deepEqual(await twice(ledger, "plan.rollover", sweep), {
 		...sweep,
 		taxable: "0.00",
-		basis: "1100.00"
+		basis: "1100.00",
+		converted: "1000.00"
 	})
 
 	const c3 = {

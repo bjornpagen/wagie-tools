@@ -23,6 +23,7 @@ export const unitOf = {
 	wageCeiling: "Money",
 	taxable: "Money",
 	basis: "Money",
+	converted: "Money",
 	awaiting: "Money",
 	paid: "Money",
 	credit: "Money",

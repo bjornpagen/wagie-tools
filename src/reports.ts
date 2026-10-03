@@ -169,7 +169,14 @@ export const report = (facts: Facts, year: number, quarter?: number) => {
 			? {
 					sweeps: sweeps(facts)
 						.filter((sweep) => yearOf(sweep.on) === year)
-						.map(({ account, on, gross, taxable, basis }) => ({ account, on, gross, taxable, basis }))
+						.map(({ account, on, gross, taxable, basis, converted }) => ({
+							account,
+							on,
+							gross,
+							taxable,
+							basis,
+							converted
+						}))
 				}
 			: {}),
 		paychecks: paychecks(facts)
