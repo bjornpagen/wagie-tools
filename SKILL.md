@@ -102,7 +102,9 @@ as `tracker`.
 
 Wire the after-tax contribution from Mercury to the Carry after-tax account,
 then record it with the plan's contribution year. It is an S-corp
-distribution, and Carry converts it to Roth as it settles.
+distribution, and Carry converts it to Roth as it settles, so the conversion
+goes on the 1099-R for the year the wire was sent, even when it counts toward
+the year before.
 
 ```sh
 node src/cli.ts transfer.record '{"kind":"AfterTax","year":2026,"mercury":"20261015MMQFMP4S000200","sentOn":"2026-10-15","amount":"5000.00"}'

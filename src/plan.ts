@@ -18,6 +18,13 @@ const contributions = (facts: Facts) => {
 	}))
 }
 
+/** Each after-tax wire as the in-plan Roth rollover Carry makes of it when
+ * it settles: dated the day it was sent, whatever plan year it counts toward. */
+export const conversions = (facts: Facts) => {
+	const sentOn = new Map(facts.Transfer.map((row) => [row.mercury, row.sentOn]))
+	return facts.AfterTax.map((row) => ({ on: sentOn.get(row.transfer) ?? 0n, amount: row.amount }))
+}
+
 /** A sweep and the basis it reports (box 5): the wires since the previous
  * sweep of a Roth-basis account, at most its gross. A taxed account has none. */
 export type Sweep = Fact<typeof Rollover> & { readonly taxable: bigint; readonly basis: bigint }
@@ -61,13 +68,17 @@ export const firstRothYear = (facts: Facts): bigint | undefined =>
 			undefined
 		)
 
-/** A year's 1099-R, one form per account money left: an implied account's
- * conversions follow from its wires; every other account reports its sweeps. */
+/** A year's 1099-R, one form per account money left: an implied account
+ * reports the year's conversions; every other account reports its sweeps. */
 export const distributions = (facts: Facts, year: bigint) => {
 	const swept = sweeps(facts).filter((sweep) => BigInt(yearOf(sweep.on)) === year)
 	return PlanAccount.handles.map((account) => {
 		if (PlanAccount.axioms[account].implied) {
-			const gross = sum(facts.AfterTax.filter((row) => row.year === year).map((row) => row.amount))
+			const gross = sum(
+				conversions(facts)
+					.filter((row) => BigInt(yearOf(row.on)) === year)
+					.map((row) => row.amount)
+			)
 			return { account, gross, taxable: 0n, basis: gross }
 		}
 		const own = swept.filter((sweep) => sweep.account === account)

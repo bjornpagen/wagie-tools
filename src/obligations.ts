@@ -25,7 +25,7 @@ import {
 	paymentLine,
 	periodOf
 } from "./forms.ts"
-import { awaitingSweep } from "./plan.ts"
+import { awaitingSweep, conversions } from "./plan.ts"
 import {
 	type AccountHandle,
 	Form,
@@ -167,7 +167,7 @@ const returnPeriods = (facts: Facts, checks: readonly Paycheck[], form: FormHand
 			)
 		case "PlanActivity":
 			return distinct([
-				...facts.AfterTax.map((row) => yearSpan(Number(row.year))),
+				...conversions(facts).map((row) => spanOf(rules.period, row.on)),
 				...facts.Rollover.map((row) => spanOf(rules.period, row.on))
 			])
 	}

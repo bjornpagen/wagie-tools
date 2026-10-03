@@ -193,3 +193,25 @@ test("a 1099-R filed wrong is corrected box by box, with the 1096 that transmits
 	})
 	assert.equal(correctionDue, undefined)
 })
+
+test("an after-tax wire is converted, and reported, in the year it was sent, whatever plan year it counts toward", async () => {
+	const own = await ledger2026()
+	await op(own, "transfer.record", {
+		kind: "AfterTax",
+		year: 2026,
+		mercury: sendMoney(),
+		sentOn: "2027-01-08",
+		amount: "500.00"
+	})
+	const conversion = async (year: number) =>
+		((await op(own, "report", { year })).forms as { F1099R: { lines: { F1099R_AfterTax_G_1: string } } })
+			.F1099R.lines.F1099R_AfterTax_G_1
+	assert.equal(await conversion(2026), "0.00")
+	assert.equal(await conversion(2027), "500.00")
+	const due = (
+		(await op(own, "status", { asOf: "2026-12-31" })).upcoming as { what: string; period: string }[]
+	)
+		.filter((item) => item.what === "File F1099R")
+		.map((item) => item.period)
+	assert.deepEqual(due, ["2027"])
+})
