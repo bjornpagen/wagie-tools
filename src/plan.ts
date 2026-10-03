@@ -9,16 +9,27 @@ import { PlanAccount, type PlanAccountHandle, type Rollover } from "./schema.ts"
  * it settles. Every sweep empties its account, so each cent of Roth basis
  * leaves in the first Roth sweep on or after the day it was sent. */
 
-/** Every wire that put Roth basis into the plan, with the day it was sent: a
- * Roth deferral, or an after-tax wire, which Carry converts as it settles. */
+/** Every wire that put Roth basis into the plan, with the day it was sent and
+ * the tax year it was contributed for: a Roth deferral, for its paycheck's
+ * year, or an after-tax wire, which Carry converts as it settles, for the
+ * year it was sent. */
 const contributions = (facts: Facts) => {
 	const sentOn = new Map(facts.Transfer.map((row) => [row.mercury, row.sentOn]))
-	const sent = (converted: boolean) => (row: { transfer: string; amount: bigint }) => ({
-		sentOn: sentOn.get(row.transfer) ?? 0n,
-		amount: row.amount,
-		converted
+	const paidIn = new Map(facts.Wage.map((row) => [row.id, row.year]))
+	const deferred = facts.RothDeferral.map((row) => {
+		const on = sentOn.get(row.transfer) ?? 0n
+		return {
+			sentOn: on,
+			amount: row.amount,
+			converted: false,
+			year: paidIn.get(row.wage) ?? BigInt(yearOf(on))
+		}
 	})
-	return [...facts.RothDeferral.map(sent(false)), ...facts.AfterTax.map(sent(true))]
+	const converted = facts.AfterTax.map((row) => {
+		const on = sentOn.get(row.transfer) ?? 0n
+		return { sentOn: on, amount: row.amount, converted: true, year: BigInt(yearOf(on)) }
+	})
+	return [...deferred, ...converted]
 }
 
 /** Each after-tax wire as the in-plan Roth rollover Carry makes of it when
@@ -53,7 +64,7 @@ export const sweeps = (facts: Facts): Sweep[] => {
 				(row) => (since === undefined || row.sentOn > since) && row.sentOn <= sweep.on
 			)
 			const basis = min(sweep.gross, sum(carried.map((row) => row.amount)))
-			const recent = carried.filter((row) => row.converted && yearOf(row.sentOn) + 4 >= yearOf(sweep.on))
+			const recent = carried.filter((row) => row.converted && row.year + 4n >= BigInt(yearOf(sweep.on)))
 			return { ...sweep, taxable: 0n, basis, converted: min(basis, sum(recent.map((row) => row.amount))) }
 		})
 }
@@ -69,11 +80,12 @@ export const awaitingSweep = (facts: Facts) => {
 	)
 }
 
-/** The first year Roth basis entered the plan, which starts the designated
- * Roth account's 5-taxable-year period (1099-R box 11). */
+/** The first tax year Roth basis was contributed for, which starts the
+ * designated Roth account's 5-taxable-year period (1099-R box 11): a December
+ * paycheck's Roth wired in January counts for December's year. */
 export const firstRothYear = (facts: Facts): bigint | undefined =>
 	contributions(facts)
-		.map((row) => BigInt(yearOf(row.sentOn)))
+		.map((row) => row.year)
 		.reduce<bigint | undefined>(
 			(first, year) => (first === undefined || year < first ? year : first),
 			undefined

@@ -4,7 +4,7 @@ import { parseDollars as $ } from "../src/core/boundary.ts"
 import { yearSpan } from "../src/core/time.ts"
 import { insert, remove } from "../src/db.ts"
 import { filingId } from "../src/ops.ts"
-import { commit, ledger2026, op, paid, read, sendMoney } from "./support.ts"
+import { commit, federal, ledger2026, op, paid, read, sendMoney, texas } from "./support.ts"
 
 /* The plan's books: Roth basis enters as wires and leaves in whole-account
  * sweeps. $500.00 of Roth deferral, then after-tax wires that Carry converts
@@ -237,4 +237,29 @@ test("box 10 counts a sweep's conversions from its year and the four before", as
 	}
 	assert.deepEqual(await swept("2030-12-31"), ["1000.00", "1000.00"])
 	assert.deepEqual(await swept("2031-01-02"), ["1000.00", "0.00"])
+})
+
+test("box 11 dates a Roth deferral by its paycheck, however late the wire", async () => {
+	const own = await ledger2026("2026-12-15")
+	await op(own, "policy.set", federal(2027))
+	await op(own, "policy.set", texas(2027))
+	await op(own, "election.set", { year: 2027, roth: "24500.00", afterTax: "0.00", signedOn: "2026-12-15" })
+	const check = await op(own, "payroll.post", {
+		paidOn: "2026-12-31",
+		input: { by: "gross", gross: "1000.00", roth: "100.00" }
+	})
+	for (const wire of check.wires as { kind: string; amount: string }[])
+		await op(own, "transfer.record", {
+			kind: wire.kind,
+			paidOn: "2026-12-31",
+			mercury: sendMoney(),
+			sentOn: wire.kind === "RothDeferral" ? "2027-01-04" : "2026-12-31",
+			amount: wire.amount
+		})
+	await op(own, "plan.rollover", { account: "Roth", on: "2027-02-01", gross: "100.00" })
+	const { forms } = await op(own, "report", { year: 2027 })
+	assert.equal(
+		(forms as { F1099R: { lines: { F1099R_Roth_H_11: number } } }).F1099R.lines.F1099R_Roth_H_11,
+		2026
+	)
 })
