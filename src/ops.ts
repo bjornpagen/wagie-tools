@@ -1,577 +1,612 @@
-import type { NativeRuntime, Uuid } from "@bjornpagen/bumbledb"
-import type { TerminalReceipt } from "@bjornpagen/bumbledb-log"
-import { Effect, Schema, type Scope } from "effect"
-import { auditLedger } from "./audit.ts"
-import { backupLedger, restoreArchive, verifyArchive } from "./backup.ts"
-import { BookkeepingInput, operations, recordBookkeeping } from "./bookkeeping.ts"
-import { civilDaySpan, today, type UnixEpochDay } from "./core/time.ts"
-import { Nonblank, Refusal } from "./core/values.ts"
+import type { Fact, NativeRuntime, Uuid } from "@bjornpagen/bumbledb"
+import { Effect, Schema } from "effect"
+import { type Check, grossOf, netOf, paychecks } from "./check.ts"
+import { formatDollars } from "./core/boundary.ts"
 import {
-	ArchiveInput,
-	AttachBankInput,
-	archiveArtifact,
-	attachBankArtifact,
-	collectDocuments,
-	inspectDocuments
-} from "./documents.ts"
-import {
-	ArtifactLocateInput,
-	ArtifactRecordInput,
-	ArtifactVerifyInput,
-	locateArtifact,
-	MailingRecordInput,
-	recordArtifact,
-	recordMailing,
-	verifyArtifact
-} from "./evidence.ts"
-import {
-	ExpectRetirementInput,
-	ensureFilings,
-	expectRetirementFiling,
-	FilingEnsureInput
-} from "./filing-coverage.ts"
-import {
-	amendFiling,
-	FilingAmendInput,
-	FilingDeadlineInput,
-	FilingPrepareInput,
-	FilingRejectInput,
-	FilingSubmitInput,
-	inspectFilings,
-	prepareFiling,
-	rejectFiling,
-	reviseDeadline,
-	submitFiling
-} from "./filings.ts"
-import type { WriteName } from "./op-names.ts"
-import {
-	DispositionInput,
-	disposeLiability,
-	PaymentReconcileInput,
-	PaymentRecordInput,
-	reconcilePayments,
-	recordPayment
-} from "./payments.ts"
-import {
-	CalculateInput,
-	calculatePayroll,
-	inspectCalculation,
-	PostInput,
-	payrollReadback,
-	postPayroll,
-	ReviseInput,
-	revisePayrollTax
-} from "./payroll.ts"
-import {
-	AnnualEvidenceInput,
-	AnnualPolicyInput,
-	ElectionDocumentInput,
-	RefreshInput,
-	recordAnnualEvidence,
-	recordAnnualPolicy,
-	recordElectionDocument,
-	refreshPolicy
-} from "./policy/annual.ts"
-import { ActivateInput, activatePolicy, inspectPolicy, installPolicy, PolicyInput } from "./policy/install.ts"
-import {
-	AssignmentInput,
-	assignCompensation,
-	BudgetInput,
-	BusinessInput,
-	configureBusiness,
-	ElectionInput,
-	EmployeeInput,
-	inspectProfiles,
-	recordBudget,
-	recordElection,
-	recordEmployee
-} from "./profiles.ts"
-import { relationRows } from "./queries.ts"
-import { AnswerInput, AskInput, answerQuestion, questions, recordQuestion } from "./questions.ts"
-import { RecoveryRecordInput, recordRecovery } from "./recoveries.ts"
+	formatDate,
+	formatPeriod,
+	point,
+	quarterOf,
+	type Span,
+	sameSpan,
+	todayIn,
+	yearOf,
+	yearSpan
+} from "./core/time.ts"
+import { canonicalJson, MAX_I64, min, naturalId, refuse, sum } from "./core/values.ts"
+import * as Db from "./db.ts"
+import { correctable, figures, periodOf } from "./forms.ts"
+import { CheckInput, priceCheck } from "./gross-up.ts"
+import { type Obligation, obligations, status } from "./obligations.ts"
 import { report } from "./reports.ts"
-import { type Ledger, latest, parseStrict, resolveRequest } from "./runtime.ts"
-import { commandFields, Day, DaySpan, Id, YearNumber } from "./schema/input.ts"
+import {
+	Day,
+	MercuryTrackingId,
+	Money,
+	Period,
+	PositiveMoney,
+	parseStrict,
+	Rate,
+	Text,
+	Year
+} from "./schema/input.ts"
 import * as S from "./schema.ts"
-import { suggestGross } from "./suggestions.ts"
-import { workRegister } from "./work.ts"
 
-type Env = Ledger | NativeRuntime | Scope.Scope
-type Write = {
-	readonly summary: string
-	readonly input: Schema.Top
-	readonly run: (payload: unknown) => Effect.Effect<TerminalReceipt, unknown, Env>
-	readonly readback?: (receipt: TerminalReceipt) => Effect.Effect<unknown, unknown, Env>
+/* The op table. A write plans on one snapshot of the facts and the laws judge
+ * the result; an identical re-run is no change. */
+
+export const TIME_ZONE = "America/Chicago"
+type Facts = Db.Facts
+type Edit = Db.Edit
+
+/** Natural ids: the same paycheck or filing always gets the same id. */
+export const wageId = (paidOn: bigint) => naturalId("wage", paidOn)
+export const filingId = (form: S.FormHandle, period: Span) =>
+	naturalId("filing", form, period.start, period.end)
+
+const rulesFor = (facts: Facts, year: number) =>
+	facts.TaxYear.find((row) => row.year === BigInt(year)) ??
+	refuse("TaxYearMissing", `Set ${year} first: year.set`)
+const wageOn = (facts: Facts, paidOn: bigint) => facts.Wage.find((wage) => wage.paidOn.start === paidOn)
+/** Where the year's next paycheck starts on the wage axis. */
+const ytdOf = (facts: Facts, year: number) =>
+	facts.Wage.filter((wage) => wage.year === BigInt(year)).reduce(
+		(end, wage) => (wage.earnings.end > end ? wage.earnings.end : end),
+		0n
+	)
+const same = (wage: Fact<typeof S.Wage>, check: Check) =>
+	sameSpan(wage.earnings, check.earnings) &&
+	wage.fit === check.fit &&
+	wage.ss === check.ss &&
+	wage.medicare === check.medicare &&
+	wage.roth === check.roth
+const present = (facts: Facts, edits: readonly Edit[]) =>
+	edits.every(
+		(edit) =>
+			edit.op === "insert" &&
+			facts[edit.relation].some((fact) => canonicalJson(fact) === canonicalJson(edit.fact))
+	)
+const describe = (item: Obligation) => {
+	const when = item.paidOn !== undefined ? formatDate(item.paidOn) : item.period && formatPeriod(item.period)
+	return `${item.what}${when ? ` ${when}` : ""}${item.amount === undefined ? "" : `: ${formatDollars(item.amount)}`}`
 }
 
-/** The flat input of one bookkeeping arm: the command fields plus the arm's
- * own fields. A two-shaped arm (Contribution) stays a union of both shapes. */
-const flatArm = (arm: Schema.Top): Schema.Top => {
-	if ("members" in arm && Array.isArray(arm.members)) return Schema.Union(arm.members.map(flatArm))
-	const { kind: _kind, ...fields } = (arm as unknown as { fields: Schema.Struct.Fields }).fields
-	return Schema.Struct({ ...commandFields, evidence: Nonblank, ...fields })
+// ── payroll ────────────────────────────────────────────────────────────────
+
+/** A posted paycheck: its amounts, what it recovered from earlier ones, and
+ * the wires still to send for it. */
+const paycheck = (facts: Facts, id: Uuid) => {
+	const check =
+		paychecks(facts).find((row) => row.wage.id === id) ?? refuse("WageMissing", "No such paycheck")
+	const { wage } = check
+	const paidOn = new Map(facts.Wage.map((row) => [row.id, row.paidOn.start]))
+	const unsent = check.owedNet - check.sentNet
+	const rothUnsent = wage.roth - check.sentRoth
+	return {
+		paidOn: wage.paidOn.start,
+		gross: grossOf(wage),
+		earnings: wage.earnings,
+		fit: wage.fit,
+		ss: wage.ss,
+		medicare: wage.medicare,
+		roth: wage.roth,
+		net: check.net,
+		owedNet: check.owedNet,
+		sentNet: check.sentNet,
+		sentRoth: check.sentRoth,
+		recovered: facts.Recovery.filter((row) => row.recoveredBy === id).map((row) => ({
+			paidOn: paidOn.get(row.wage) ?? refuse("WageMissing", "A recovery names no paycheck"),
+			amount: row.amount
+		})),
+		wires: [
+			...(unsent > 0n ? [{ kind: "NetPay", to: "the owner", amount: unsent }] : []),
+			...(rothUnsent > 0n ? [{ kind: "RothDeferral", to: "Carry Roth QCRH000004", amount: rothUnsent }] : [])
+		]
+	}
 }
 
-/** One bookkeeping arm as a flat op: {request, business, evidence, ...arm}. */
-const bookkeeping = (kind: keyof typeof operations, summary: string): Write => ({
-	summary,
-	input: flatArm(operations[kind]),
-	run: (payload) =>
-		Effect.gen(function* () {
-			const { request, business, evidence, ...arm } = payload as Record<string, unknown>
-			return yield* recordBookkeeping({ request, business, evidence, operation: { kind, ...arm } })
+/** Paychecks sent more net pay than they owe, oldest first. */
+const overpaid = (facts: Facts) =>
+	paychecks(facts)
+		.filter((check) => check.sentNet > check.owedNet)
+		.sort((a, b) => (a.wage.paidOn.start < b.wage.paidOn.start ? -1 : 1))
+		.map((check) => ({ wage: check.wage, excess: check.sentNet - check.owedNet }))
+
+const PayrollInput = Schema.Struct({ paidOn: Day, input: CheckInput, fit: Schema.optional(Money) })
+
+/** The paycheck for a day: sized, priced, recovering earlier overpayments
+ * oldest first. A post refuses while anything due by `paidOn` is open; a quote
+ * shows what would refuse it. `by: "net"` is net after recoveries: what lands. */
+const payroll =
+	(request: typeof PayrollInput.Type, quoting = false) =>
+	(facts: Facts): Db.Plan<object> => {
+		const { paidOn } = request
+		const year = yearOf(paidOn)
+		const rules = rulesFor(facts, year)
+		const plan = facts.PayPlan.find((row) => row.year === BigInt(year))
+		const fit =
+			request.fit ?? plan?.fitPerCheck ?? refuse("FitMissing", `Give fit, or set the ${year} pay plan`)
+		const { blockers } = obligations(facts, paidOn)
+		const shown = (after: Facts, id: Uuid) => ({ ...paycheck(after, id), ...(quoting ? { blockers } : {}) })
+		const price = (ytd: bigint, recovering: bigint) =>
+			priceCheck(
+				rules,
+				plan,
+				ytd,
+				paidOn,
+				request.input.by === "net"
+					? { ...request.input, net: request.input.net + recovering }
+					: request.input,
+				fit
+			)
+
+		const existing = wageOn(facts, paidOn)
+		if (existing) {
+			const took = sum(
+				facts.Recovery.filter((row) => row.recoveredBy === existing.id).map((row) => row.amount)
+			)
+			if (!same(existing, price(existing.earnings.start, took)))
+				refuse("WageExists", `A different paycheck is posted on ${formatDate(paidOn)}; use payroll.correct`)
+			return { edits: [], result: shown(facts, existing.id) }
+		}
+		if (facts.Wage.some((wage) => wage.year === BigInt(year) && wage.paidOn.start > paidOn))
+			refuse("Backdated", "A later paycheck is posted this year; earnings stay in date order")
+		if (blockers.length > 0 && !quoting) refuse("PayrollBlocked", blockers.map(describe).join("; "))
+
+		const owed = overpaid(facts)
+		const check = price(ytdOf(facts, year), sum(owed.map((row) => row.excess)))
+		const wage = { id: wageId(paidOn), paidOn: point(paidOn), year: BigInt(year), ...check }
+		let left = netOf(check)
+		const taken = owed.flatMap(({ wage: earlier, excess }) => {
+			const amount = min(excess, left)
+			left -= amount
+			return amount > 0n ? [{ wage: earlier.id, recoveredBy: wage.id, amount }] : []
 		})
+		const after = { ...facts, Wage: [...facts.Wage, wage], Recovery: [...facts.Recovery, ...taken] }
+		return {
+			edits: [...Db.insert("Wage", wage), ...Db.insert("Recovery", ...taken)],
+			result: shown(after, wage.id)
+		}
+	}
+
+const CorrectInput = Schema.Struct({
+	paidOn: Day,
+	gross: Schema.optional(PositiveMoney),
+	fit: Schema.optional(Money),
+	roth: Schema.optional(Money)
 })
+/** Reprice a posted paycheck over the same earnings start. Differences surface
+ * as obligations: a wire to top up, an overpayment to recover, a 941-X. */
+const correct =
+	(request: typeof CorrectInput.Type) =>
+	(facts: Facts): Db.Plan<object> => {
+		const wage =
+			wageOn(facts, request.paidOn) ?? refuse("WageMissing", `No paycheck on ${formatDate(request.paidOn)}`)
+		const gross = request.gross ?? grossOf(wage)
+		if (
+			gross !== grossOf(wage) &&
+			facts.Wage.some((row) => row.year === wage.year && row.paidOn.start > request.paidOn)
+		)
+			refuse(
+				"GrossNotLatest",
+				"Gross can change only on the year's latest paycheck, so later earnings never shift"
+			)
+		const check = priceCheck(
+			rulesFor(facts, Number(wage.year)),
+			undefined,
+			wage.earnings.start,
+			request.paidOn,
+			{ by: "gross", gross, roth: request.roth ?? wage.roth },
+			request.fit ?? wage.fit
+		)
+		if (same(wage, check)) return { edits: [], result: paycheck(facts, wage.id) }
+		const corrected = { ...wage, ...check }
+		const after = { ...facts, Wage: facts.Wage.map((row) => (row.id === wage.id ? corrected : row)) }
+		if (paychecks(after).some((row) => row.wage.id === wage.id && row.net < 0n))
+			refuse("NetNegative", "The corrected paycheck can't cover what it already recovered from earlier ones")
+		return {
+			edits: [...Db.remove("Wage", wage), ...Db.insert("Wage", corrected)],
+			result: paycheck(after, wage.id)
+		}
+	}
 
-/** Every write the ledger accepts, by name. The CLI, `wagie schema`, the
- * skill file and the work register's `next` intents all use these names. */
-export const writes = {
-	"business.configure": {
-		summary: "Create or update the business, its addresses, state account and tax accounts",
-		input: BusinessInput,
-		run: configureBusiness
-	},
-	"employee.record": { summary: "Create or update an employee", input: EmployeeInput, run: recordEmployee },
-	"compensation.budget": {
-		summary: "Record an evidenced annual gross salary target",
-		input: BudgetInput,
-		run: recordBudget
-	},
-	"compensation.assign": {
-		summary: "Assign an observed compensation commitment to its annual budget",
-		input: AssignmentInput,
-		run: assignCompensation
-	},
-	"election.document": {
-		summary: "Record a signed retirement election document and its four amounts",
-		input: ElectionDocumentInput,
-		run: recordElectionDocument
-	},
-	"election.record": {
-		summary: "Activate a signed election document from an effective date",
-		input: ElectionInput,
-		run: recordElection
-	},
-	"question.ask": {
-		summary: "Open a question; its kind decides what it holds back",
-		input: AskInput,
-		run: recordQuestion
-	},
-	"question.answer": {
-		summary: "Close a question with the evidence that answers it",
-		input: AnswerInput,
-		run: answerQuestion
-	},
-	"policy.install": { summary: "Install a hashed policy release", input: PolicyInput, run: installPolicy },
-	"policy.activate": {
-		summary: "Select the active policy release",
-		input: ActivateInput,
-		run: activatePolicy
-	},
-	"policy.annual": {
-		summary: "Record one authority's published annual rules and sources",
-		input: AnnualPolicyInput,
-		run: recordAnnualPolicy
-	},
-	"policy.evidence": {
-		summary: "Record employer-specific annual evidence",
-		input: AnnualEvidenceInput,
-		run: recordAnnualEvidence
-	},
-	"policy.refresh": {
-		summary: "Approve an authority's annual policy for the active release",
-		input: RefreshInput,
-		run: refreshPolicy
-	},
-	"filings.ensure": {
-		summary: "Materialize applicable filings through a year",
-		input: FilingEnsureInput,
-		run: ensureFilings
-	},
-	"filings.expect-retirement": {
-		summary: "Record an externally prepared 1099-R filing expectation",
-		input: ExpectRetirementInput,
-		run: expectRetirementFiling
-	},
-	"filings.prepare": {
-		summary: "Freeze a filing's figures and documents as a version",
-		input: FilingPrepareInput,
-		run: prepareFiling
-	},
-	"filings.submit": {
-		summary: "Record an actual submission of a prepared version",
-		input: FilingSubmitInput,
-		run: submitFiling
-	},
-	"filings.reject": { summary: "Record an agency rejection", input: FilingRejectInput, run: rejectFiling },
-	"filings.deadline": {
-		summary: "Record an evidenced deadline change",
-		input: FilingDeadlineInput,
-		run: reviseDeadline
-	},
-	"filings.amend": {
-		summary: "Open a correction filing for a submitted return",
-		input: FilingAmendInput,
-		run: amendFiling
-	},
-	"mailing.record": {
-		summary: "Record a certified mailing with its tracking number",
-		input: MailingRecordInput,
-		run: recordMailing
-	},
-	"payment.record": {
-		summary: "Record a tax payment already sent",
-		input: PaymentRecordInput,
-		run: recordPayment
-	},
-	"payment.reconcile": {
-		summary: "Attribute tax payments to liability entries",
-		input: PaymentReconcileInput,
-		run: reconcilePayments
-	},
-	"payment.dispose": {
-		summary: "Record an evidenced disposition of a negative liability",
-		input: DispositionInput,
-		run: disposeLiability
-	},
-	"payroll.calculate": {
-		summary: "Price a new wage (NewWage), a zero-cash Roth wire (RothOnly), or a tax revision",
-		input: CalculateInput,
-		run: calculatePayroll,
-		readback: payrollReadback
-	},
-	"payroll.post": {
-		summary: "Post a calculated wage after its Mercury payment was sent",
-		input: PostInput,
-		run: postPayroll,
-		readback: payrollReadback
-	},
-	"payroll.revise-tax": {
-		summary: "Reassess a posted wage's taxes",
-		input: ReviseInput,
-		run: revisePayrollTax,
-		readback: payrollReadback
-	},
-	"recovery.record": {
-		summary: "Attribute an actual recovery deduction to the wages it collected",
-		input: RecoveryRecordInput,
-		run: recordRecovery
-	},
-	"artifact.record": {
-		summary: "Register a document's exact bytes",
-		input: ArtifactRecordInput,
-		run: recordArtifact
-	},
-	"artifact.locate": {
-		summary: "Record a non-Drive location",
-		input: ArtifactLocateInput,
-		run: locateArtifact
-	},
-	"artifact.verify": {
-		summary: "Re-verify a document's bytes",
-		input: ArtifactVerifyInput,
-		run: verifyArtifact
-	},
-	"artifact.archive": {
-		summary: "Adopt a verified Google Drive copy of a document",
-		input: ArchiveInput,
-		run: (payload) => archiveArtifact(payload)
-	},
-	"artifact.attach-bank": {
-		summary: "Attach a Mercury receipt to an existing bank movement",
-		input: AttachBankInput,
-		run: attachBankArtifact
-	},
-	"bank.movement": bookkeeping("BankMovement", "Record an actual Mercury movement by its transaction ID"),
-	"bank.distribution": bookkeeping("Distribution", "Allocate part of a movement to an owner distribution"),
-	"bank.distribution-return": bookkeeping(
-		"DistributionReturn",
-		"Link an inflow returning part of a distribution"
-	),
-	"bank.distribution-review": bookkeeping(
-		"DistributionReview",
-		"Freeze a year's distributions for the tax handoff"
-	),
-	"bank.payroll-cash": bookkeeping("PayrollCash", "Link an existing movement as a wage's cash"),
-	"retirement.plan": bookkeeping("Plan", "Record the owner's retirement plan"),
-	"retirement.account": bookkeeping("Account", "Record a plan account"),
-	"retirement.annual": bookkeeping("Annual", "Record a year's limits and owner attestations"),
-	"retirement.contribution": bookkeeping("Contribution", "Record an already completed contribution"),
-	"retirement.authorize-after-tax": bookkeeping(
-		"AuthorizeAfterTax",
-		"Reserve after-tax capacity; sends no money"
-	),
-	"retirement.cancel-authorization": bookkeeping("CancelAuthorization", "Release an unspent authorization"),
-	"retirement.fund": bookkeeping("FundContribution", "Link a Mercury movement that funded a contribution"),
-	"retirement.receipt": bookkeeping("ProviderReceipt", "Record the plan provider's confirmed receipt"),
-	"retirement.allocate-receipt": bookkeeping("AllocateReceipt", "Allocate a receipt to contributions"),
-	"retirement.conversion": bookkeeping("Conversion", "Record an after-tax to Roth conversion"),
-	"retirement.supplied-tax": bookkeeping("SuppliedTax", "Store externally supplied conversion tax amounts"),
-	"retirement.supplied-report": bookkeeping("SuppliedReport", "Link supplied provider report data"),
-	"retirement.confirm-reported-conversion": bookkeeping(
-		"ConfirmReportedConversion",
-		"Confirm a whole receipt's conversion from a supplied report"
-	),
-	"retirement.balance": bookkeeping("Balance", "Record a dated provider balance")
-} satisfies Record<WriteName, Write>
+// ── money out ──────────────────────────────────────────────────────────────
 
-type ReadContext = { readonly asOf: UnixEpochDay }
-type Read = {
-	readonly summary: string
-	readonly input: Schema.Top
-	readonly run: (input: never, context: ReadContext) => Effect.Effect<unknown, unknown, Env>
-}
-const business = { business: Id, asOf: Schema.optional(Day) }
-const read = <S extends Schema.Top>(
-	summary: string,
-	input: S,
-	run: (input: S["Type"], context: ReadContext) => Effect.Effect<unknown, unknown, Env>
-): Read => ({ summary, input, run: run as Read["run"] })
-
-/** Every read, by name. Reads never write. */
-export const reads = {
-	status: read(
-		"Open work, what blocks payroll, and readiness notes. Each item names its next op",
-		Schema.Struct(business),
-		(input, { asOf }) =>
-			Effect.gen(function* () {
-				const register = yield* workRegister(yield* latest, input.business, asOf)
-				return {
-					business: register.business,
-					asOf: register.asOf,
-					state: register.state,
-					blockers: register.blockers,
-					open: register.work.filter((item) => item.status !== "Complete"),
-					readiness: register.readiness
+const wire = { mercury: MercuryTrackingId, sentOn: Day, amount: PositiveMoney }
+const TransferInput = Schema.Union([
+	Schema.Struct({ kind: Schema.Literal("NetPay"), paidOn: Day, ...wire }),
+	Schema.Struct({ kind: Schema.Literal("RothDeferral"), paidOn: Day, ...wire }),
+	Schema.Struct({ kind: Schema.Literal("AfterTax"), year: Year, ...wire }),
+	Schema.Struct({ kind: Schema.Literal("Distribution"), ...wire })
+])
+/** A Mercury transfer and the arm saying what it paid. A paycheck's wires may
+ * not exceed what it owes; an earlier record of the same transfer is judged
+ * by the laws instead, so a re-run is no change. */
+const transfer =
+	(request: typeof TransferInput.Type) =>
+	(facts: Facts): Db.Plan<object> => {
+		const { mercury, sentOn, amount, kind } = request
+		const recorded = facts.Transfer.some((row) => row.mercury === mercury)
+		const arm = (): Edit[] => {
+			switch (request.kind) {
+				case "NetPay":
+				case "RothDeferral": {
+					const wage =
+						wageOn(facts, request.paidOn) ??
+						refuse("WageMissing", `No paycheck on ${formatDate(request.paidOn)}`)
+					const check =
+						paychecks(facts).find((row) => row.wage.id === wage.id) ??
+						refuse("WageMissing", "No such paycheck")
+					const [sent, owed] =
+						request.kind === "NetPay" ? [check.sentNet, check.owedNet] : [check.sentRoth, wage.roth]
+					if (!recorded && sent + amount > owed)
+						refuse(
+							"Overpaid",
+							`${formatDate(request.paidOn)} has ${formatDollars(owed - sent)} of ${kind} unsent`
+						)
+					return Db.insert(request.kind, { transfer: mercury, wage: wage.id, amount })
 				}
-			})
-	),
-	work: read("Every work item, complete ones included", Schema.Struct(business), (input, { asOf }) =>
-		Effect.gen(function* () {
-			return yield* workRegister(yield* latest, input.business, asOf)
+				case "AfterTax":
+					return Db.insert("AfterTax", { transfer: mercury, year: BigInt(request.year), amount })
+				case "Distribution":
+					return Db.insert("Distribution", { transfer: mercury, amount })
+			}
+		}
+		return { edits: [...Db.insert("Transfer", { mercury, sentOn, kind }), ...arm()], result: request }
+	}
+
+const quarterly = (span: Span) => sameSpan(span, quarterOf(span.start))
+const yearly = (span: Span) => sameSpan(span, yearSpan(yearOf(span.start)))
+const requirePeriod = (span: Span, shape: "quarter" | "year") => {
+	if (!(shape === "year" ? yearly(span) : quarterly(span)))
+		refuse("InvalidPeriod", shape === "year" ? 'Use a year, e.g. "2026"' : 'Use a quarter, e.g. "2026Q3"')
+}
+
+const TaxPaidInput = Schema.Struct({
+	tracker: Text,
+	account: Schema.Literals(S.TaxAccount.handles),
+	kind: Schema.Literals(S.PaymentKind.handles),
+	period: Period,
+	amount: PositiveMoney,
+	initiatedOn: Day,
+	mercury: MercuryTrackingId,
+	sentOn: Day
+})
+/** An EFTPS or TWC payment, recorded once its Mercury debit has posted. */
+const taxPaid = (request: typeof TaxPaidInput.Type) => (): Db.Plan<object> => {
+	const { tracker, account, kind, period, amount, initiatedOn, mercury, sentOn } = request
+	requirePeriod(period, account === "Federal940" ? "year" : "quarter")
+	return {
+		edits: [
+			...Db.insert("TaxPayment", { tracker, account, kind, period, amount, initiatedOn, funding: "Mercury" }),
+			...Db.insert("Transfer", { mercury, sentOn, kind: "Tax" }),
+			...Db.insert("TaxDebit", { transfer: mercury, payment: tracker })
+		],
+		result: request
+	}
+}
+
+// ── filings ────────────────────────────────────────────────────────────────
+
+const quarterlyForms: readonly S.FormHandle[] = ["F941", "C3"]
+const filed = { form: Schema.Literals(S.Form.handles), period: Period }
+const FilingInput = Schema.Union([
+	Schema.Struct({ ...filed, method: Schema.Literal("Electronic"), on: Day, confirmation: Text }),
+	Schema.Struct({ ...filed, method: Schema.Literal("CertifiedMail"), mailedOn: Day, tracking: Text }),
+	Schema.Struct({ ...filed, method: Schema.Literal("Furnished"), on: Day })
+])
+type FilingInput = typeof FilingInput.Type
+
+/** A return as filed: how, and every line as the ledger computes it now.
+ * What is filed must equal the ledger; fix the ledger first if it doesn't. */
+const filingEdits = (facts: Facts, id: Uuid, request: FilingInput): Edit[] => {
+	const { form, period, method } = request
+	requirePeriod(period, quarterlyForms.includes(form) ? "quarter" : "year")
+	const lines = [...figures(form, periodOf(facts, period))].map(([line, value]) => ({
+		filing: id,
+		line,
+		value
+	}))
+	return [
+		...Db.insert("Filing", { id, form, period, method }),
+		...(request.method === "Electronic"
+			? Db.insert("Electronic", { filing: id, on: request.on, confirmation: request.confirmation })
+			: request.method === "CertifiedMail"
+				? Db.insert("CertifiedMail", { filing: id, mailedOn: request.mailedOn, tracking: request.tracking })
+				: Db.insert("Furnished", { filing: id, on: request.on })),
+		...Db.insert("FiledFigures", ...lines)
+	]
+}
+const fileReturn =
+	(request: FilingInput) =>
+	(facts: Facts): Db.Plan<object> => ({
+		edits: filingEdits(facts, filingId(request.form, request.period), request),
+		result: request
+	})
+
+/** A grandfathered filing gets its real method and its figures as the ledger
+ * computes them, once those details turn up. */
+const upgrade =
+	(request: FilingInput) =>
+	(facts: Facts): Db.Plan<object> => {
+		const filing = facts.Filing.find(
+			(row) => row.form === request.form && sameSpan(row.period, request.period)
+		)
+		const prior = filing && facts.Prior.find((row) => row.filing === filing.id)
+		if (filing && !prior && present(facts, filingEdits(facts, filing.id, request)))
+			return { edits: [], result: request }
+		if (!filing || !prior)
+			return refuse(
+				"NotPrior",
+				`${request.form} ${formatPeriod(request.period)} is not a grandfathered filing`
+			)
+		if (facts.Correction.some((row) => row.filing === filing.id))
+			refuse("Corrected", "This 941 has a 941-X, so its original figures can't be reproduced")
+		return {
+			edits: [
+				...Db.remove("Prior", prior),
+				...Db.remove("Filing", filing),
+				...filingEdits(facts, filing.id, request)
+			],
+			result: request
+		}
+	}
+
+const AmendInput = Schema.Struct({ period: Period, mailedOn: Day, tracking: Text })
+/** A 941-X mailed for a quarter: the corrected lines as the ledger computes
+ * them now. The originals are the 941's own figures. */
+const amend =
+	(request: typeof AmendInput.Type) =>
+	(facts: Facts): Db.Plan<object> => {
+		requirePeriod(request.period, "quarter")
+		const filing =
+			facts.Filing.find((row) => row.form === "F941" && sameSpan(row.period, request.period)) ??
+			refuse("F941Missing", `No 941 is recorded for ${formatPeriod(request.period)}`)
+		const current = figures("F941", periodOf(facts, request.period))
+		return {
+			edits: [
+				...Db.insert("Correction", {
+					filing: filing.id,
+					mailedOn: request.mailedOn,
+					tracking: request.tracking
+				}),
+				...Db.insert(
+					"CorrectedFigures",
+					...correctable.map((line) => ({ filing: filing.id, line, value: current.get(line) ?? 0n }))
+				)
+			],
+			result: request
+		}
+	}
+
+const DistributionInput = Schema.Struct({
+	year: Year,
+	account: Schema.Literals(S.PlanAccount.handles),
+	code: Schema.Literals(S.DistributionCode.handles),
+	gross: PositiveMoney,
+	taxable: Money
+})
+/** A Carry rollover (H) or conversion (G) that needs a 1099-R. */
+const planDistribution = (request: typeof DistributionInput.Type) => (): Db.Plan<object> => {
+	const move = S.PlanMove.handles.find((handle) => handle === `${request.account}_${request.code}`)
+	if (move === undefined)
+		return refuse(
+			"ImpliedConversion",
+			"After-tax conversions (AfterTax, G) are implied by AfterTax transfers"
+		)
+	return {
+		edits: Db.insert("PlanDistribution", {
+			year: BigInt(request.year),
+			move,
+			gross: request.gross,
+			taxable: request.taxable
+		}),
+		result: request
+	}
+}
+
+// ── setup ──────────────────────────────────────────────────────────────────
+
+const SetupInput = Schema.Struct({
+	business: Schema.Struct({ ein: Text, name: Text, twcAccount: Text }),
+	employee: Schema.Struct({ ssn: Text, firstName: Text, lastName: Text, address: Text }),
+	employedFrom: Day
+})
+const YearInput = Schema.Struct({
+	year: Year,
+	ssRate: Rate,
+	ssBase: Money,
+	medicareRate: Rate,
+	futaRate: Rate,
+	futaBase: Money,
+	sutaRate: Rate,
+	sutaBase: Money,
+	deferralLimit: Money,
+	additionsLimit: Money,
+	compensationLimit: Money,
+	wageCeiling: Money
+})
+const PlanInput = Schema.Struct({ year: Year, salary: PositiveMoney, fitPerCheck: Money })
+const ElectionInput = Schema.Struct({ year: Year, roth: Money, afterTax: Money, signedOn: Day })
+
+/** The one invariant bumbledb can't state over two columns: the Roth and
+ * after-tax elections together stay within 415(c). */
+const within415 = (
+	election: { roth: bigint; afterTax: bigint } | undefined,
+	rules: { additionsLimit: bigint } | undefined
+) => {
+	if (election && rules && election.roth + election.afterTax > rules.additionsLimit)
+		refuse(
+			"Over415c",
+			`Roth plus after-tax elections exceed the ${formatDollars(rules.additionsLimit)} 415(c) limit`
+		)
+}
+/** A year's row, replaced whole; the laws judge the new one. */
+const replace = <N extends Db.Name>(
+	name: N,
+	old: Fact<Db.Stored[N]> | undefined,
+	next: Fact<Db.Stored[N]>
+): Edit[] =>
+	old && canonicalJson(old) === canonicalJson(next)
+		? []
+		: [...(old ? Db.remove(name, old) : []), ...Db.insert(name, next)]
+
+const setYear =
+	(request: typeof YearInput.Type) =>
+	(facts: Facts): Db.Plan<object> => {
+		const { year, ...rules } = request
+		const row = { year: BigInt(year), span: yearSpan(year), ...rules }
+		within415(
+			facts.Election.find((election) => election.year === row.year),
+			row
+		)
+		return {
+			edits: replace(
+				"TaxYear",
+				facts.TaxYear.find((old) => old.year === row.year),
+				row
+			),
+			result: request
+		}
+	}
+const setPlan =
+	(request: typeof PlanInput.Type) =>
+	(facts: Facts): Db.Plan<object> => {
+		const row = { year: BigInt(request.year), salary: request.salary, fitPerCheck: request.fitPerCheck }
+		return {
+			edits: replace(
+				"PayPlan",
+				facts.PayPlan.find((old) => old.year === row.year),
+				row
+			),
+			result: request
+		}
+	}
+const setElection =
+	(request: typeof ElectionInput.Type) =>
+	(facts: Facts): Db.Plan<object> => {
+		const row = {
+			year: BigInt(request.year),
+			roth: request.roth,
+			afterTax: request.afterTax,
+			signedOn: request.signedOn
+		}
+		within415(
+			row,
+			facts.TaxYear.find((rules) => rules.year === row.year)
+		)
+		return {
+			edits: replace(
+				"Election",
+				facts.Election.find((old) => old.year === row.year),
+				row
+			),
+			result: request
+		}
+	}
+
+// ── the table ──────────────────────────────────────────────────────────────
+
+type Run = (input: never, ledger: string) => Effect.Effect<unknown, unknown, NativeRuntime>
+export type Op = { readonly summary: string; readonly input: Schema.Top; readonly run: Run }
+const op = <I extends Schema.Top>(
+	summary: string,
+	input: I,
+	run: (input: I["Type"], ledger: string) => Effect.Effect<unknown, unknown, NativeRuntime>
+): Op => ({ summary, input, run: run as Run })
+
+const writing =
+	<A>(plan: (input: A) => (facts: Facts) => Db.Plan<object>) =>
+	(input: A, ledger: string) =>
+		Effect.scoped(Effect.flatMap(Db.open(ledger), (db) => Db.write(db, plan(input))))
+const reading =
+	<A>(read: (input: A, facts: Facts) => unknown) =>
+	(input: A, ledger: string) =>
+		Effect.scoped(
+			Effect.flatMap(Db.open(ledger), (db) => Effect.map(Db.readFacts(db), ({ facts }) => read(input, facts)))
+		)
+
+export const ops: { readonly [name: string]: Op } = {
+	setup: op("Create the ledger: the business, its employee and the employment", SetupInput, (input, ledger) =>
+		Db.build(ledger, {
+			edits: [
+				...Db.insert("Business", input.business),
+				...Db.insert("Employee", input.employee),
+				...Db.insert("Employment", { span: { start: input.employedFrom, end: MAX_I64 } })
+			],
+			result: input
 		})
 	),
-	report: read(
-		"Year or quarter figures, bookkeeping and the work register",
+	"year.set": op("Set a tax year's rates, wage bases and limits", YearInput, writing(setYear)),
+	"plan.set": op("Set a year's salary target and FIT per paycheck", PlanInput, writing(setPlan)),
+	"election.set": op("Record the year's signed Carry election", ElectionInput, writing(setElection)),
+	"payroll.quote": op(
+		"Price a paycheck without posting it; shows what would block it",
+		PayrollInput,
+		(input, ledger) =>
+			Effect.scoped(Effect.flatMap(Db.open(ledger), (db) => Db.judge(db, payroll(input, true))))
+	),
+	"payroll.post": op("Post a paycheck; prints the wires to send", PayrollInput, writing(payroll)),
+	"payroll.correct": op(
+		"Reprice a posted paycheck's fit, roth or (latest only) gross",
+		CorrectInput,
+		writing(correct)
+	),
+	"transfer.record": op("Record a Mercury transfer by its Tracking ID", TransferInput, writing(transfer)),
+	"tax.paid": op(
+		"Record an EFTPS or TWC payment once its Mercury debit posted",
+		TaxPaidInput,
+		writing(taxPaid)
+	),
+	"filing.record": op("Record a filed return with every line as filed", FilingInput, writing(fileReturn)),
+	"filing.amend": op("Record a 941-X mailed for a quarter", AmendInput, writing(amend)),
+	"filing.upgrade": op(
+		"Give a grandfathered filing its real method and figures",
+		FilingInput,
+		writing(upgrade)
+	),
+	"plan.distribution": op(
+		"Record a Carry rollover or conversion for the 1099-R",
+		DistributionInput,
+		writing(planDistribution)
+	),
+	status: op(
+		"What blocks payroll, what comes due next, and the year so far",
+		Schema.Struct({ asOf: Schema.optional(Day) }),
+		reading((input, facts) => status(facts, input.asOf ?? todayIn(TIME_ZONE)))
+	),
+	report: op(
+		"A year's or quarter's forms, paychecks, distributions and tax payments",
 		Schema.Struct({
-			...business,
-			year: YearNumber,
+			year: Year,
 			quarter: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 4 })))
 		}),
-		(input, { asOf }) =>
-			Effect.gen(function* () {
-				return yield* report(yield* latest, input.business, input.year, input.quarter, asOf)
-			})
+		reading((input, facts) => report(facts, input.year, input.quarter))
 	),
-	"business.inspect": read(
-		"Business, employees, elections, allowances, accounts and budgets",
-		Schema.Struct({ business: Id }),
-		(input) =>
-			Effect.gen(function* () {
-				return yield* inspectProfiles(yield* latest, input.business)
-			})
+	export: op(
+		"Write every fact as canonical JSON: the backup",
+		Schema.Struct({ out: Schema.optional(Text) }),
+		(input, ledger) =>
+			Effect.scoped(
+				Effect.gen(function* () {
+					const { facts } = yield* Db.readFacts(yield* Db.open(ledger))
+					const out = input.out ?? Db.backupOf(ledger)
+					yield* Db.writeText(out, Db.exportFacts(facts))
+					return { out, facts: BigInt(Object.values(facts).reduce((total, rows) => total + rows.length, 0)) }
+				})
+			)
 	),
-	questions: read("Every question and its answer", Schema.Struct({ business: Id }), (input) =>
-		Effect.gen(function* () {
-			return yield* questions(yield* latest, input.business)
+	import: op("Create the ledger from an export", Schema.Struct({ file: Text }), (input, ledger) =>
+		Effect.flatMap(Db.readText(input.file), (text) => {
+			const edits = Db.importEdits(text)
+			return Db.build(ledger, { edits, result: { file: input.file, facts: BigInt(edits.length) } })
 		})
-	),
-	"filings.inspect": read("Filings, versions and submissions", Schema.Struct(business), (input, { asOf }) =>
-		Effect.gen(function* () {
-			return yield* inspectFilings(yield* latest, input.business, asOf)
-		})
-	),
-	"policy.inspect": read(
-		"Active policy, annual rules and coverage",
-		Schema.Struct({ business: Id }),
-		(input) =>
-			Effect.gen(function* () {
-				return yield* inspectPolicy(yield* latest, input.business)
-			})
-	),
-	"payroll.inspect": read(
-		"One calculation's figures and paycheck",
-		Schema.Struct({ business: Id, calculation: Id }),
-		(input) =>
-			Effect.gen(function* () {
-				return yield* inspectCalculation(yield* latest, input.business, input.calculation as Uuid)
-			})
-	),
-	"compensation.suggest": read(
-		"Suggest a gross from the remaining annual budget",
-		Schema.Struct({ business: Id, employee: Id, paidOn: Day, work: DaySpan }),
-		(input, { asOf }) =>
-			Effect.gen(function* () {
-				return yield* suggestGross(
-					yield* latest,
-					input.business,
-					input.employee,
-					civilDaySpan(input.work.start, input.work.end),
-					input.paidOn,
-					asOf
-				)
-			})
-	),
-	"artifact.audit": read(
-		"Every document, its Drive copy and locations; verify re-reads each document's bytes",
-		Schema.Struct({ verify: Schema.optional(Schema.Boolean), remote: Schema.optional(Nonblank) }),
-		(input) =>
-			Effect.gen(function* () {
-				const snapshot = yield* latest
-				const documents = yield* inspectDocuments(snapshot)
-				const verified = input.verify
-					? (yield* collectDocuments(snapshot, input.remote ?? "gdrive:", undefined)).map(
-							({ bytes, ...document }) => ({ ...document, length: BigInt(bytes.length) })
-						)
-					: []
-				return {
-					state: snapshot.stateStamp,
-					total: BigInt(documents.length),
-					unarchived: documents.filter((d) => !d.archived).map((d) => d.id),
-					documents,
-					verified
-				}
-			})
-	),
-	"command.resolve": read("Resolve a retained request's outcome", Schema.Struct({ request: Id }), (input) =>
-		resolveRequest(input.request)
-	),
-	businesses: read("Every business and its employees: ids and names", Schema.Struct({}), () =>
-		Effect.gen(function* () {
-			const snapshot = yield* latest
-			const employees = yield* relationRows(snapshot, S.Employee)
-			return (yield* relationRows(snapshot, S.Business)).map((business) => ({
-				id: business.id,
-				name: business.name,
-				employees: employees
-					.filter((employee) => employee.business === business.id)
-					.map((employee) => ({ id: employee.id, name: `${employee.firstName} ${employee.lastName}` }))
-			}))
-		})
-	),
-	"db.audit": read(
-		"Every fact digest, count and report projection",
-		Schema.Struct({ asOf: Schema.optional(Day) }),
-		(_, { asOf }) =>
-			Effect.gen(function* () {
-				return yield* auditLedger(yield* latest, asOf)
-			})
-	)
-} satisfies Record<string, Read>
-
-/** Maintenance outside the domain command log. A backup reads the open
- * ledger; verifying and restoring an archive never open the live ledger. */
-/** `ledger` ops open the configured ledger; `archive` ops work on files alone. */
-type Maintenance<Scope extends Op["scope"]> = {
-	readonly summary: string
-	readonly scope: Scope
-	readonly input: Schema.Top
-	readonly run: (payload: unknown) => Effect.Effect<unknown, unknown, EnvOf<Scope>>
-}
-type EnvOf<Scope extends Op["scope"]> = Scope extends "ledger" ? Env : ArchiveEnv
-const maintenanceOf = <S extends Schema.Top, Scope extends Op["scope"]>(
-	summary: string,
-	scope: Scope,
-	input: S,
-	run: (input: S["Type"]) => Effect.Effect<unknown, unknown, EnvOf<Scope>>
-): Maintenance<Scope> => ({ summary, scope, input, run: (payload) => run(decodeInput(input, payload)) })
-const maintenance = {
-	"db.backup": maintenanceOf(
-		"Back up the ledger to one new .tar.xz file (database only; documents stay in Drive)",
-		"ledger",
-		Schema.Struct({ output: Nonblank }),
-		backupLedger
-	),
-	"db.verify-backup": maintenanceOf(
-		"Restore a backup into a throwaway directory and check every fact",
-		"archive",
-		Schema.Struct({ archive: Nonblank }),
-		(input) => verifyArchive(input.archive)
-	),
-	"db.restore": maintenanceOf(
-		"Restore a backup into a new, empty directory and write its binding",
-		"archive",
-		Schema.Struct({ archive: Nonblank, directory: Nonblank, bindingOutput: Nonblank }),
-		restoreArchive
 	)
 }
 
-/** What `wagie apply` performs: the output to print and whether the process
- * should exit nonzero (a committed `ReconciliationRequired` opened a question
- * instead of doing what was asked). */
-export type Performed = { readonly output: unknown; readonly exitCode: 0 | 1 }
-type ArchiveEnv = Exclude<Env, Ledger>
-export type Op = {
-	readonly summary: string
-	readonly input: Schema.Top
-} & (
-	| {
-			readonly scope: "ledger"
-			readonly perform: (payload: unknown) => Effect.Effect<Performed, unknown, Env>
-	  }
-	| {
-			readonly scope: "archive"
-			readonly perform: (payload: unknown) => Effect.Effect<Performed, unknown, ArchiveEnv>
-	  }
-)
-const writeOp = (write: Write): Op => ({
-	summary: write.summary,
-	scope: "ledger",
-	input: write.input,
-	perform: (payload) =>
-		Effect.gen(function* () {
-			const receipt = yield* write.run(payload)
-			const output = write.readback ? yield* write.readback(receipt) : receipt
-			const reconciliation =
-				(receipt.outcome.kind === "committed" || receipt.outcome.kind === "no-change") &&
-				receipt.outcome.result.kind === "ReconciliationRequired"
-			return { output, exitCode: reconciliation ? 1 : 0 }
-		})
-})
-const maintenanceOp = (entry: Maintenance<"ledger"> | Maintenance<"archive">): Op => ({
-	summary: entry.summary,
-	input: entry.input,
-	...(entry.scope === "ledger"
-		? {
-				scope: "ledger",
-				perform: (payload: unknown) => Effect.map(entry.run(payload), (output) => ({ output, exitCode: 0 }))
-			}
-		: {
-				scope: "archive",
-				perform: (payload: unknown) => Effect.map(entry.run(payload), (output) => ({ output, exitCode: 0 }))
-			})
-})
-/** Every `apply` op by name: the domain writes and ledger maintenance. */
-export const ops: Record<string, Op> = {
-	...Object.fromEntries(Object.entries(writes).map(([name, write]) => [name, writeOp(write)])),
-	...Object.fromEntries(Object.entries(maintenance).map(([name, entry]) => [name, maintenanceOp(entry)]))
-}
-
-export const readAsOf = (asOf: UnixEpochDay | undefined, timeZone: string) =>
-	asOf === undefined ? today(timeZone) : Effect.succeed(asOf)
-
-export const refuseUnknown = (kind: string, name: string, known: readonly string[]) =>
-	Effect.fail(
-		new Refusal({ code: "UnknownOperation", message: `No ${kind} "${name}". Known: ${known.join(", ")}` })
-	)
-
-export const decodeInput = <S extends Schema.Top>(schema: S, payload: unknown): S["Type"] =>
-	parseStrict(schema as never, payload) as S["Type"]
-
-/** `wagie schema`: every op and read with its JSON Schema. */
-export const catalog = {
-	...Object.fromEntries(
-		Object.entries(ops).map(([name, op]) => [
-			name,
-			{ name, kind: "write", summary: op.summary, input: op.input }
-		])
-	),
-	...Object.fromEntries(
-		Object.entries(reads).map(([name, entry]) => [
-			name,
-			{ name, kind: "read", summary: entry.summary, input: entry.input }
-		])
-	)
-} as Record<string, { name: string; kind: "write" | "read"; summary: string; input: Schema.Top }>
-
-export { BookkeepingInput }
+/** Parse the payload against the op's input, then run it. */
+export const run = (name: string, payload: unknown, ledger = Db.ledgerPath) =>
+	Effect.suspend(() => {
+		const entry = (Object.hasOwn(ops, name) ? ops[name] : undefined) ?? refuse("UnknownOp", `No op "${name}"`)
+		return entry.run(parseStrict(entry.input as never, payload) as never, ledger)
+	})

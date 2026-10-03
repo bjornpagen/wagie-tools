@@ -1,200 +1,90 @@
-import {
-	type AnyField,
-	type AnyRelation,
-	decodeBoundaryField,
-	encodeBoundaryField,
-	type Fact,
-	fieldSchema,
-	type Infer,
-	interval,
-	u64,
-	uuid
-} from "@bjornpagen/bumbledb"
-import { Effect, Result, Schema, SchemaGetter, SchemaIssue, SchemaTransformation } from "effect"
-import { Dollars, formatDollars } from "../core/boundary.ts"
-import {
-	CivilDaySpan,
-	civilDayPoint,
-	civilDaySpan,
-	formatCalendarDate,
-	parseCalendarDate,
-	UnixEpochDay
-} from "../core/time.ts"
-import { DayText, EntityId, MAX_U64, Nonblank } from "../core/values.ts"
-import { TaxBand } from "../schema.ts"
-import { unitFor } from "./units.ts"
+import { Effect, Schema, SchemaGetter, SchemaIssue } from "effect"
+import { formatDollars, parseDollars } from "../core/boundary.ts"
+import { formatDate, formatPeriod, parseDate, parsePeriod, type Span } from "../core/time.ts"
+import { MAX_U64, Refusal } from "../core/values.ts"
 
-/** Command fields use BumbleDB's own value codec and descriptor-derived type.
- * Only the spelling at the boundary differs, and the field's unit decides it:
- * money is "1234.56", dates are "YYYY-MM-DD", spans are {start, endExclusive}.
- */
-export function inputField<F extends AnyField>(field: F): Schema.Codec<Infer<F>, unknown> {
-	const value = fieldSchema(field)
-	const closed = "closed" in field ? (field.closed as { handles: readonly string[] }).handles : undefined
-	const wire =
-		field.kind === "str"
-			? Nonblank
-			: field.kind === "uuid"
-				? EntityId
-				: closed
-					? Schema.Literals(closed as [string, ...string[]])
-					: field.kind === "bool"
-						? Schema.Boolean
-						: Schema.Unknown
-	return wire.pipe(
-		Schema.decodeTo(value, {
-			decode: SchemaGetter.transformOrFail((input) => {
-				const decoded = decodeBoundaryField(field, input)
-				if (Result.isFailure(decoded))
-					return Effect.fail(
-						new SchemaIssue.InvalidValue({ message: `Invalid ${field.kind} database value` })
-					)
-				return Effect.succeed(decoded.success)
-			}),
-			encode: SchemaGetter.transformOrFail((input) => {
-				const encoded = encodeBoundaryField(field, input)
-				if (Result.isFailure(encoded))
-					return Effect.fail(
-						new SchemaIssue.InvalidValue({ message: `Invalid ${field.kind} database value` })
-					)
-				return Effect.succeed(encoded.success)
-			})
+/** Inputs are parsed once, here, into the values the ledger stores. Nothing
+ * past this boundary re-checks a date, an amount or a tracking id. */
+
+const textCodec = <A>(
+	description: string,
+	type: Schema.Codec<A>,
+	decode: (text: string) => A,
+	encode: (value: A) => string
+) =>
+	Schema.String.annotate({ description }).pipe(
+		Schema.decodeTo(Schema.toType(type), {
+			decode: SchemaGetter.transformOrFail((text: string) =>
+				Effect.try({
+					try: () => decode(text),
+					catch: (cause) =>
+						new SchemaIssue.InvalidValue({
+							message: cause instanceof Refusal ? cause.message : String(cause)
+						})
+				})
+			),
+			encode: SchemaGetter.transform(encode)
 		})
 	)
+
+const cents = (text: string) => {
+	const value = parseDollars(text)
+	if (value < 0n || value > MAX_U64)
+		throw new Refusal({ code: "InvalidMoney", message: `Out of range: ${text}` })
+	return value
 }
 
-export const Id = inputField(uuid)
-export const commandFields = { request: Id, business: Id }
-/** A plain integer at the boundary: a year, a row, a sequence, a form count. */
-export const Count = Schema.Int.check(
-	Schema.isBetween({ minimum: Number.MIN_SAFE_INTEGER, maximum: Number.MAX_SAFE_INTEGER })
-).pipe(Schema.decodeTo(Schema.BigInt, SchemaTransformation.transform({ decode: BigInt, encode: Number })))
-export const YearNumber = Schema.Int.check(Schema.isBetween({ minimum: 2, maximum: 9997 }))
-export const Year = YearNumber.pipe(
-	Schema.decodeTo(Schema.BigInt, SchemaTransformation.transform({ decode: BigInt, encode: Number }))
+/** Non-negative money: "1234.56" at the boundary, cents inside. */
+export const Money = textCodec(
+	'Dollars with two decimals, e.g. "1234.56"',
+	Schema.BigInt,
+	cents,
+	formatDollars
 )
-export const Day = DayText.pipe(
-	Schema.decodeTo(Schema.toType(UnixEpochDay), {
-		decode: SchemaGetter.transformOrFail((value) =>
-			Effect.try({
-				try: () => parseCalendarDate(value),
-				catch: () => new SchemaIssue.InvalidValue({ message: "The Gregorian date does not exist" })
-			})
-		),
-		encode: SchemaGetter.transform(formatCalendarDate)
+export const PositiveMoney = Money.check(
+	Schema.makeFilter((value: bigint) => value > 0n || "Must be more than 0.00")
+)
+/** A civil date "2026-10-02" as an epoch day. */
+export const Day = textCodec("Civil date YYYY-MM-DD", Schema.BigInt, parseDate, formatDate)
+const SpanType = Schema.Struct({ start: Schema.BigInt, end: Schema.BigInt })
+/** "2026", "2026Q3" or "2026-10" as a half-open day interval. */
+export const Period = textCodec(
+	'A year "2026", quarter "2026Q3" or month "2026-10"',
+	SpanType,
+	parsePeriod,
+	(span: Span) => formatPeriod(span)
+)
+export const Year = Schema.Int.check(Schema.isBetween({ minimum: 1970, maximum: 9998 }))
+/** Basis points over 10,000: 620 is 6.2%. */
+export const Rate = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 10_000 })).pipe(
+	Schema.decodeTo(Schema.BigInt, {
+		decode: SchemaGetter.transform((value: number) => BigInt(value)),
+		encode: SchemaGetter.transform((value: bigint) => Number(value))
 	})
 )
-export const DayPoint = Day.pipe(
-	Schema.decodeTo(
-		Schema.toType(CivilDaySpan),
-		SchemaTransformation.transform({
-			decode: civilDayPoint,
-			encode: (span) => span.start
-		})
-	)
-)
-export const DayBounds = Schema.Struct({ start: Day, endExclusive: Day })
-export const DaySpan = DayBounds.pipe(
-	Schema.decodeTo(
-		Schema.toType(CivilDaySpan),
-		SchemaTransformation.transform({
-			decode: ({ start, endExclusive }) => civilDaySpan(start, endExclusive),
-			encode: ({ start, end }) => ({ start, endExclusive: end })
-		})
-	)
-)
-/** Money on the wage axis: [start, end) in dollars; "Infinity" is the native u64 ray end. */
-export const DollarBounds = Schema.Struct({
-	start: Dollars,
-	end: Schema.Union([
-		Dollars,
-		Schema.Literal("Infinity").pipe(
-			Schema.decodeTo(
-				Schema.BigInt,
-				SchemaTransformation.transform({ decode: () => MAX_U64, encode: () => "Infinity" as const })
-			)
-		)
-	])
-})
-export const DollarRange = DollarBounds.pipe(Schema.decodeTo(fieldSchema(interval(u64))))
+export const Text = Schema.String.check(Schema.isPattern(/\S/)).annotate({ description: "Non-blank text" })
 
-/** A money field: dollars at the boundary, the native field's range checked after. */
-export const money = <F extends AnyField>(field: F): Schema.Codec<Infer<F>, unknown> => {
-	const accepts = Schema.is(fieldSchema(field))
-	return Dollars.pipe(
-		Schema.decodeTo(Schema.toType(fieldSchema(field)), {
-			decode: SchemaGetter.transformOrFail((cents: bigint) =>
-				accepts(cents)
-					? Effect.succeed(cents as Infer<F>)
-					: Effect.fail(
-							new SchemaIssue.InvalidValue({ message: `Amount out of range: ${formatDollars(cents)}` })
-						)
-			),
-			encode: SchemaGetter.transform((cents) => cents as bigint)
-		})
-	) as unknown as Schema.Codec<Infer<F>, unknown>
-}
+/** Mercury's "Tracking ID", exactly as the mercury.csv column of that name: a
+ * wire or send-money id, or a 15-digit ACH trace for an IRS/TWC debit. A
+ * Mercury transaction UUID from a wire receipt is not one and fails here. */
+export const MercuryTrackingId = Schema.String.check(Schema.isPattern(/^(\d{8}MMQFMP4S\d{6}|\d{15})$/))
+	.annotate({ description: "Mercury Tracking ID: YYYYMMDDMMQFMP4S###### or a 15-digit ACH trace" })
+	.pipe(Schema.brand("MercuryTrackingId"))
+export type MercuryTrackingId = typeof MercuryTrackingId.Type
 
-/** The boundary codec for one column, chosen by its unit. */
-function columnCodec(name: string, field: AnyField): Schema.Codec<unknown, unknown> {
-	const unit = unitFor(name)
-	const isInterval = field.kind === "interval"
-	switch (unit) {
-		case "Money":
-			return money(field) as Schema.Codec<unknown, unknown>
-		case "MoneyRange":
-			return DollarRange as Schema.Codec<unknown, unknown>
-		case "Day":
-			return Day as Schema.Codec<unknown, unknown>
-		case "DayPoint":
-			return (isInterval ? DayPoint : Day) as Schema.Codec<unknown, unknown>
-		case "DayRange":
-			return DaySpan as Schema.Codec<unknown, unknown>
-		case "Count":
-			return (name === "year" ? Year : Count) as Schema.Codec<unknown, unknown>
-		default:
-			return inputField(field)
+/** Decode exactly: unknown keys refuse, and every problem is reported at once. */
+export const parseStrict = <S extends Schema.Codec<unknown, unknown>>(
+	shape: S,
+	input: unknown
+): S["Type"] => {
+	try {
+		return Schema.decodeUnknownSync(shape as never, { onExcessProperty: "error", errors: "all" })(
+			input
+		) as S["Type"]
+	} catch (error) {
+		throw new Refusal({
+			code: "InvalidInput",
+			message: error instanceof Error ? error.message : String(error)
+		})
 	}
 }
-
-type Overrides<R extends AnyRelation, K extends keyof Fact<R>> = Partial<{
-	readonly [P in K]: Schema.Codec<Fact<R>[P], unknown>
-}>
-type Fields<R extends AnyRelation, K extends keyof Fact<R>, O> = {
-	readonly [P in K]: P extends keyof O
-		? O[P]
-		: P extends "evidence"
-			? Schema.Codec<string, unknown>
-			: Schema.Codec<Fact<R>[P], unknown>
-}
-
-/** Pick the command's writable columns. Each column's boundary spelling is
- * derived from its unit; an override may only narrow it (a literal source, say).
- * The decoded value must still pass the native codec.
- */
-export function inputFields<
-	R extends AnyRelation,
-	const K extends readonly (keyof Fact<R> & string)[],
-	const O extends Overrides<R, K[number]> = Record<never, never>
->(source: R, names: K, overrides?: O): Fields<R, K[number], O> {
-	return Object.fromEntries(
-		names.map((name) => {
-			const field = source.fields[name]
-			if (!field) throw new Error(`Unknown input column ${source.name}.${name}`)
-			// Evidence is prose at the boundary; the command stores it as a Statement.
-			if (name === "evidence" && !overrides?.[name]) return [name, Nonblank]
-			const accepts = Schema.is(fieldSchema(field))
-			const codec: Schema.Codec<unknown, unknown> = overrides?.[name] ?? columnCodec(name, field)
-			return [
-				name,
-				codec.check(Schema.makeFilter((value) => accepts(value) || `Invalid ${source.name}.${name}`))
-			]
-		})
-		// Object.fromEntries erases the key/value relationship established above.
-	) as Fields<R, K[number], O>
-}
-
-export const TaxBandInput = Schema.Struct({
-	wages: DollarRange,
-	...inputFields(TaxBand, ["numerator", "role"])
-})

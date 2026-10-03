@@ -1,221 +1,150 @@
 ---
 name: wagie-tools
-description: Operate a Wagie Tools payroll ledger — payroll, Roth wires, tax payments, filings, retirement bookkeeping, policy and backups — through its JSON ops.
+description: Run payroll, wires, tax payments, filings, distributions and the mega backdoor Roth for Emu Farm LLC through the wagie-tools ledger's JSON ops.
 ---
 
 # Wagie Tools
 
-Three verbs, one JSON object each. Everything else is data.
+```sh
+node src/cli.ts <op> '<json>'
+node src/cli.ts                  # every op with a one-line summary
+```
+
+- Money is dollars with two decimals, as a string: `"8000.00"`, `"0.01"`.
+- Days are `"YYYY-MM-DD"`. Periods are `"2026"`, `"2026Q3"` or `"2026-10"`.
+- Unknown keys refuse. A refusal prints `{code, message}` and exits 1.
+- Every write prints `"outcome": "committed"`, or `"no-change"` when the same
+  facts are already there. Running a write twice is safe.
+
+**The Tracking ID.** Every transfer is recorded by Mercury's Tracking ID: the
+`Tracking ID` column of the Mercury CSV export, `YYYYMMDDMMQFMP4S######` for
+wires and send-money transfers, a 15-digit ACH trace for IRS and TWC debits.
+The transaction UUID on a wire receipt is not a Tracking ID and is refused.
+
+**Start with `status`.** Its `blockers` are what stops payroll today, each with
+the op that clears it; `upcoming` is what opens later; the rest is the year so
+far (salary against target, Roth and after-tax room, distributions, payments,
+credits, overpaid paychecks). Payroll is blocked until every blocker is gone.
+
+## Payroll
+
+1. `status` shows no blockers.
+2. Quote the paycheck. `by` is `"plan"` (keeps the year on its salary target),
+   `"gross"` with `gross`, or `"net"` with `net` (what lands after any
+   recovery). `roth` is optional; `fit` defaults to the year's plan.
+
+   ```sh
+   node src/cli.ts payroll.quote '{"paidOn":"2026-10-09","input":{"by":"plan","roth":"500.00"}}'
+   ```
+
+3. Post it with the same input: `payroll.post`. It prints the wires to send.
+4. Send both wires from Mercury: net pay to the owner, the Roth deferral to
+   Carry Roth (QCRH000004).
+5. Once they show as Sent, export the Mercury CSV and record each with its
+   Tracking ID:
+
+   ```sh
+   node src/cli.ts transfer.record '{"kind":"NetPay","paidOn":"2026-10-09","mercury":"20261009MMQFMP4S000123","sentOn":"2026-10-09","amount":"1234.56"}'
+   node src/cli.ts transfer.record '{"kind":"RothDeferral","paidOn":"2026-10-09","mercury":"20261009MMQFMP4S000124","sentOn":"2026-10-09","amount":"500.00"}'
+   ```
+
+## Federal deposit (EFTPS)
+
+`status` lists each month's 941 deposit, due the 15th of the next month. Pay it
+in EFTPS, and once the debit has posted in Mercury, export the Mercury CSV and
+record the payment with its EFT number and the debit's Tracking ID:
 
 ```sh
-pnpm cli read   --input -    # {"read": "status", "business": "…"}
-pnpm cli apply  --input -    # {"op": "payroll.post", "request": "…", …}
-pnpm cli schema [NAME]       # every op and read, or one op's JSON Schema
-pnpm cli id                  # a fresh UUIDv7 for a request or operation
+node src/cli.ts tax.paid '{"tracker":"270667581302337","account":"Federal941","kind":"Deposit","period":"2026Q4","amount":"649.12","initiatedOn":"2026-11-12","mercury":"061036010012345","sentOn":"2026-11-13"}'
 ```
 
-`--input FILE` reads a file; `-` or nothing reads stdin. `--binding FILE`
-selects another store; the default is `private/binding.json`, and startup
-never creates an empty ledger. Output is JSON.
+`period` is the quarter the deposit pays (the year for `Federal940`). `kind` is
+`Deposit`, `Balance` (a balance due with a return or notice) or `Penalty` (a
+notice's penalty or interest, which never counts toward tax).
 
-## Units at the boundary
+## Texas UI (TWC)
 
-- Money is dollars with exactly two decimals, as a string: `"8000.00"`, `"0.01"`.
-  Never cents, never a number, never `"8000"`.
-- Dates are `"YYYY-MM-DD"`. A span is `{"start": …, "endExclusive": …}`.
-- Ids are UUIDv7 strings. Mint request and operation ids with `pnpm cli id`.
-- `evidence` is prose: why this write is justified (the approval, the receipt,
-  the document). The ledger stores each distinct text once and shows it back
-  as text on every fact that cites it.
-- Input is strict: unknown keys refuse. A refusal names every bad path at once.
+The same, with account `TexasUI`, the quarter, and the TWC confirmation number
+as `tracker`.
 
-Units come from field names and never vary: `amount`, `gross`, `roth`, `limit`,
-`taxable` are always money; `paidOn`, `dueOn`, `signedOn` are always dates;
-`period`, `valid`, `work`, `span` are always spans; `year`, `row`, `sequence`,
-`forms`, `numerator`, `denominator` are plain JSON integers. Closed vocabularies
-(`kind`, `form`, `issuer`, `filingStatus`, `distributionCode`, …) are listed as
-`enum` in `schema`; anything outside the list refuses.
+## Mega backdoor Roth
 
-## Start every task with `status`
+Wire the after-tax contribution from Mercury to Carry's Mega Backdoor Roth
+account (QCEP000007), then record it with the Carry contribution year. It is an
+S-corp distribution, and Carry converts it in-plan.
 
-```json
-{"read": "status", "business": "BUSINESS_ID"}
+```sh
+node src/cli.ts transfer.record '{"kind":"AfterTax","year":2026,"mercury":"20261015MMQFMP4S000200","sentOn":"2026-10-15","amount":"5000.00"}'
 ```
 
-Don't know the business id? `{"read": "businesses"}` lists every business and
-its employees with their ids.
+## Distribution
 
-`status` returns only what is open:
+```sh
+node src/cli.ts transfer.record '{"kind":"Distribution","mercury":"20261015MMQFMP4S000201","sentOn":"2026-10-15","amount":"8000.00"}'
+```
 
-- `blockers`: items that stop new payroll right now. Clear these first.
-- `open`: every open item, blockers included. Each carries `rule`, `label`,
-  `amount`, `dueOn`, and `next`: the op that moves it forward and the input
-  fields the ledger already knows. Add `request`, `evidence`, and whatever
-  only the outside world knows (a Mercury id, a date, an amount).
-- `readiness`: notes on figures (an open review question, unattributed recovery,
-  an unarchived document). They do not block.
+## Quarter end
 
-`{"read": "work", …}` returns every item including complete ones. `asOf`
-(`"YYYY-MM-DD"`) on status, work, report and filings.inspect changes the view.
+1. `node src/cli.ts report '{"year":2026,"quarter":4}'` prints every line of
+   the 941 and the C-3.
+2. Prepare both from it. Mail the 941 by certified mail; file the C-3 online.
+   Keep the PDFs and the USPS receipt in Drive.
+3. Record them. The figures stored are the report's; if the return differs,
+   fix the ledger first.
 
-Other reads: `report` (`year`, optional `quarter`), `business.inspect`,
-`questions`, `filings.inspect`, `policy.inspect`, `payroll.inspect`
-(`calculation`), `compensation.suggest`, `artifact.audit`, `command.resolve`
-(`request`), `businesses`, `db.audit` (every fact digest; large).
-
-## Writes
-
-Every write is `{"op": NAME, "request": UUIDv7, "business": ID, …}`. The
-request id is the intent's identity: keep the same id and payload on retry, and
-never reuse one for a different intent. A committed receipt has
-`outcome.result`; payroll ops add figure readback. A `ReconciliationRequired`
-result exits nonzero and opens a question in `status`.
-
-If a write is interrupted, `{"read": "command.resolve", "request": ID}` first.
-Committed or no-change settles it. Anything else: read the reason before doing
-anything, and never treat uncertainty as permission to send money again.
-
-Run `pnpm cli schema OP` before an unfamiliar op. It is the authority on fields.
-
-## Recipes
-
-### Regular payroll
-
-1. `status`. Clear blockers through their `next` ops.
-2. Gross: use `compensation.suggest` (`employee`, `paidOn`, `work`) or the
-   owner's figure. Federal income tax withholding is a supplied, evidenced
-   input, never a default or a guess.
-3. Calculate:
-   ```json
-   {"op": "payroll.calculate", "request": "…", "business": "…", "employee": "…",
-    "purpose": {"kind": "NewWage", "paidOn": "2026-10-07", "gross": "2301.37", "roth": "0.00",
-                "work": {"start": "2026-09-30", "endExclusive": "2026-10-07"}},
-    "fit": {"amount": "0.01", "evidence": "…"}, "evidence": "…"}
+   ```sh
+   node src/cli.ts filing.record '{"form":"F941","period":"2026Q4","method":"CertifiedMail","mailedOn":"2027-01-20","tracking":"70201810000002650241"}'
+   node src/cli.ts filing.record '{"form":"C3","period":"2026Q4","method":"Electronic","on":"2027-01-15","confirmation":"40679135"}'
    ```
-   The readback shows `paycheck`: automatic recovery of prior employee FICA,
-   Roth, and `cash`. Nothing is posted yet.
-4. Send the Mercury payment for exactly `cash`.
-5. Post, with the real Mercury transaction id, bank date and amount:
-   ```json
-   {"op": "payroll.post", "request": "…", "business": "…", "calculation": "…",
-    "evidence": "Owner approved; Mercury sent",
-    "settlement": {"kind": "Bank", "reference": "MERCURY_ID", "paidOn": "2026-10-07", "amount": "2125.31"}}
-   ```
-   Posting checks the register at the real employer date and refuses a stale
-   calculation. `{"kind": "NoTransfer"}` only when cash and Roth are both zero.
 
-### Employee Roth wire (zero cash pay)
+## Year end
 
-The owner wants exactly `$X` to reach the plan as employee Roth. Do not solve
-for gross by hand: `RothOnly` finds the smallest gross whose paycheck leaves
-exactly zero cash after employee FICA, supplied FIT and automatic recovery.
+`report '{"year":2026}'` prints the 940, W-2, W-3 and, when there was plan
+activity (after-tax contributions or a `plan.distribution`), the 1099-R and
+1096. Pay any FUTA balance (`tax.paid`, `Federal940`). Each form takes the
+methods it allows:
 
-```json
-{"op": "payroll.calculate", "request": "…", "business": "…", "employee": "…",
- "purpose": {"kind": "RothOnly", "paidOn": "2026-09-16", "roth": "8000.00",
-             "work": {"start": "2026-09-09", "endExclusive": "2026-09-16"}},
- "fit": {"amount": "0.01", "evidence": "Owner-directed withholding"},
- "evidence": "Owner requested an $8,000.00 Roth wire"}
+| Form | Method |
+|---|---|
+| `F941`, `F940`, `F1096` | `CertifiedMail` |
+| `W3` | `CertifiedMail` or `Electronic` (SSA BSO) |
+| `C3` | `Electronic` |
+| `W2`, `F1099R` | `Furnished` (the recipient's copy, with the day it was given) |
+
+```sh
+node src/cli.ts filing.record '{"form":"W2","period":"2026","method":"Furnished","on":"2027-01-20"}'
 ```
 
-Readback: `figures.input.gross` is the wage, `paycheck.cash` is `0.00`. Show the
-owner gross, each deduction, Roth and taxes remaining payable, then:
+A Carry rollover (H) or conversion (G) other than the after-tax conversions
+needs its 1099-R figures recorded:
 
-1. Owner (or you, if authorized) sends the wire to the plan provider for `roth`.
-2. `payroll.post` with `settlement.amount` = `roth` and the Mercury id. This one
-   write creates the wage, deduction, bank movement, contribution and funding
-   link. Do not also fund the contribution.
-3. Download the Mercury wire receipt (Created or Sent both count).
-   `artifact.record` its file, then `artifact.attach-bank` to the movement (its
-   id is in the post readback or `report`). The `roth-remittance` blocker
-   completes here.
-4. That is the whole job. The Mercury receipt is the evidence; the plan
-   provider's own confirmation is not tracked and never asked for.
-
-Requirements the ledger enforces: a current signed election and allowance for
-the year (`election.document`, `election.record`), the year's retirement
-`retirement.annual`, and remaining capacity. `EmployeeRothDeferral` and
-`EmployeeAfterTax` are different sources; use the one requested.
-
-### Provider year-end reports
-
-`retirement.supplied-report` records a provider's form as stated, never derived:
-`plan`, `year`, `artifact`, `evidence` and `report`, either
-`{"form": "F1099R", "account", "distributionCode": "G" | "H", "gross", "taxable", "basis"?}`
-(box 5 only when the form states it) or `{"form": "F1096", "forms", "gross"}`.
-`retirement.confirm-reported-conversion` then confirms a receipt's conversion
-from that report when the provider supplied no event date.
-
-### Record a tax payment already sent
-
-`payment.record`: `account`, `sentOn`, `amount`, `evidence`, `references`
-(`[{issuer: "EFTPS" | "TWC", value}]`, the acknowledgement numbers), `artifacts`,
-optional `settlement: {settlesOn, evidence}`. Then `payment.reconcile` with the
-complete attribution: `payments: [{payment, period, evidence, entries: [{revision}], adjustments}]`.
-Entries plus evidenced adjustments must equal actual money. A negative entry
-needs `negativeApplicationEvidence`. Recording does not submit a return. A
-negative entry settled without a payment is `payment.dispose` with
-`disposition`: `Refunded`, `Credited` or `Abandoned`, plus evidence.
-
-### Prepare and submit a form
-
-`filings.prepare` (`filing`, `evidence`, `documents: [{slot, role, artifact, part, file}]`)
-freezes the reported basis and verifies bytes. After the actual submission,
-`filings.submit` (`version`, `manifest`, `method`): `{"kind": "Digital", "submittedOn", "evidence", "reference"?}`,
-or `mailing.record` first then `{"kind": "CertifiedMail", "mailing"}`.
-`Grandfathered` is for imported history only. `filings.amend` opens a
-correction; `filings.deadline` records an evidenced change; `payroll.revise-tax`
-reassesses a posted wage.
-
-### Questions
-
-An open question is a fact: `question.ask` with a `subject` of kind `Review`
-(employee, year, topic), `PlanSetup` (plan), `Bookkeeping`, or `TaxAccount`
-(account). The kind decides what it holds back; `question.answer` closes it
-with evidence. Answer only from evidence that addresses the question.
-
-### Documents
-
-Documents live in Google Drive, never in the database or its backups; the
-ledger keeps each one's Drive file id and SHA-256. `artifact.record` hashes a
-local file. Upload the same bytes to Drive, then `artifact.archive` (`artifact`,
-`driveFileId`, `remote`, `evidence`) downloads them by id with rclone, checks the
-hash and records the copy. A document without a Drive copy shows in
-`status` under `readiness`. `artifact.audit` with `verify: true` re-reads every document.
-
-### Policy year
-
-`policy.install` a release with reviewed calendars, then `policy.annual`,
-`policy.evidence`, `policy.refresh` per authority, `policy.activate`.
-`retirement.annual` each year. Values never roll forward; missing coverage
-blocks payroll and says so in `status`.
-
-### Backups
-
-A backup is one `.tar.xz` file holding the database and nothing else. All three
-are `apply` ops:
-
-```json
-{"op": "db.backup", "output": "Wagie Tools - CURRENT.bumbledb.tar.xz"}
-{"op": "db.verify-backup", "archive": "Wagie Tools - CURRENT.bumbledb.tar.xz"}
-{"op": "db.restore", "archive": "Wagie Tools - CURRENT.bumbledb.tar.xz", "directory": "private/ledger", "bindingOutput": "private/binding.json"}
+```sh
+node src/cli.ts plan.distribution '{"year":2026,"account":"Roth","code":"H","gross":"1000.00","taxable":"0.00"}'
 ```
 
-`db.backup` refuses an existing output path and refuses while a write is
-unresolved. `db.verify-backup` restores into a throwaway directory and checks
-every fact against the digest captured at backup time. `db.restore` needs a new,
-empty directory and a binding path that doesn't exist yet. The Drive copy is
-`Wagie Tools - CURRENT.bumbledb.tar.xz` in the Wagie Tools folder: replace it
-with a fresh `db.backup` after changes worth keeping.
+From December 1, `status` lists next year's setup: `year.set` (rates, wage
+bases and limits), `plan.set` (salary target and FIT per paycheck) and
+`election.set` (the signed Carry election).
 
-## Rules
+## Correction
 
-- Sending money and submitting forms are external. The ledger records their
-  evidence. An absent record does not prove an action never happened.
-- Never invent a Mercury id, a date, or a withholding amount. Never reuse a
-  historical figure as a default.
-- Native rules price tax from stored policy. Do not add a second calculator.
-- Keep company identities, account numbers, real amounts and private Drive ids
-  out of this repository. They live in the ledger and under `private/`.
-- Retained requests, receipts and evidence live under `private/` and are never
-  force-added to Git.
+`payroll.correct` reprices a posted paycheck over the same earnings start:
+`fit` or `roth` on any paycheck, `gross` only on the year's latest. Then follow
+the blockers:
+
+- underpaid: wire the difference and `transfer.record` it as `NetPay`;
+- overpaid: nothing to do; the next `payroll.post` recovers it;
+- a deposit short: pay it;
+- a filed quarter changed: mail a 941-X and record it with
+  `filing.amend '{"period":"2026Q3","mailedOn":"…","tracking":"…"}'`.
+
+A grandfathered filing whose real details turn up takes them with
+`filing.upgrade`, with the same input as `filing.record`.
+
+## Backup
+
+```sh
+node src/cli.ts export        # private/Wagie Tools - CURRENT.facts.json
+```
+
+`import '{"file":"…"}'` restores an export into a fresh ledger.

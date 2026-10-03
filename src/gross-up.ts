@@ -1,96 +1,71 @@
-import type { Uuid } from "@bjornpagen/bumbledb"
-import { Effect, Option } from "effect"
-import { Refusal } from "./core/values.ts"
-import { relationRows } from "./queries.ts"
-import { settlePaycheck } from "./recoveries.ts"
-import type { Snapshot } from "./runtime.ts"
-import * as S from "./schema.ts"
+import type { Fact } from "@bjornpagen/bumbledb"
+import { Schema } from "effect"
+import { type Check, computeCheck, nearest, netOf, type Rules } from "./check.ts"
+import { formatDollars } from "./core/boundary.ts"
+import { max, min, Refusal, refuse } from "./core/values.ts"
+import { Money, PositiveMoney } from "./schema/input.ts"
+import type { PayPlan } from "./schema.ts"
 
-type Claim = Parameters<typeof settlePaycheck>[3][number]
+/** How a paycheck is sized, parsed once at the boundary. */
+export const CheckInput = Schema.Union([
+	Schema.Struct({ by: Schema.Literal("gross"), gross: PositiveMoney, roth: Schema.optional(Money) }),
+	Schema.Struct({ by: Schema.Literal("net"), net: Money, roth: Schema.optional(Money) }),
+	Schema.Struct({ by: Schema.Literal("plan"), roth: Schema.optional(Money) })
+])
+export type CheckInput = typeof CheckInput.Type
 
-/** Round weighted/denominator to the nearest integer, ties away from zero —
- * the rounding mode `calculatedAmounts` passes to the native `mulDiv`. */
-const nearest = (weighted: bigint, denominator: bigint) => (2n * weighted + denominator) / (2n * denominator)
+/** The smallest gross whose paycheck nets exactly `net`. One more cent of
+ * gross moves net by +1, 0 or −1 (when both FICA roundings tick), so every
+ * target is reached: binary-search the boundary, then take the first exact
+ * hit just below it. */
+export const grossForNet = (rules: Rules, ytd: bigint, fit: bigint, roth: bigint, net: bigint): bigint => {
+	const netAt = (gross: bigint) => netOf(computeCheck(rules, ytd, gross, fit, roth))
+	let high = max(1n, net + fit + roth)
+	while (netAt(high) < net) high *= 2n
+	let low = 0n
+	while (high - low > 1n) {
+		const middle = (low + high) / 2n
+		if (netAt(middle) >= net) high = middle
+		else low = middle
+	}
+	for (let gross = max(1n, high - 200n); gross <= high + 200n; gross++) if (netAt(gross) === net) return gross
+	return refuse("NetUnreachable", `No gross nets exactly ${formatDollars(net)}`)
+}
 
-/** A search probe only. RothOnly uses it to choose a gross; the calculation it
- * then stores is priced by the native engine (calculations.ts), and posting
- * refuses unless that native paycheck is exactly zero cash. It reads the same
- * stored bands and applies the same slice/weight/round-once rule. */
-const probe = (
-	schedules: readonly {
-		denominator: bigint
-		bands: readonly { start: bigint; end: bigint; numerator: bigint }[]
-	}[],
-	earning: { start: bigint; end: bigint }
-) =>
-	schedules.reduce((total, schedule) => {
-		const weighted = schedule.bands.reduce((sum, band) => {
-			const start = band.start > earning.start ? band.start : earning.start
-			const end = band.end < earning.end ? band.end : earning.end
-			return end > start ? sum + (end - start) * band.numerator : sum
-		}, 0n)
-		return total + nearest(weighted, schedule.denominator)
-	}, 0n)
+/** The gross that keeps the year on its salary target, paying weekly: the
+ * remaining salary spread over the days left, so the last check lands on it. */
+export const planGross = (plan: Fact<typeof PayPlan>, rules: Rules, ytd: bigint, paidOn: bigint): bigint => {
+	const remaining = plan.salary - ytd
+	if (remaining <= 0n) return refuse("SalaryReached", `The ${plan.year} salary target is already paid`)
+	return min(remaining, max(1n, nearest(remaining * 7n, rules.span.end - paidOn)))
+}
 
-/** Smallest gross whose paycheck leaves exactly zero cash after current
- * employee tax, the supplied FIT, automatic recovery of prior employee FICA,
- * and the requested Roth. Nothing is written. */
-export const solveRothOnlyGross = (options: {
-	snapshot: Snapshot
-	employeeSchedules: readonly Uuid[]
-	prior: bigint
+/** Size and price one paycheck. Refuses a Roth the paycheck can't hold. */
+export const priceCheck = (
+	rules: Rules,
+	plan: Fact<typeof PayPlan> | undefined,
+	ytd: bigint,
+	paidOn: bigint,
+	input: CheckInput,
 	fit: bigint
-	roth: bigint
-	claims: readonly Claim[]
-}) =>
-	Effect.gen(function* () {
-		if (options.roth <= 0n)
-			return yield* Effect.fail(
-				new Refusal({ code: "RothRequired", message: "Supply a positive Roth amount" })
-			)
-		const allSchedules = yield* relationRows(options.snapshot, S.RateSchedule)
-		const allBands = yield* relationRows(options.snapshot, S.TaxBand)
-		const schedules = options.employeeSchedules.map((id) => {
-			const schedule = allSchedules.find((row) => row.id === id)
-			if (!schedule) throw new Refusal({ code: "RateCoverageMissing", message: `Missing schedule ${id}` })
-			return {
-				denominator: schedule.denominator,
-				bands: allBands
-					.filter((row) => row.schedule === id)
-					.map((row) => ({ start: row.wages.start, end: row.wages.end, numerator: row.numerator }))
-			}
-		})
-		const cash = (gross: bigint): Option.Option<bigint> => {
-			const withheld = probe(schedules, { start: options.prior, end: options.prior + gross }) + options.fit
-			if (withheld > gross) return Option.none()
-			try {
-				return Option.some(settlePaycheck(gross, withheld, options.roth, options.claims).cash)
-			} catch {
-				return Option.none()
-			}
-		}
-		const nonnegative = (gross: bigint) => {
-			const value = cash(gross)
-			return Option.isSome(value) && value.value >= 0n
-		}
-		let high = options.roth + options.fit
-		while (!nonnegative(high)) high *= 2n
-		let low = 0n
-		while (high - low > 1n) {
-			const middle = (low + high) / 2n
-			if (nonnegative(middle)) high = middle
-			else low = middle
-		}
-		// Per-component rounding can move cash one cent against the trend, so
-		// settle on the smallest exact zero near the monotone boundary.
-		for (let gross = high > 200n ? high - 200n : 1n; gross <= high + 200n; gross++) {
-			const value = cash(gross)
-			if (Option.isSome(value) && value.value === 0n) return gross
-		}
-		return yield* Effect.fail(
-			new Refusal({
-				code: "RothOnlyUnsolvable",
-				message: "No gross near the boundary leaves exactly zero cash; calculate a NewWage explicitly"
-			})
-		)
-	})
+): Check => {
+	const roth = input.roth ?? 0n
+	const gross =
+		input.by === "gross"
+			? input.gross
+			: input.by === "net"
+				? grossForNet(rules, ytd, fit, roth, input.net)
+				: planGross(
+						plan ?? refuse("PayPlanMissing", `Set the ${rules.year} pay plan: plan.set`),
+						rules,
+						ytd,
+						paidOn
+					)
+	const check = computeCheck(rules, ytd, gross, fit, roth)
+	const room = netOf(check) + roth
+	if (room < 0n)
+		throw new Refusal({ code: "WithholdingExceedsGross", message: "FIT and FICA exceed the gross" })
+	if (roth > room)
+		throw new Refusal({ code: "RothTooLarge", message: `At most ${formatDollars(room)} of Roth fits` })
+	return check
+}

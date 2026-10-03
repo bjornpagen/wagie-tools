@@ -4,9 +4,6 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-overrides:
-  '@effect/platform-node-shared': 4.0.0-rc.112
-
 importers:
 
   .:
@@ -14,18 +11,9 @@ importers:
       '@bjornpagen/bumbledb':
         specifier: 1.3.1
         version: 1.3.1(effect@4.0.0-rc.112)
-      '@bjornpagen/bumbledb-log':
-        specifier: 1.3.1
-        version: 1.3.1(@bjornpagen/bumbledb@1.3.1(effect@4.0.0-rc.112))(effect@4.0.0-rc.112)(redis@6.2.1)
-      '@effect/platform-node':
-        specifier: 4.0.0-rc.112
-        version: 4.0.0-rc.112(effect@4.0.0-rc.112)(redis@6.2.1)
       effect:
         specifier: 4.0.0-rc.112
         version: 4.0.0-rc.112
-      uuid:
-        specifier: 14.0.1
-        version: 14.0.1
     devDependencies:
       '@biomejs/biome':
         specifier: 2.5.8
@@ -117,32 +105,11 @@ packages:
     cpu: [x64]
     os: [linux]
 
-  '@bjornpagen/bumbledb-log@1.3.1':
-    resolution: {integrity: sha512-jj+7nUZxuEFSRsjCXVToOiUqkkdNzBmbbMxddKPH7TE101mUOgQpbewFgMaZF82TODArdaIbeWw+Ont9nlG49A==}
-    engines: {node: '>=24'}
-    hasBin: true
-    peerDependencies:
-      '@bjornpagen/bumbledb': 1.3.1
-      effect: 4.0.0-rc.112
-
   '@bjornpagen/bumbledb@1.3.1':
     resolution: {integrity: sha512-bNOCVRkp8IwFrmt4Fjqt+6jIjSa88DZBzKmHPid4Q7SIho0ghoY7xo5smfFyQUE48Ya5i1UfLjtYYQXdmo+hUg==}
     engines: {node: '>=24'}
     peerDependencies:
       effect: 4.0.0-rc.112
-
-  '@effect/platform-node-shared@4.0.0-rc.112':
-    resolution: {integrity: sha512-ttjz0xKamFN7vL8pNDYVwddJLjZvqKePc05djlz2VcdaKbLsnYbtMnL1rbOfHgEnIUSHGh7FkjaN4DM1Ov81sQ==}
-    engines: {node: '>=18.0.0'}
-    peerDependencies:
-      effect: ^4.0.0-rc.112
-
-  '@effect/platform-node@4.0.0-rc.112':
-    resolution: {integrity: sha512-/BMAcdNGQQskLmI0Zoa95KfTZkr9HV9N4NSxaSrusG6GeW6Ulp9KvZ+Rlaiw8lnOt43CXjFLdfll5/k5rxL4hQ==}
-    engines: {node: '>=18.0.0'}
-    peerDependencies:
-      effect: ^4.0.0-rc.112
-      redis: '>=5.0.0 <7.0.0'
 
   '@msgpackr-extract/msgpackr-extract-darwin-arm64@3.0.4':
     resolution: {integrity: sha512-LCkGo6JDfaBhgST7UpPWgNgLINpcpabaHfyz5OBx75nUYxBsaEPxjnyNjWpeb/xBup/682QnBfRBy2/LvPutZQ==}
@@ -174,47 +141,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@redis/bloom@6.2.1':
-    resolution: {integrity: sha512-huQgNLaCIZfQ9SeLn4q9124uOUd8HbZDYHwwUzNcRgHqCHiHKl2dDxMqJCeWh8cMqZAoWuHR8XnWbDMIf+o7ag==}
-    engines: {node: '>= 20.0.0'}
-    peerDependencies:
-      '@redis/client': ^6.2.1
-
-  '@redis/client@6.2.1':
-    resolution: {integrity: sha512-LzxBY7SIBvvJiyCgcaJZZakE3fJrZZ++i24+EDW9fKpCl68D35uJcKFpZZwCfOoG9WZTbyZlMzMeM0gtOAMU9Q==}
-    engines: {node: '>= 20.0.0'}
-    peerDependencies:
-      '@node-rs/xxhash': ^1.1.0
-      '@opentelemetry/api': '>=1 <2'
-    peerDependenciesMeta:
-      '@node-rs/xxhash':
-        optional: true
-      '@opentelemetry/api':
-        optional: true
-
-  '@redis/json@6.2.1':
-    resolution: {integrity: sha512-AFIUJ8Gj0DaaSBHYuSt8+O0oYWM+50OK1c0OmodB7XERIA8+BbyV3O4v76f9iccWasd1/7qjfZTpuzexUaZtrQ==}
-    engines: {node: '>= 20.0.0'}
-    peerDependencies:
-      '@redis/client': ^6.2.1
-
-  '@redis/search@6.2.1':
-    resolution: {integrity: sha512-2vfOAOyYFE7UUw3sBBlkqqruBtOUS4HRY5MtW4hp83llrwvtrTE4r22CEqXddlV+54zkLxBE4nmsIJ/dpezQrQ==}
-    engines: {node: '>= 20.0.0'}
-    peerDependencies:
-      '@redis/client': ^6.2.1
-
-  '@redis/time-series@6.2.1':
-    resolution: {integrity: sha512-kiYniph04dJOole+L359B6C9E+jYS2uDP7hca6Onj0xF38ZIpyxARO0Iq0W4ZRn1e8Q6vqW00QFZVSMRA/2Ijw==}
-    engines: {node: '>= 20.0.0'}
-    peerDependencies:
-      '@redis/client': ^6.2.1
-
   '@types/node@26.2.0':
     resolution: {integrity: sha512-5IviulTZeRNp2vAJ514cc/HUlY5nZ9fCbq9DMyC52BrhFZACo3nI0R7qBxhQmo/d27NFe96ur/b7Wwxklda+kg==}
-
-  '@types/ws@8.18.1':
-    resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     resolution: {integrity: sha512-MTKKkWB7p/0E9xi1d1tHtZ5PiLkGEMIq88pK2CubZjOsLtYTLqhgIgi6zepFa+9GHZ6h05NMCkQxGKiPXMxXtQ==}
@@ -339,10 +267,6 @@ packages:
   arkregex@0.0.8:
     resolution: {integrity: sha512-PJcx6G1kQTgLKPUbeYlYecDRaKq15AMSGVajlKFYWlPeJRQL+j3dKE6tyMs40HZ99djS1l9Vhl3ezAHy9JBIqQ==}
 
-  cluster-key-slot@1.1.2:
-    resolution: {integrity: sha512-RMr0FhtfXemyinomL4hrWcYJxmX6deFdCxpJzhDttxgO1+bcCnkk+9drydLVDmAMG7NE6aN/fl4F7ucU/90gAA==}
-    engines: {node: '>=0.10.0'}
-
   detect-libc@2.1.2:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
@@ -353,11 +277,6 @@ packages:
   fast-check@4.9.0:
     resolution: {integrity: sha512-7ms6T7SybUev/PQITciI0yLM2pOSFy5zpG8Ty7tQofcVaQUvrMXp6CBwqF6fThLCLOrfBtuHAtwq6Yu4XPCllg==}
     engines: {node: '>=12.17.0'}
-
-  mime@4.1.0:
-    resolution: {integrity: sha512-X5ju04+cAzsojXKes0B/S4tcYtFAJ6tTMuSPBEn9CPGlrWr8Fiw7qYeLT0XyH80HSoAoqWCaz+MWKh22P7G1cw==}
-    engines: {node: '>=16'}
-    hasBin: true
 
   msgpackr-extract@3.0.4:
     resolution: {integrity: sha512-4kmO/MdyUIkLIvTPr8VHLil4AtoKIoniWPIEk5+CDy0xnWC84azhSFmuJ7PxZdsYtiP5kEeQsORAVIeMgxT+Hw==}
@@ -373,10 +292,6 @@ packages:
   pure-rand@8.4.2:
     resolution: {integrity: sha512-vvuOGgcuPJAirlHvuQw1TrOiw7ptaIXXmIbNuiNOY6lNGJJH49PQ1Kj4nd783nPdQhQdicgOjVI2yI/9BD6/Ng==}
 
-  redis@6.2.1:
-    resolution: {integrity: sha512-Z9VHtgYs48PiQC77X9O2Er8Hj4T+5BtFjT91/vi5Is1D04N72cA946ZslM1ImJw8ZctFBZWAVjM7S5wJNeHMpg==}
-    engines: {node: '>= 20.0.0'}
-
   typescript@7.0.2:
     resolution: {integrity: sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA==}
     engines: {node: '>=16.20.0'}
@@ -384,26 +299,6 @@ packages:
 
   undici-types@8.3.0:
     resolution: {integrity: sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ==}
-
-  undici@8.10.2:
-    resolution: {integrity: sha512-/y4/bH9YNU5hi9NIrpOuvGXFcxrj3CMrV+/AYpowAYTpHn8gX/XPFjNy766FPoYY0miQhdW977JFWKGNhBdwyQ==}
-    engines: {node: '>=22.19.0'}
-
-  uuid@14.0.1:
-    resolution: {integrity: sha512-6ZxzVpzDXDa3bJWaHilVayA+BH/1zmxCJoVgvmqJnid/gPoKHxUrS/aC/T6LGQtNHT+XHG9fXPJB4d+IrU30Ew==}
-    hasBin: true
-
-  ws@8.21.3:
-    resolution: {integrity: sha512-201TZ/kPWxoPr/OKWjquZR1SWKXcvxdH+e1xrx89b3YbmzLMFCLfnaG1HFIgWzJOEWZ7MvpK++odZufgYR50Rw==}
-    engines: {node: '>=10.0.0'}
-    peerDependencies:
-      bufferutil: ^4.0.1
-      utf-8-validate: '>=5.0.2'
-    peerDependenciesMeta:
-      bufferutil:
-        optional: true
-      utf-8-validate:
-        optional: true
 
 snapshots:
 
@@ -453,16 +348,6 @@ snapshots:
   '@bjornpagen/bumbledb-linux-x64@1.3.1':
     optional: true
 
-  '@bjornpagen/bumbledb-log@1.3.1(@bjornpagen/bumbledb@1.3.1(effect@4.0.0-rc.112))(effect@4.0.0-rc.112)(redis@6.2.1)':
-    dependencies:
-      '@bjornpagen/bumbledb': 1.3.1(effect@4.0.0-rc.112)
-      '@effect/platform-node': 4.0.0-rc.112(effect@4.0.0-rc.112)(redis@6.2.1)
-      effect: 4.0.0-rc.112
-    transitivePeerDependencies:
-      - bufferutil
-      - redis
-      - utf-8-validate
-
   '@bjornpagen/bumbledb@1.3.1(effect@4.0.0-rc.112)':
     dependencies:
       arkregex: 0.0.8
@@ -471,26 +356,6 @@ snapshots:
       '@bjornpagen/bumbledb-darwin-arm64': 1.3.1
       '@bjornpagen/bumbledb-linux-arm64': 1.3.1
       '@bjornpagen/bumbledb-linux-x64': 1.3.1
-
-  '@effect/platform-node-shared@4.0.0-rc.112(effect@4.0.0-rc.112)':
-    dependencies:
-      '@types/ws': 8.18.1
-      effect: 4.0.0-rc.112
-      ws: 8.21.3
-    transitivePeerDependencies:
-      - bufferutil
-      - utf-8-validate
-
-  '@effect/platform-node@4.0.0-rc.112(effect@4.0.0-rc.112)(redis@6.2.1)':
-    dependencies:
-      '@effect/platform-node-shared': 4.0.0-rc.112(effect@4.0.0-rc.112)
-      effect: 4.0.0-rc.112
-      mime: 4.1.0
-      redis: 6.2.1
-      undici: 8.10.2
-    transitivePeerDependencies:
-      - bufferutil
-      - utf-8-validate
 
   '@msgpackr-extract/msgpackr-extract-darwin-arm64@3.0.4':
     optional: true
@@ -510,33 +375,9 @@ snapshots:
   '@msgpackr-extract/msgpackr-extract-win32-x64@3.0.4':
     optional: true
 
-  '@redis/bloom@6.2.1(@redis/client@6.2.1)':
-    dependencies:
-      '@redis/client': 6.2.1
-
-  '@redis/client@6.2.1':
-    dependencies:
-      cluster-key-slot: 1.1.2
-
-  '@redis/json@6.2.1(@redis/client@6.2.1)':
-    dependencies:
-      '@redis/client': 6.2.1
-
-  '@redis/search@6.2.1(@redis/client@6.2.1)':
-    dependencies:
-      '@redis/client': 6.2.1
-
-  '@redis/time-series@6.2.1(@redis/client@6.2.1)':
-    dependencies:
-      '@redis/client': 6.2.1
-
   '@types/node@26.2.0':
     dependencies:
       undici-types: 8.3.0
-
-  '@types/ws@8.18.1':
-    dependencies:
-      '@types/node': 26.2.0
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     optional: true
@@ -602,8 +443,6 @@ snapshots:
     dependencies:
       '@ark/util': 0.56.2
 
-  cluster-key-slot@1.1.2: {}
-
   detect-libc@2.1.2:
     optional: true
 
@@ -615,8 +454,6 @@ snapshots:
   fast-check@4.9.0:
     dependencies:
       pure-rand: 8.4.2
-
-  mime@4.1.0: {}
 
   msgpackr-extract@3.0.4:
     dependencies:
@@ -640,17 +477,6 @@ snapshots:
     optional: true
 
   pure-rand@8.4.2: {}
-
-  redis@6.2.1:
-    dependencies:
-      '@redis/bloom': 6.2.1(@redis/client@6.2.1)
-      '@redis/client': 6.2.1
-      '@redis/json': 6.2.1(@redis/client@6.2.1)
-      '@redis/search': 6.2.1(@redis/client@6.2.1)
-      '@redis/time-series': 6.2.1(@redis/client@6.2.1)
-    transitivePeerDependencies:
-      - '@node-rs/xxhash'
-      - '@opentelemetry/api'
 
   typescript@7.0.2:
     optionalDependencies:
@@ -676,9 +502,3 @@ snapshots:
       '@typescript/typescript-win32-x64': 7.0.2
 
   undici-types@8.3.0: {}
-
-  undici@8.10.2: {}
-
-  uuid@14.0.1: {}
-
-  ws@8.21.3: {}

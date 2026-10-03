@@ -6,7 +6,7 @@
 		"useIgnoreFile": true
 	},
 	"files": {
-		"includes": ["**", "!private", "!migrations/*/schema.json", "!migrations/*/schema.ts"]
+		"includes": ["**", "!private"]
 	},
 	"formatter": {
 		"indentStyle": "tab",
