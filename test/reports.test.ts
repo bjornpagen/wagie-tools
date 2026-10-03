@@ -209,3 +209,13 @@ test("W-2 box 13 is checked for a year with Roth deferrals or after-tax contribu
 	})
 	assert.equal(await box13(), 1)
 })
+
+test("a year's tax payments are those toward its periods, whenever made", async () => {
+	const ledger = await ledger2026()
+	await deposit(ledger, "2026Q4", "10.00", "2027-01-12")
+	await deposit(ledger, "2027Q1", "20.00", "2027-02-10")
+	const periods = async (year: number) =>
+		((await op(ledger, "report", { year })).taxPayments as { period: string }[]).map((row) => row.period)
+	assert.deepEqual(await periods(2026), ["2026Q4"])
+	assert.deepEqual(await periods(2027), ["2027Q1"])
+})

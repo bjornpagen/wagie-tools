@@ -195,7 +195,11 @@ export const report = (facts: Facts, year: number, quarter?: number) => {
 				sentRoth: check.sentRoth
 			})),
 		distributions: { amount: sum(distributions.map((row) => row.amount)), transfers: distributions },
-		taxPayments: facts.TaxPayment.filter((row) => row.initiatedOn.start < span.end)
+		// Payments toward the span's periods, as its returns' payment lines count
+		// them: a January deposit for December belongs to the year before.
+		taxPayments: facts.TaxPayment.filter(
+			(row) => span.start <= row.period.start && row.period.end <= span.end
+		)
 			.map((row) => {
 				const mercury = debit(row.tracker)?.transfer
 				return {
