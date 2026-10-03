@@ -116,7 +116,9 @@ test("each write round-trips and an identical re-run is no change", async () => 
 	await assert.rejects(op(ledger, "filing.correct", { ...correction, tracking: "9400100000000000000005" }), {
 		code: "Corrected"
 	})
-	await assert.rejects(op(ledger, "filing.correct", { ...correction, form: "C3" }), { code: "InvalidInput" })
+	await assert.rejects(op(ledger, "filing.correct", { ...correction, form: "F1096" }), {
+		code: "InvalidInput"
+	})
 	// Recording a return again is no change, whatever has happened since; any
 	// other record of it refuses.
 	assert.equal((await op(ledger, "filing.record", f941)).outcome, "no-change")
@@ -325,6 +327,11 @@ test("with no op, the command line lists the ops", async () => {
 		listed.map((entry) => entry.op),
 		[
 			"setup",
+			"party.set",
+			"registration.set",
+			"custody.set",
+			"employment.end",
+			"employment.start",
 			"policy.set",
 			"plan.set",
 			"election.set",
@@ -345,4 +352,33 @@ test("with no op, the command line lists the ops", async () => {
 	const exit = await runtime.runPromiseExit(cli(["status", "[]"]))
 	assert.ok(Exit.isFailure(exit))
 	assert.deepEqual(describeCause(exit.cause), [{ code: "InvalidJson", message: "Give one JSON object" }])
+})
+
+test("setup facts change one at a time: parties, accounts, registrations and employment", async () => {
+	const ledger = await ledger2026()
+	const moved = {
+		role: "Employee",
+		name: "Pat Owner",
+		tin: "000-00-0001",
+		address: "2 Oak St, Austin TX 78702"
+	}
+	assert.deepEqual(await twice(ledger, "party.set", moved), moved)
+	assert.equal((await read(ledger)).Party.find((row) => row.role === "Employee")?.address, moved.address)
+	const custody = { account: "Roth", custodian: "Carry", number: "QX0009" }
+	assert.deepEqual(await twice(ledger, "custody.set", custody), custody)
+	const registration = { state: "TX", number: "00-000000-1" }
+	assert.deepEqual(await twice(ledger, "registration.set", registration), registration)
+	await paid(ledger, "2026-01-09", { by: "gross", gross: "2000.00" })
+	await assert.rejects(op(ledger, "employment.end", { lastDay: "2026-01-08" }), { code: "PaidAfter" })
+	await assert.rejects(op(ledger, "employment.start", { from: "2026-03-01", state: "TX" }), {
+		code: "Employed"
+	})
+	assert.deepEqual(await twice(ledger, "employment.end", { lastDay: "2026-01-31" }), {
+		lastDay: "2026-01-31"
+	})
+	const after = { paidOn: "2026-02-06", input: { by: "gross", gross: "1.00" } }
+	assert.notEqual((await op(ledger, "payroll.quote", after)).laws, "admitted")
+	const back = { from: "2026-03-01", state: "TX" }
+	assert.deepEqual(await twice(ledger, "employment.start", back), back)
+	assert.equal((await read(ledger)).Employment.length, 2)
 })

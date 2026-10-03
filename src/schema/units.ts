@@ -46,6 +46,7 @@ export const unitOf = {
 	dueOn: "Day",
 	paidOn: "Day",
 	from: "Day",
+	lastDay: "Day",
 	// Half-open day intervals: "2026", "2026Q3", "2026-10".
 	period: "Period",
 	span: "Period",

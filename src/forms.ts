@@ -282,12 +282,38 @@ export const reported941 = correctable941.filter((line) => line !== "F941_7")
 /** Lines that depend on payments made after a return was filed. */
 export const paymentLine = (line: LineHandle) => lines[line].paid === true
 
-const valuesOf = (rows: Facts["FiledFigures"], filing: Uuid): ReadonlyMap<LineHandle, bigint> =>
-	new Map(rows.filter((row) => row.filing === filing).map((row) => [row.line, row.value] as const))
-/** A filed return's figures as they stand: each line as its correction
- * restates it, else as filed. */
-export const latest = (facts: Facts, filing: Uuid): ReadonlyMap<LineHandle, bigint> =>
-	new Map([...valuesOf(facts.FiledFigures, filing), ...valuesOf(facts.CorrectedFigures, filing)])
+const valuesOf = (
+	rows: readonly { readonly line: LineHandle; readonly value: bigint }[]
+): ReadonlyMap<LineHandle, bigint> => new Map(rows.map((row) => [row.line, row.value] as const))
+/** A filed return's corrections, oldest first. */
+export const correctionsOf = (facts: Facts, filing: Uuid) =>
+	facts.Correction.filter((row) => row.filing === filing).sort((a, b) => (a.mailedOn < b.mailedOn ? -1 : 1))
+/** A filed return's figures as they stood before a day: as filed, then each
+ * correction mailed before it restating its lines. Without a day, as they
+ * stand now. */
+export const latest = (facts: Facts, filing: Uuid, before?: bigint): ReadonlyMap<LineHandle, bigint> =>
+	new Map([
+		...valuesOf(facts.FiledFigures.filter((row) => row.filing === filing)),
+		...correctionsOf(facts, filing)
+			.filter((correction) => before === undefined || correction.mailedOn < before)
+			.flatMap((correction) => [
+				...valuesOf(
+					facts.CorrectedFigures.filter(
+						(row) => row.filing === filing && row.mailedOn === correction.mailedOn
+					)
+				)
+			])
+	])
+/** What each form's correction is called. */
+export const correctionName: { readonly [F in FormHandle]: string } = {
+	F941: "941-X",
+	F940: "amended 940",
+	W2: "W-2c",
+	W3: "W-3c",
+	C3: "amended C-3",
+	F1099R: "corrected 1099-R",
+	F1096: "1096"
+}
 
 /** The correction a filed return calls for: each correctable line the ledger
  * now computes differently from how the return stands, once a fact it reports
@@ -317,10 +343,13 @@ export const restated = (
 			return { line, original, corrected: value, difference: value - original }
 		})
 export type Restatement = ReturnType<typeof restated>[number]
-/** A filed return's correction as mailed: each line it restates, as filed and
- * as corrected. */
-export const mailed = (facts: Facts, filing: Uuid) =>
-	restated(valuesOf(facts.FiledFigures, filing), valuesOf(facts.CorrectedFigures, filing))
+/** A correction as mailed: each line it restates, as the return stood just
+ * before it and as corrected. */
+export const mailed = (facts: Facts, filing: Uuid, mailedOn: bigint) =>
+	restated(
+		latest(facts, filing, mailedOn),
+		valuesOf(facts.CorrectedFigures.filter((row) => row.filing === filing && row.mailedOn === mailedOn))
+	)
 
 /** A 941-X's column 4: the tax each difference carries, rounded per line:
  * taxable wages at both shares of their tax, FIT and line 7 at face value,

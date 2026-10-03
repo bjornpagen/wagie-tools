@@ -299,16 +299,28 @@ test("one filing per form and period", () =>
 		"functionality"
 	))
 
-test("a correction restates at least one correctable line of the return it corrects", async () => {
-	const correction = (filing: Uuid) =>
-		insert("Correction", { filing, mailedOn: parseDate("2026-05-01"), tracking: "9400" })
-	const restated = (filing: Uuid, lines: readonly LineHandle[]) =>
-		insert("CorrectedFigures", ...lines.map((line) => ({ filing, line, value: 1n })))
-	await refuses([...correction(c3), ...restated(c3, ["C3_tax"])], "containment")
+test("each correction restates at least one correctable line of the return it corrects", async () => {
+	const may1 = parseDate("2026-05-01")
+	const correction = (filing: Uuid, mailedOn = may1) =>
+		insert("Correction", { filing, mailedOn, tracking: "9400" })
+	const restated = (filing: Uuid, lines: readonly LineHandle[], mailedOn = may1) =>
+		insert("CorrectedFigures", ...lines.map((line) => ({ filing, mailedOn, line, value: 1n })))
 	await refuses([...correction(f941), ...restated(f941, ["F941_12"])], "containment")
 	await refuses([...correction(f941), ...restated(f941, ["F1099R_Roth_H_5"])], "containment")
+	await refuses([...correction(f941), ...restated(f941, ["F941_3"], parseDate("2026-05-02"))], "containment")
 	await refuses(correction(f941), "capacity")
 	assert.equal(await judge(ledger, [...correction(f941), ...restated(f941, ["F941_3"])]), "admitted")
+	assert.equal(await judge(ledger, [...correction(c3), ...restated(c3, ["C3_tax"])]), "admitted")
+	const june1 = parseDate("2026-06-01")
+	assert.equal(
+		await judge(ledger, [
+			...correction(f941),
+			...restated(f941, ["F941_3"]),
+			...correction(f941, june1),
+			...restated(f941, ["F941_3"], june1)
+		]),
+		"admitted"
+	)
 	const r = filingId("F1099R", yearSpan(2025))
 	assert.equal(
 		await judge(ledger, [

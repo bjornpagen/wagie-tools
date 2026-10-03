@@ -356,8 +356,8 @@ test("a 941-X owes its column 4, even a cent away from a recompute", async () =>
 	})
 	const report = await op(ledger, "report", { year: 2026, quarter: 1 })
 	assert.equal((report.forms as { F941: { lines: { F941_12: string } } }).F941.lines.F941_12, "153.02")
-	const forms = report.forms as { F941: { correction: { line27: string } } }
-	assert.equal(forms.F941.correction.line27, "0.00")
+	const forms = report.forms as { F941: { corrections: { line27: string }[] } }
+	assert.equal(forms.F941.corrections[0]?.line27, "0.00")
 	assert.deepEqual(federal941(await blockers(ledger, "2026-05-01")), [])
 	assert.deepEqual((await status(ledger, "2026-05-01")).credits, [])
 })
@@ -448,4 +448,115 @@ test("a 941-X is mailed after its 941, under a tracking number of its own", asyn
 	await assert.rejects(op(ledger, "filing.record", { ...q2, tracking: correction.tracking }), {
 		code: "TrackingUsed"
 	})
+})
+
+test("net pay Mercury sent is recorded even after a correction lowered it, and recovered", async () => {
+	const ledger = await ledger2026()
+	const posted = await op(ledger, "payroll.post", { paidOn: "2026-01-09", input: check })
+	await op(ledger, "payroll.correct", { paidOn: "2026-01-09", fit: "100.01" })
+	const wire = { paidOn: "2026-01-09", sentOn: "2026-01-09" }
+	await op(ledger, "transfer.record", {
+		kind: "NetPay",
+		...wire,
+		mercury: sendMoney(),
+		amount: posted.net as string
+	})
+	await op(ledger, "transfer.record", {
+		kind: "RothDeferral",
+		...wire,
+		mercury: sendMoney(),
+		amount: "500.00"
+	})
+	assert.deepEqual((await status(ledger, "2026-01-16")).overpaid, [
+		{ paidOn: "2026-01-09", excess: "100.00" }
+	])
+	const next = await paid(ledger, "2026-01-16", check)
+	assert.deepEqual(next.recovered, [{ paidOn: "2026-01-09", amount: "100.00" }])
+})
+
+const owed = async (ledger: string, asOf: string, what: string) =>
+	((await status(ledger, asOf)).blockers as { what: string; amount?: string }[])
+		.filter((item) => item.what === what)
+		.map((item) => item.amount ?? "")
+
+test("a quarter takes a second 941-X, each owing its own column 4", async () => {
+	const ledger = await ledger2026()
+	await paid(ledger, "2026-01-09", check)
+	await file941(ledger)
+	const x = (mailedOn: string, tracking: string) =>
+		op(ledger, "filing.correct", { form: "F941", period: "2026Q1", mailedOn, tracking })
+	await op(ledger, "payroll.correct", { paidOn: "2026-01-09", fit: "10.01" })
+	await x("2026-05-01", "9400100000000000000002")
+	await op(ledger, "payroll.correct", { paidOn: "2026-01-09", fit: "20.01" })
+	assert.deepEqual(await owed(ledger, "2026-05-02", "File a 941-X"), [""])
+	await assert.rejects(x("2026-05-01", "9400100000000000000003"), { code: "Corrected" })
+	await assert.rejects(x("2026-04-30", "9400100000000000000003"), { code: "BeforeFiling" })
+	await x("2026-06-01", "9400100000000000000003")
+	assert.deepEqual(await owed(ledger, "2026-06-01", "941-X balance"), ["10.00", "10.00"])
+})
+
+test("wages changed under a filed C-3 or 940 block until the amended return is filed, which owes the difference", async () => {
+	const ledger = await ledger2026()
+	await paid(ledger, "2026-01-02", { by: "gross", gross: "4000.00" })
+	await paid(ledger, "2026-01-09", { by: "gross", gross: "4000.00" })
+	await op(ledger, "filing.record", {
+		form: "C3",
+		period: "2026Q1",
+		method: "Electronic",
+		on: "2026-04-02",
+		confirmation: "1"
+	})
+	await op(ledger, "payroll.correct", { paidOn: "2026-01-09", gross: "5500.00" })
+	assert.deepEqual(await owed(ledger, "2026-04-03", "File an amended C-3"), [""])
+	await op(ledger, "filing.correct", { form: "C3", period: "2026Q1", mailedOn: "2026-04-03", tracking: "2" })
+	assert.deepEqual(await owed(ledger, "2026-04-03", "File an amended C-3"), [])
+	assert.deepEqual(await owed(ledger, "2026-04-03", "amended C-3 balance"), ["27.00"]) // 9,000.00 taxable now, 8,000.00 filed
+
+	const year = await ledger2026()
+	await paid(year, "2026-01-02", { by: "gross", gross: "6000.00" })
+	const f940 = { form: "F940", period: "2026", method: "CertifiedMail", mailedOn: "2027-01-20" }
+	await op(year, "filing.record", { ...f940, tracking: "9400100000000000000020" })
+	await op(year, "payroll.correct", { paidOn: "2026-01-02", gross: "7000.00" })
+	assert.deepEqual(await owed(year, "2027-01-21", "File an amended 940"), [""])
+	await op(year, "filing.correct", {
+		form: "F940",
+		period: "2026",
+		mailedOn: "2027-01-21",
+		tracking: "9400100000000000000021"
+	})
+	assert.deepEqual(await owed(year, "2027-01-21", "amended 940 balance"), ["6.00"])
+})
+
+test("a W-2c and its W-3c go out together under one tracking number, without blocking payroll", async () => {
+	const ledger = await ledger2026()
+	await paid(ledger, "2026-01-09", check)
+	await op(ledger, "filing.record", { form: "W2", period: "2026", method: "Furnished", on: "2027-01-20" })
+	const w3 = { form: "W3", period: "2026", method: "CertifiedMail", mailedOn: "2027-01-20" }
+	await op(ledger, "filing.record", { ...w3, tracking: "9400100000000000000030" })
+	await op(ledger, "payroll.correct", { paidOn: "2026-01-09", fit: "10.01" })
+	const lines = ((await status(ledger, "2027-01-21")).mismatches as { line: string; next?: string }[]).map(
+		({ line, next }) => [line, next]
+	)
+	assert.deepEqual(lines.sort(), [
+		["W2_2", "filing.correct"],
+		["W3_2", "filing.correct"]
+	])
+	const sent = { period: "2026", mailedOn: "2027-02-01", tracking: "9400100000000000000031" }
+	await op(ledger, "filing.correct", { form: "W2", ...sent })
+	await op(ledger, "filing.correct", { form: "W3", ...sent })
+	assert.deepEqual((await status(ledger, "2027-02-01")).mismatches, [])
+})
+
+test("more than $50,000 of 941 tax in the lookback stops payroll; so does $100,000 in a month", async () => {
+	const ledger = await ledger2026()
+	const big = (paidOn: string, fit: string) => ({ paidOn, input: { by: "gross", gross: "60000.00" }, fit })
+	await op(ledger, "payroll.post", big("2026-01-09", "45000.00"))
+	await assert.rejects(op(ledger, "payroll.quote", big("2026-01-16", "50000.00")), { code: "DepositNextDay" })
+	const semiweekly = async (asOf: string, list: "blockers" | "upcoming") =>
+		((await status(ledger, asOf))[list] as { what: string; period?: string }[])
+			.filter((item) => item.what.startsWith("Semiweekly"))
+			.map((item) => item.period)
+	assert.deepEqual(await semiweekly("2026-12-31", "upcoming"), ["2027"])
+	assert.deepEqual(await semiweekly("2027-01-04", "blockers"), ["2027"])
+	assert.deepEqual(await semiweekly("2028-01-03", "blockers"), [])
 })

@@ -39,6 +39,18 @@ owner works, and the Carry account holding each plan account.
 node src/cli.ts setup '{"employer":{"name":"…","tin":"…","address":"…"},"employee":{…},"plan":{…},"registrations":[{"state":"TX","number":"…"}],"employment":{"from":"2026-01-02","state":"TX"},"custody":{"Pretax":{"custodian":"Carry","number":"…"},"AfterTax":{…},"Roth":{…}}}'
 ```
 
+## Changing setup
+
+Each replaces one fact whole; a re-run is no change:
+
+```sh
+node src/cli.ts party.set '{"role":"Employee","name":"…","tin":"…","address":"…"}'
+node src/cli.ts registration.set '{"state":"TX","number":"…"}'
+node src/cli.ts custody.set '{"account":"Roth","custodian":"Carry","number":"…"}'
+node src/cli.ts employment.end '{"lastDay":"2027-06-30"}'
+node src/cli.ts employment.start '{"from":"2027-09-01","state":"TX"}'
+```
+
 ## Each year's policy
 
 From December 1, `status` shows next year's policy as upcoming; from January 1
@@ -98,6 +110,12 @@ node src/cli.ts tax.paid '{"tracker":"270000000000001","account":"Federal941","k
 Once a quarter's 941 is filed, the months on its line 16 are what the quarter
 owes, whatever a later recompute says.
 
+Deposits are scheduled monthly only. More than $50,000 of 941 tax in a year's
+lookback period (July 1 two years before through June 30 of the year before)
+makes the business a semiweekly depositor, and `status` blocks payroll that
+year; a paycheck that would put $100,000 of 941 tax in one month refuses
+(`DepositNextDay`).
+
 ## Texas UI (TWC)
 
 The same, with account `TexasUI`, the quarter, and the TWC confirmation number
@@ -116,7 +134,9 @@ node src/cli.ts transfer.record '{"kind":"AfterTax","year":2026,"mercury":"20261
 ```
 
 A wire past `status`'s `afterTax.room` refuses: what the election leaves, and
-415(c), the year's pay with the salary target standing in for pay to come.
+415(c), the year's pay with the salary target standing in for pay to come. A
+contribution counts toward a year only if sent in it or within 30 days after
+(by January 30).
 
 ## Rollover
 
@@ -175,7 +195,8 @@ node src/cli.ts filing.record '{"form":"W2","period":"2026","method":"Furnished"
 gross. Then follow the blockers:
 
 - underpaid: wire the difference and `transfer.record` it as `NetPay`;
-- overpaid: nothing to do; the next `payroll.post` recovers it;
+- overpaid: nothing to do; the next `payroll.post` recovers it. Net pay
+  already sent before the correction is still recorded as sent;
 - a deposit short: pay it;
 - a filed quarter's wages or FIT changed: the quarter's `report` shows the
   941-X under `forms.F941.correctionDue`, each line as filed and as it should
@@ -198,10 +219,22 @@ certified mail, give the owner Copy B, and record it:
 node src/cli.ts filing.correct '{"form":"F1099R","period":"2025","mailedOn":"…","tracking":"…"}'
 ```
 
-A correction restates only the lines that changed; the rest stand as filed. It
-is mailed after the return it corrects, under a tracking number of its own. A
-return takes one correction. Once corrected 1099-Rs are recorded, the original
-1096 stands as filed and leaves `mismatches`.
+Every return but the 1096 can be corrected, as often as needed, one
+correction a day, each after the last:
+
+- `F940` (an amended 940) and `C3` (an amended C-3) work like the 941-X:
+  wages changed under a filed one block payroll until the correction is
+  recorded, and it owes the change in its liability line when sent. Pay it as
+  a `Balance`. For a C-3 adjusted online, `mailedOn` is the day filed and
+  `tracking` the TWC confirmation.
+- `W2` and `W3` (a W-2c and its W-3c) show under `mismatches` without
+  blocking. Send both together and record each with the same day and
+  tracking number.
+
+A correction restates only the lines that changed; the rest stand as they
+stood. It is sent after the return it corrects, under a tracking number of its
+own (one envelope's corrections may share one). Once corrected 1099-Rs are
+recorded, the original 1096 stands as filed and leaves `mismatches`.
 
 ## Backup
 

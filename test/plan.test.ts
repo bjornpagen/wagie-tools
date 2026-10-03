@@ -173,7 +173,7 @@ test("a 1099-R filed wrong is corrected box by box, with the 1096 that transmits
 	const view = async () =>
 		(
 			(await op(own, "report", { year: 2026 })).forms as {
-				F1099R: { correction?: object; correctionDue?: object }
+				F1099R: { corrections?: object[]; correctionDue?: object }
 			}
 		).F1099R
 	assert.deepEqual((await view()).correctionDue, { lines: restated, transmittal })
@@ -190,13 +190,15 @@ test("a 1099-R filed wrong is corrected box by box, with the 1096 that transmits
 		code: "Corrected"
 	})
 	assert.deepEqual(await mismatched(), [])
-	const { correction, correctionDue } = await view()
-	assert.deepEqual(correction, {
-		mailedOn: "2027-02-10",
-		tracking: mailed.tracking,
-		lines: restated,
-		transmittal
-	})
+	const { corrections, correctionDue } = await view()
+	assert.deepEqual(corrections, [
+		{
+			mailedOn: "2027-02-10",
+			tracking: mailed.tracking,
+			lines: restated,
+			transmittal
+		}
+	])
 	assert.equal(correctionDue, undefined)
 })
 
@@ -306,4 +308,19 @@ test("once the 1099-Rs are corrected, the original 1096 stands as filed", async 
 		tracking: "9400100000000000000012"
 	})
 	assert.deepEqual(await mismatched(), [])
+})
+
+test("an after-tax contribution counts toward a year only if sent in it or 30 days after", async () => {
+	const own = await ledger2026()
+	const wire = (sentOn: string) =>
+		op(own, "transfer.record", {
+			kind: "AfterTax",
+			year: 2026,
+			mercury: sendMoney(),
+			sentOn,
+			amount: "100.00"
+		})
+	await assert.rejects(wire("2025-12-31"), { code: "OutsideCrediting" })
+	await assert.rejects(wire("2027-01-31"), { code: "OutsideCrediting" })
+	assert.equal((await wire("2027-01-30")).outcome, "committed")
 })

@@ -7,6 +7,7 @@ import type { Facts } from "./db.ts"
 import {
 	column4,
 	correctionDue,
+	correctionsOf,
 	figures,
 	formatLine,
 	latest,
@@ -44,11 +45,12 @@ const named: { readonly [F in FormHandle]: readonly (typeof Role.handles)[number
 const lineValues = (values: ReadonlyMap<LineHandle, bigint>) =>
 	Object.fromEntries([...values].map(([line, value]) => [line, formatLine(line, value)]))
 
-/** A filed return's corrections: the one mailed, each line it restates as
- * filed and as corrected; and the one the ledger now calls for, each line as
- * the return stands and as it should. A 941-X adds the tax each difference
- * carries and line 27; corrected 1099-Rs add the 1096 that transmits them. */
-const correctionsOf = (facts: Facts, filing: Fact<typeof Filing>) => {
+/** A filed return's corrections: each one sent, oldest first, with each line
+ * it restates as it stood and as corrected; and the one the ledger now calls
+ * for, each line as the return stands and as it should. A 941-X adds the tax
+ * each difference carries and line 27; corrected 1099-Rs add the 1096 that
+ * transmits them. */
+const correctionViews = (facts: Facts, filing: Fact<typeof Filing>) => {
 	const view = (corrected: ReadonlyMap<LineHandle, bigint>, rows: readonly Restatement[]) => {
 		const shown = (row: Restatement) => ({
 			line: row.line,
@@ -67,16 +69,19 @@ const correctionsOf = (facts: Facts, filing: Fact<typeof Filing>) => {
 			line27: formatDollars(x.owed)
 		}
 	}
-	const sent = facts.Correction.find((row) => row.filing === filing.id)
+	const sent = correctionsOf(facts, filing.id)
 	const stands = latest(facts, filing.id)
 	const due = correctionDue(facts, filing)
 	return {
-		...(sent && {
-			correction: {
-				mailedOn: sent.mailedOn,
-				tracking: sent.tracking,
-				...view(stands, mailed(facts, filing.id))
-			}
+		...(sent.length > 0 && {
+			corrections: sent.map((correction) => ({
+				mailedOn: correction.mailedOn,
+				tracking: correction.tracking,
+				...view(
+					latest(facts, filing.id, correction.mailedOn + 1n),
+					mailed(facts, filing.id, correction.mailedOn)
+				)
+			}))
 		}),
 		...(due.size > 0 && { correctionDue: view(new Map([...stands, ...due]), restated(stands, due)) })
 	}
@@ -160,7 +165,7 @@ export const report = (facts: Facts, year: number, quarter?: number) => {
 								}
 							: {}),
 						lines: lineValues(figures(form, period)),
-						...(filed === undefined ? {} : correctionsOf(facts, filed))
+						...(filed === undefined ? {} : correctionViews(facts, filed))
 					}
 				]
 			})

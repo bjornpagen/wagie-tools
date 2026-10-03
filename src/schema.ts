@@ -56,8 +56,8 @@ const files = (electronic: boolean, certifiedMail: boolean, furnished: boolean) 
 /** Every return the ledger files. A return is due on the next business day
  * after day `dueDay` (clamped to the month) of the month `dueOffset` months
  * after the month holding the period's last day, and may be filed only the
- * ways its flags allow. A 941-X or a corrected 1099-R is a `Correction`, not
- * a form. */
+ * ways its flags allow. A correction of one (a 941-X, a W-2c) is a
+ * `Correction`, not a form. */
 export const Form = closed(
 	"Form",
 	["F941", "F940", "W2", "W3", "C3", "F1099R", "F1096"],
@@ -179,9 +179,22 @@ export const correctable941 = [
 	"F941_5c1",
 	"F941_7"
 ] as const satisfies readonly LineHandle[]
-/** The lines a correction may restate: a 941-X's, and every box of a 1099-R,
- * which is corrected by filing it again marked CORRECTED. */
-export const correctable = [...correctable941, ...formLines.F1099R] as const satisfies readonly LineHandle[]
+/** The lines a correction may restate: a 941-X's; an amended 940's, all but
+ * the lines payments move; every box of a W-2c, W-3c and amended C-3; and
+ * every box of a 1099-R, filed again marked CORRECTED. A 1096 is never
+ * corrected: a corrected batch goes with a 1096 of its own. */
+export const correctable = [
+	...correctable941,
+	"F940_3",
+	"F940_5",
+	"F940_7",
+	"F940_8",
+	"F940_12",
+	...formLines.W2,
+	...formLines.W3,
+	...formLines.C3,
+	...formLines.F1099R
+] as const satisfies readonly LineHandle[]
 const lineHandles = [
 	...formLines.F941,
 	...formLines.F940,
@@ -405,13 +418,16 @@ export const Furnished = relation("Furnished", { filing: uuid, on: i64 })
 /** Every line of a return exactly as filed. Once filed, a return's liability
  * line is what its period owes. */
 export const FiledFigures = relation("FiledFigures", { filing: uuid, line: closedId(Line), value: i64 })
-/** The correction of a filed return, mailed certified: a 941-X for a 941, or
- * corrected 1099-Rs with the 1096 that transmits them. */
+/** A correction of a filed return, keyed by the day it went out: a 941-X, an
+ * amended 940 or C-3, a W-2c or W-3c, or corrected 1099-Rs with the 1096 that
+ * transmits them. `tracking` is the certified mail number, or the
+ * confirmation of one filed online. A return takes any number, one a day. */
 export const Correction = relation("Correction", { filing: uuid, mailedOn: i64, tracking: str })
 /** The lines a correction restates, as corrected. Every other line stands as
- * filed. */
+ * it stood before. */
 export const CorrectedFigures = relation("CorrectedFigures", {
 	filing: uuid,
+	mailedOn: i64,
 	line: closedId(Line),
 	value: i64
 })
@@ -515,9 +531,8 @@ export const ledger = schema("WagieTools", relations, [
 	...Object.values(methodArms).map((arm) => key(arm, ["filing"])),
 	key(CertifiedMail, ["tracking"]),
 	key(FiledFigures, ["filing", "line"]),
-	key(Correction, ["filing"]),
-	key(Correction, ["tracking"]),
-	key(CorrectedFigures, ["filing", "line"]),
+	key(Correction, ["filing", "mailedOn"]),
+	key(CorrectedFigures, ["filing", "mailedOn", "line"]),
 	key(Rollover, ["account", "on"]),
 
 	// The rosters' columns name rosters.
@@ -664,7 +679,7 @@ export const ledger = schema("WagieTools", relations, [
 	// A correction restates at least one correctable line of the return it
 	// corrects; a return without correctable lines can't be corrected.
 	contained(on(Correction, "filing"), on(Filing, "id")),
-	contained(on(CorrectedFigures, "filing"), on(Correction, "filing")),
+	contained(on(CorrectedFigures, ["filing", "mailedOn"]), on(Correction, ["filing", "mailedOn"])),
 	contained(on(CorrectedFigures, "line"), on(select(Line, { correctable: true }), "id")),
 	...correctable.map((line) =>
 		contained(
@@ -672,7 +687,10 @@ export const ledger = schema("WagieTools", relations, [
 			on(select(Filing, { form: formOfLine[line] }), "id")
 		)
 	),
-	capacity(on(Correction, "filing"), { from: on(CorrectedFigures, "filing"), within: within(1n, "*") }),
+	capacity(on(Correction, ["filing", "mailedOn"]), {
+		from: on(CorrectedFigures, ["filing", "mailedOn"]),
+		within: within(1n, "*")
+	}),
 
 	// The plan's books: only hand-swept accounts are swept, never for nothing.
 	contained(on(Rollover, "account"), on(select(PlanAccount, { implied: false }), "id")),

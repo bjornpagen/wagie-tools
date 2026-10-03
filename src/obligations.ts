@@ -7,6 +7,7 @@ import {
 	monthOf,
 	months,
 	quarterOf,
+	quarterSpan,
 	type Span,
 	sameSpan,
 	yearOf,
@@ -17,6 +18,8 @@ import type { Facts } from "./db.ts"
 import {
 	column4,
 	correctionDue,
+	correctionName,
+	correctionsOf,
 	figures,
 	formatLine,
 	latest,
@@ -81,6 +84,10 @@ const filingOf = (facts: Facts, form: FormHandle, period: Span) =>
 	facts.Filing.find((row) => row.form === form && sameSpan(row.period, period))
 const filedValue = (facts: Facts, filing: Uuid, line: LineHandle) =>
 	facts.FiledFigures.find((row) => row.filing === filing && row.line === line)?.value ?? 0n
+/** Returns whose line states what a tax account owes. */
+const owing = (form: FormHandle) =>
+	TaxAccount.handles.some((account) => Line.axioms[TaxAccount.axioms[account].liability].form === form)
+const article = (name: string) => (/^[aeiou]/i.test(name) ? "an" : "a")
 const corrected = (facts: Facts, form: FormHandle, period: Span) => {
 	const filing = filingOf(facts, form, period)
 	return filing !== undefined && facts.Correction.some((row) => row.filing === filing.id)
@@ -104,8 +111,9 @@ type Accrual = {
 }
 
 /** What a period owes an account: once its return is filed, the return as
- * filed plus any correction's line 27, due when mailed; until then, as the
- * ledger computes it. */
+ * filed, then what each correction adds, due when it goes out (a 941-X its
+ * column 4, an amended return the change in its liability line); until then,
+ * as the ledger computes it. */
 const accruals = (facts: Facts, account: AccountHandle, period: Span): Accrual[] => {
 	const rules = TaxAccount.axioms[account]
 	const form = Line.axioms[rules.liability].form
@@ -126,19 +134,20 @@ const accruals = (facts: Facts, account: AccountHandle, period: Span): Accrual[]
 					amount: value(monthLines[index] ?? rules.liability),
 					...due(month)
 				}))
-	const corrected = filing && facts.Correction.find((row) => row.filing === filing.id)
-	return corrected
-		? [
-				...accrued,
-				{
-					what: "941-X balance",
-					period,
-					amount: column4(facts, filing, mailed(facts, filing.id)).owed,
-					opensOn: corrected.mailedOn,
-					dueOn: corrected.mailedOn
-				}
-			]
-		: accrued
+	const balances = filing
+		? correctionsOf(facts, filing.id).map((correction) => ({
+				what: `${correctionName[form]} balance`,
+				period,
+				amount:
+					form === "F941"
+						? column4(facts, filing, mailed(facts, filing.id, correction.mailedOn)).owed
+						: (latest(facts, filing.id, correction.mailedOn + 1n).get(rules.liability) ?? 0n) -
+							(latest(facts, filing.id, correction.mailedOn).get(rules.liability) ?? 0n),
+				opensOn: correction.mailedOn,
+				dueOn: correction.mailedOn
+			}))
+		: []
+	return [...accrued, ...balances]
 }
 
 /** The periods an account has anything in: wages earned in its
@@ -215,9 +224,46 @@ const policy = (facts: Facts, asOf: bigint): Obligation[] => {
 	})
 }
 
+/** The 941 tax a lookback period reported: line 12 of each quarter, as filed
+ * once filed. */
+const reported941 = (facts: Facts, quarter: Span) => {
+	const filing = filingOf(facts, "F941", quarter)
+	return filing
+		? filedValue(facts, filing.id, "F941_12")
+		: (figures("F941", periodOf(facts, quarter)).get("F941_12") ?? 0n)
+}
+/** Over $50,000 of 941 tax in a year's lookback period (July 1 two years
+ * before through June 30 of the year before) makes the business a semiweekly
+ * depositor that year, which the ledger does not schedule: payroll stops from
+ * January 1, and the year before shows it coming. */
+export const LOOKBACK_LIMIT = 5_000_000n
+const depositSchedule = (facts: Facts, asOf: bigint): Obligation[] => {
+	const years = [yearOf(asOf), yearOf(asOf) + 1]
+	return years.flatMap((year) => {
+		const lookback = [
+			quarterSpan(year - 2, 3),
+			quarterSpan(year - 2, 4),
+			quarterSpan(year - 1, 1),
+			quarterSpan(year - 1, 2)
+		]
+		const reported = sum(lookback.map((quarter) => reported941(facts, quarter)))
+		return reported > LOOKBACK_LIMIT
+			? [
+					{
+						what: "Semiweekly depositor: the ledger schedules only monthly deposits",
+						next: "none",
+						period: yearSpan(year),
+						opensOn: yearSpan(year).start,
+						amount: reported
+					}
+				]
+			: []
+	})
+}
+
 export const obligations = (facts: Facts, asOf: bigint) => {
 	const checks = paychecks(facts)
-	const open: Obligation[] = [...policy(facts, asOf)]
+	const open: Obligation[] = [...policy(facts, asOf), ...depositSchedule(facts, asOf)]
 	const credits: Credit[] = []
 
 	for (const check of checks) {
@@ -266,13 +312,12 @@ export const obligations = (facts: Facts, asOf: bigint) => {
 				})
 	}
 
-	// A filed 941 whose reported facts no longer match the ledger needs a 941-X.
-	for (const filing of facts.Filing.filter((row) => row.form === "F941")) {
+	// A filed return that states a liability and no longer matches what it
+	// reports needs a correction: it owes, so it blocks.
+	for (const filing of facts.Filing.filter((row) => owing(row.form))) {
 		if (correctionDue(facts, filing).size > 0)
 			open.push({
-				what: corrected(facts, filing.form, filing.period)
-					? "File a second 941-X (extend Correction's key first)"
-					: "File a 941-X",
+				what: `File ${article(correctionName[filing.form])} ${correctionName[filing.form]}`,
 				next: "filing.correct",
 				period: filing.period,
 				opensOn: filing.period.end
@@ -283,13 +328,14 @@ export const obligations = (facts: Facts, asOf: bigint) => {
 	return { open, credits, blockers: open.filter((item) => item.opensOn <= asOf) }
 }
 
-/** Filed figures, as corrected, that no longer match the ledger, for forms
- * other than the 941, leaving out lines that payments move after filing. A
- * correctable line names the op that files its correction. Corrected 1099-Rs
- * go with a 1096 of their own, so the original 1096 then stands as filed. */
+/** Filed figures, as corrected, that no longer match the ledger, for returns
+ * that state no liability (those block instead), leaving out lines that
+ * payments move after filing. A correctable line names the op that files its
+ * correction. Corrected 1099-Rs go with a 1096 of their own, so the original
+ * 1096 then stands as filed. */
 export const mismatches = (facts: Facts) =>
 	facts.Filing.filter(
-		(row) => row.form !== "F941" && !(row.form === "F1096" && corrected(facts, "F1099R", row.period))
+		(row) => !owing(row.form) && !(row.form === "F1096" && corrected(facts, "F1099R", row.period))
 	).flatMap((filing) => {
 		const current = figures(filing.form, periodOf(facts, filing.period))
 		return [...latest(facts, filing.id)]

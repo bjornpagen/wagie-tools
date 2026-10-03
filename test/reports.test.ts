@@ -143,13 +143,10 @@ test("a 941-X shows each line it restates, as filed and corrected, its tax, and 
 		mailedOn: "2026-05-01",
 		tracking: "9400100000000000000002"
 	})
-	const { correction, correctionDue } = await f941()
-	assert.deepEqual(correction, {
-		mailedOn: "2026-05-01",
-		tracking: "9400100000000000000002",
-		lines,
-		line27: "10.00"
-	})
+	const { corrections, correctionDue } = await f941()
+	assert.deepEqual(corrections, [
+		{ mailedOn: "2026-05-01", tracking: "9400100000000000000002", lines, line27: "10.00" }
+	])
 	assert.equal(correctionDue, undefined)
 })
 

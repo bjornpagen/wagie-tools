@@ -17,7 +17,7 @@ import {
 } from "./core/time.ts"
 import { canonicalJson, MAX_I64, MAX_U64, max, min, naturalId, refuse, sum } from "./core/values.ts"
 import * as Db from "./db.ts"
-import { correctionDue, figures, periodOf } from "./forms.ts"
+import { correctionDue, correctionsOf, figures, periodOf } from "./forms.ts"
 import { CheckInput, fitting, priceCheck } from "./gross-up.ts"
 import { afterTaxRoom, type Obligation, obligations, status } from "./obligations.ts"
 import { sweeps } from "./plan.ts"
@@ -137,6 +137,17 @@ const requireSigned = (facts: Facts, year: bigint, paidOn: bigint) => {
 		)
 }
 
+/** A paycheck's 941 tax: FIT and both halves of FICA as withheld. */
+const liability941 = (check: Check) =>
+	sum(
+		[...check.withheld].map(([tax, amount]) =>
+			S.Tax.axioms[tax].account === "Federal941" ? amount * (S.Tax.axioms[tax].employer ? 2n : 1n) : 0n
+		)
+	)
+/** $100,000 of 941 tax accumulated before a deposit is due the next business
+ * day; the ledger schedules monthly deposits only. */
+const NEXT_DAY = 10_000_000n
+
 /** Paychecks sent more net pay than they owe, oldest first. */
 const overpaid = (facts: Facts) =>
 	paychecks(facts)
@@ -194,6 +205,15 @@ const payroll =
 
 		const owed = overpaid(facts)
 		const check = priced(sum(owed.map((row) => row.excess)))
+		const month = monthOf(paidOn)
+		const accrued = sum(
+			[...paychecks(facts).filter((row) => covers(month, row.wage.paidOn.start)), check].map(liability941)
+		)
+		if (accrued >= NEXT_DAY)
+			refuse(
+				"DepositNextDay",
+				`${formatDollars(accrued)} of 941 tax in one month must be deposited the next business day, which the ledger does not schedule`
+			)
 		const id = wageId(paidOn)
 		const wage = { id, paidOn: point(paidOn), year, gross: check.gross, roth: check.roth }
 		let left = netOf(check)
@@ -292,9 +312,11 @@ const TransferInput = Schema.Union([
 	Schema.Struct({ kind: Schema.Literal("AfterTax"), year: Year, ...wire }),
 	Schema.Struct({ kind: Schema.Literal("Distribution"), ...wire })
 ])
-/** A Mercury transfer and the arm saying what it paid. A paycheck's wires may
- * not exceed what it owes; an earlier record of the same transfer is judged
- * by the laws instead, so a re-run is no change. */
+/** A Mercury transfer and the arm saying what it paid. A Roth wire may not
+ * exceed the paycheck's Roth. Net pay Mercury sent is recorded whatever the
+ * paycheck now owes: past it, the paycheck is overpaid and the next one
+ * recovers it. An earlier record of the same transfer is judged by the laws
+ * instead, so a re-run is no change. */
 const transfer =
 	(request: typeof TransferInput.Type) =>
 	(facts: Facts): Db.Plan<object> => {
@@ -310,17 +332,23 @@ const transfer =
 					const check =
 						paychecks(facts).find((row) => row.wage.id === wage.id) ??
 						refuse("WageMissing", "No such paycheck")
-					const [sent, owed] =
-						request.kind === "NetPay" ? [check.sentNet, check.owedNet] : [check.sentRoth, check.roth]
-					if (!recorded && sent + amount > owed)
+					if (request.kind === "RothDeferral" && !recorded && check.sentRoth + amount > check.roth)
 						refuse(
 							"Overpaid",
-							`${formatDate(request.paidOn)} has ${formatDollars(owed - sent)} of ${kind} unsent`
+							`${formatDate(request.paidOn)} has ${formatDollars(check.roth - check.sentRoth)} of ${kind} unsent`
 						)
 					return Db.insert(request.kind, { transfer: mercury, wage: wage.id, amount })
 				}
 				case "AfterTax": {
 					const year = BigInt(request.year)
+					// Treas. Reg. §1.415(c)-1(b)(6)(i)(C): an employee contribution counts
+					// toward a year only if made by 30 days after it closes.
+					const plan = yearSpan(request.year)
+					if (sentOn < plan.start || sentOn > plan.end + 29n)
+						refuse(
+							"OutsideCrediting",
+							`An after-tax contribution for ${year} goes out from ${formatDate(plan.start)} through ${formatDate(plan.end + 29n)}`
+						)
 					const room = afterTaxRoom(facts, year)
 					if (!recorded && room !== undefined && amount > room)
 						refuse(
@@ -408,10 +436,11 @@ const filedOn = (facts: Facts, filing: Uuid) =>
 	facts.Electronic.find((row) => row.filing === filing)?.on ??
 	facts.CertifiedMail.find((row) => row.filing === filing)?.mailedOn ??
 	facts.Furnished.find((row) => row.filing === filing)?.on
-/** A USPS tracking number names one mailing: a return or a correction. */
-const mailedUnder = (facts: Facts, tracking: string) =>
+/** A tracking number names one mailing: a return, or the corrections sent
+ * together on one day (a W-2c with its W-3c). */
+const mailedUnder = (facts: Facts, tracking: string, correctedOn?: bigint) =>
 	facts.CertifiedMail.some((row) => row.tracking === tracking) ||
-	facts.Correction.some((row) => row.tracking === tracking)
+	facts.Correction.some((row) => row.tracking === tracking && row.mailedOn !== correctedOn)
 /** Whether a return is recorded exactly as this request records it. */
 const recordedAs = (facts: Facts, filing: Fact<typeof S.Filing>, request: FilingInput) => {
 	if (filing.method !== request.method) return false
@@ -482,9 +511,11 @@ const CorrectionInput = Schema.Struct({
 	mailedOn: Day,
 	tracking: Text
 })
-/** A correction mailed for a filed return: a 941-X, or corrected 1099-Rs with
- * their own 1096. It restates each correctable line the ledger now computes
- * differently; every other line stands as filed. */
+/** A correction sent for a filed return: a 941-X, an amended 940 or C-3, a
+ * W-2c or W-3c, or corrected 1099-Rs with their own 1096. It restates each
+ * correctable line the ledger now computes differently; every other line
+ * stands as it stood. A return takes any number of corrections, each after
+ * the last. */
 const correctReturn =
 	(request: typeof CorrectionInput.Type) =>
 	(facts: Facts): Db.Plan<object> => {
@@ -493,13 +524,15 @@ const correctReturn =
 		const filing =
 			facts.Filing.find((row) => row.form === form && sameSpan(row.period, period)) ??
 			refuse("FilingMissing", `No ${form} is recorded for ${formatPeriod(period)}`)
-		const mailed = facts.Correction.find((row) => row.filing === filing.id)
-		if (mailed?.mailedOn === mailedOn && mailed.tracking === tracking) return { edits: [], result: request }
-		if (mailed) refuse("Corrected", `${form} ${formatPeriod(period)} already has a correction`)
-		const after = max(period.end, filedOn(facts, filing.id) ?? period.end)
+		const earlier = correctionsOf(facts, filing.id)
+		const same = earlier.find((row) => row.mailedOn === mailedOn)
+		if (same?.tracking === tracking) return { edits: [], result: request }
+		if (same) refuse("Corrected", `${form} ${formatPeriod(period)} already has a correction that day`)
+		const last = earlier.at(-1)
+		const after = last ? last.mailedOn + 1n : max(period.end, filedOn(facts, filing.id) ?? period.end)
 		if (mailedOn < after)
 			refuse("BeforeFiling", `${form} ${formatPeriod(period)} can be corrected from ${formatDate(after)} on`)
-		if (mailedUnder(facts, tracking))
+		if (mailedUnder(facts, tracking, mailedOn))
 			refuse("TrackingUsed", `Tracking ${tracking} already names another mailing`)
 		const due = correctionDue(facts, filing)
 		if (due.size === 0)
@@ -509,7 +542,7 @@ const correctReturn =
 				...Db.insert("Correction", { filing: filing.id, mailedOn, tracking }),
 				...Db.insert(
 					"CorrectedFigures",
-					...[...due].map(([line, value]) => ({ filing: filing.id, line, value }))
+					...[...due].map(([line, value]) => ({ filing: filing.id, mailedOn, line, value }))
 				)
 			],
 			result: request
@@ -673,6 +706,85 @@ const setElection =
 		}
 	}
 
+// ── changing setup ─────────────────────────────────────────────────────────
+
+const PartySet = Schema.Struct({ role: Schema.Literals(S.Role.handles), ...PartyInput.fields })
+/** Replace one party whole: a new address, name or TIN. */
+const setParty =
+	(request: typeof PartySet.Type) =>
+	(facts: Facts): Db.Plan<object> => ({
+		edits: replace(
+			"Party",
+			facts.Party.find((row) => row.role === request.role),
+			request
+		),
+		result: request
+	})
+const CustodySet = Schema.Struct({
+	account: Schema.Literals(S.PlanAccount.handles),
+	custodian: Text,
+	number: Text
+})
+/** Replace where one plan account is held, and its number there. */
+const setCustody =
+	(request: typeof CustodySet.Type) =>
+	(facts: Facts): Db.Plan<object> => ({
+		edits: replace(
+			"Custody",
+			facts.Custody.find((row) => row.account === request.account),
+			request
+		),
+		result: request
+	})
+const RegistrationSet = Schema.Struct({ state: Schema.Literals(states), number: Text })
+/** Add or replace the employer's account with a state. */
+const setRegistration =
+	(request: typeof RegistrationSet.Type) =>
+	(facts: Facts): Db.Plan<object> => ({
+		edits: replace(
+			"Registration",
+			facts.Registration.find((row) => row.state === request.state),
+			request
+		),
+		result: request
+	})
+const openEmployment = (facts: Facts) => facts.Employment.find((row) => row.span.end === MAX_I64)
+const EmploymentEnd = Schema.Struct({ lastDay: Day })
+/** The owner stops working for the business after `lastDay`: no paycheck may
+ * come later, and returns stop with the period that holds it. */
+const endEmployment =
+	(request: typeof EmploymentEnd.Type) =>
+	(facts: Facts): Db.Plan<object> => {
+		const end = request.lastDay + 1n
+		if (!openEmployment(facts) && facts.Employment.some((row) => row.span.end === end))
+			return { edits: [], result: request }
+		const current = openEmployment(facts) ?? refuse("NotEmployed", "No employment is open")
+		if (end <= current.span.start) refuse("BeforeStart", `Employment began ${formatDate(current.span.start)}`)
+		const later = facts.Wage.find((wage) => wage.paidOn.start >= end)
+		if (later) refuse("PaidAfter", `A paycheck is posted on ${formatDate(later.paidOn.start)}`)
+		return {
+			edits: replace("Employment", current, { ...current, span: { start: current.span.start, end } }),
+			result: request
+		}
+	}
+const EmploymentStart = Schema.Struct({ from: Day, state: Schema.Literals(states) })
+/** The owner works for the business again, or in another registered state,
+ * from a day after any earlier employment ended. */
+const startEmployment =
+	(request: typeof EmploymentStart.Type) =>
+	(facts: Facts): Db.Plan<object> => {
+		const span = { start: request.from, end: MAX_I64 }
+		const row = { span, state: request.state }
+		if (
+			facts.Employment.some(
+				(old) => old.span.start === span.start && old.state === row.state && old.span.end === MAX_I64
+			)
+		)
+			return { edits: [], result: request }
+		if (openEmployment(facts)) refuse("Employed", "End the current employment first: employment.end")
+		return { edits: Db.insert("Employment", row), result: request }
+	}
+
 // ── the table ──────────────────────────────────────────────────────────────
 
 type Run = (input: never, ledger: string) => Effect.Effect<unknown, unknown, NativeRuntime>
@@ -716,6 +828,19 @@ export const ops: { readonly [name: string]: Op } = {
 				],
 				result: input
 			})
+	),
+	"party.set": op("Replace one party: the employer, the employee or the plan", PartySet, writing(setParty)),
+	"registration.set": op(
+		"Add or replace the employer's account number with a state",
+		RegistrationSet,
+		writing(setRegistration)
+	),
+	"custody.set": op("Replace where a plan account is held, and its number", CustodySet, writing(setCustody)),
+	"employment.end": op("Record the owner's last day of work", EmploymentEnd, writing(endEmployment)),
+	"employment.start": op(
+		"Record the owner working again, or in another registered state",
+		EmploymentStart,
+		writing(startEmployment)
 	),
 	"policy.set": op(
 		"Set one jurisdiction's policy for a year: federal limits, and each tax's rate and wage base",
