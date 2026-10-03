@@ -2,9 +2,9 @@ import {
 	alternatives,
 	bool,
 	capacity,
+	closed,
 	closedId,
 	contained,
-	duration,
 	i64,
 	interval,
 	key,
@@ -20,2769 +20,684 @@ import {
 	weigh,
 	within
 } from "@bjornpagen/bumbledb"
-import {
-	AccountFamily,
-	AddressKind,
-	AssessmentOrigin,
-	Authority,
-	annualRequirements,
-	BandRole,
-	BankStatus,
-	CalculationMethod,
-	CalculationPurpose,
-	CashDirection,
-	CashPurpose,
-	CheckpointKind,
-	CommitmentOrigin,
-	Component,
-	ContributionOrigin,
-	ContributionSource,
-	ConversionTaxField,
-	componentPolicy,
-	components,
-	DeductionKind,
-	Disposition,
-	DistributionCode,
-	DocumentRole,
-	DueRule,
-	ElectionContributionKind,
-	FilingKind,
-	FilingStatus,
-	Form,
-	formPolicy,
-	forms,
-	GrossSuggestionMethod,
-	Payer,
-	PaymentIssuer,
-	PeriodKind,
-	PlanAccountKind,
-	PolicyEvidenceKind,
-	PolicyLimitKind,
-	Program,
-	PublishedRateKind,
-	payrollForms,
-	QuestionKind,
-	ReportForm,
-	RevisionKind,
-	State,
-	SubjectKind,
-	SubmissionMethod,
-	submissionSlots,
-	VersionOrigin
-} from "./schema/vocabulary.ts"
 
-export {
-	AccountFamily,
-	AddressKind,
-	AssessmentOrigin,
-	Authority,
-	BandRole,
-	BankStatus,
-	CalculationMethod,
-	CalculationPurpose,
-	CashDirection,
-	CashPurpose,
-	CheckpointKind,
-	CommitmentOrigin,
-	Component,
-	ContributionOrigin,
-	ContributionSource,
-	ConversionTaxField,
-	DeductionKind,
-	Disposition,
-	DistributionCode,
-	DocumentRole,
-	DueRule,
-	ElectionContributionKind,
-	FilingKind,
-	FilingStatus,
-	Form,
-	GrossSuggestionMethod,
-	Payer,
-	PaymentIssuer,
-	PeriodKind,
-	PlanAccountKind,
-	PolicyEvidenceKind,
-	PolicyLimitKind,
-	Program,
-	PublishedRateKind,
-	QuestionKind,
-	ReportForm,
-	RevisionKind,
-	State,
-	SubjectKind,
-	SubmissionMethod,
-	VersionOrigin
-} from "./schema/vocabulary.ts"
+/* Representation first: every fact is stored once, and every invariant the
+ * library can state is a law. Money is u64 cents. A day is an i64 epoch day, or
+ * a unit interval where a law places it inside a span. A period is a half-open
+ * interval of days. A rate is u64 parts per million. Identities are natural: a
+ * Mercury Tracking ID, an EFT or TWC number, a TIN, or a UUIDv8 derived from a
+ * day or from a form and period. */
 
-// Cash is counted here once. Domain allocations qualify the same movement.
+// ── Rosters: closed vocabularies and the rules they carry ──────────────────
 
-export const BankMovement = relation("BankMovement", {
-	id: uuid,
-	business: uuid,
-	direction: closedId(CashDirection),
-	paidOn: i64,
-	amount: u64,
-	evidence: uuid
+/** Who the forms name. The ledger keeps at most one of each. */
+export const Role = closed("Role", ["Employer", "Employee", "Plan"])
+/** Texas is a closed entry: employing in another state means new roster
+ * entries (its jurisdiction, tax, account and return), a deliberate change. */
+export const Jurisdiction = closed(
+	"Jurisdiction",
+	["Federal", "TX"],
+	{ state: bool },
+	{ Federal: { state: false }, TX: { state: true } }
+)
+export type JurisdictionHandle = (typeof Jurisdiction.handles)[number]
+export const Periodicity = closed("Periodicity", ["Month", "Quarter", "Year"])
+/** What makes a return due for a period: being employed in its jurisdiction,
+ * paying wages in it, or plan activity in it. */
+export const Trigger = closed("Trigger", ["Employment", "Wages", "PlanActivity"])
+export const Processor = closed("Processor", ["EFTPS", "TWC"])
+
+const due = (dueDay: bigint, dueOffset: bigint) => ({ dueDay, dueOffset })
+const files = (electronic: boolean, certifiedMail: boolean, furnished: boolean) => ({
+	electronic,
+	certifiedMail,
+	furnished
 })
-export const MercuryTransaction = relation("MercuryTransaction", { movement: uuid, reference: str })
-export const PayrollTransaction = relation("PayrollTransaction", {
-	wage: uuid,
-	movement: uuid,
-	business: uuid
+/** Every return the ledger files. A return is due on the next business day
+ * after day `dueDay` (clamped to the month) of the month `dueOffset` months
+ * after the month holding the period's last day, and may be filed only the
+ * ways its flags allow. A correction of one (a 941-X, a W-2c) is a
+ * `Correction`, not a form. */
+export const Form = closed(
+	"Form",
+	["F941", "F940", "W2", "W3", "C3", "F1099R", "F1096"],
+	{
+		jurisdiction: closedId(Jurisdiction),
+		period: closedId(Periodicity),
+		trigger: closedId(Trigger),
+		dueDay: u64,
+		dueOffset: u64,
+		electronic: bool,
+		certifiedMail: bool,
+		furnished: bool
+	},
+	{
+		F941: {
+			jurisdiction: "Federal",
+			period: "Quarter",
+			trigger: "Employment",
+			...due(31n, 1n),
+			...files(false, true, false)
+		},
+		F940: {
+			jurisdiction: "Federal",
+			period: "Year",
+			trigger: "Wages",
+			...due(31n, 1n),
+			...files(false, true, false)
+		},
+		W2: {
+			jurisdiction: "Federal",
+			period: "Year",
+			trigger: "Wages",
+			...due(31n, 1n),
+			...files(false, false, true)
+		},
+		W3: {
+			jurisdiction: "Federal",
+			period: "Year",
+			trigger: "Wages",
+			...due(31n, 1n),
+			...files(true, true, false)
+		},
+		C3: {
+			jurisdiction: "TX",
+			period: "Quarter",
+			trigger: "Employment",
+			...due(31n, 1n),
+			...files(true, false, false)
+		},
+		F1099R: {
+			jurisdiction: "Federal",
+			period: "Year",
+			trigger: "PlanActivity",
+			...due(31n, 1n),
+			...files(false, false, true)
+		},
+		F1096: {
+			jurisdiction: "Federal",
+			period: "Year",
+			trigger: "PlanActivity",
+			...due(28n, 2n),
+			...files(false, true, false)
+		}
+	}
+)
+export type FormHandle = (typeof Form.handles)[number]
+
+/** Every line of every form, in the form's order. `src/forms.ts` computes each. */
+export const formLines = {
+	F941: [
+		"F941_1",
+		"F941_2",
+		"F941_3",
+		"F941_5a1",
+		"F941_5a2",
+		"F941_5c1",
+		"F941_5c2",
+		"F941_5e",
+		"F941_6",
+		"F941_7",
+		"F941_10",
+		"F941_12",
+		"F941_13",
+		"F941_14",
+		"F941_15",
+		"F941_16_1",
+		"F941_16_2",
+		"F941_16_3"
+	],
+	F940: ["F940_3", "F940_5", "F940_7", "F940_8", "F940_12", "F940_13", "F940_14", "F940_15"],
+	W2: ["W2_1", "W2_2", "W2_3", "W2_4", "W2_5", "W2_6", "W2_12AA", "W2_13"],
+	W3: ["W3_c", "W3_1", "W3_2", "W3_3", "W3_4", "W3_5", "W3_6", "W3_12a"],
+	C3: ["C3_employees_1", "C3_employees_2", "C3_employees_3", "C3_wages", "C3_taxable", "C3_rate", "C3_tax"],
+	F1099R: [
+		"F1099R_Pretax_G_1",
+		"F1099R_Pretax_G_2a",
+		"F1099R_Pretax_G_2b",
+		"F1099R_Pretax_G_5",
+		"F1099R_AfterTax_G_1",
+		"F1099R_AfterTax_G_2a",
+		"F1099R_AfterTax_G_2b",
+		"F1099R_AfterTax_G_5",
+		"F1099R_Roth_H_1",
+		"F1099R_Roth_H_2a",
+		"F1099R_Roth_H_2b",
+		"F1099R_Roth_H_5",
+		"F1099R_Roth_H_10",
+		"F1099R_Roth_H_11"
+	],
+	F1096: ["F1096_3", "F1096_5"]
+} as const satisfies { readonly [F in FormHandle]: readonly string[] }
+export type LineHandle = (typeof formLines)[FormHandle][number]
+/** The 941 lines a 941-X restates: wages, FIT, the taxable wages and the
+ * fractions of cents. Every other line follows from these. */
+export const correctable941 = [
+	"F941_2",
+	"F941_3",
+	"F941_5a1",
+	"F941_5c1",
+	"F941_7"
+] as const satisfies readonly LineHandle[]
+/** The lines a correction may restate: a 941-X's; an amended 940's, all but
+ * the lines payments move; every box of a W-2c, W-3c and amended C-3; and
+ * every box of a 1099-R, filed again marked CORRECTED. A 1096 is never
+ * corrected: a corrected batch goes with a 1096 of its own. */
+export const correctable = [
+	...correctable941,
+	"F940_3",
+	"F940_5",
+	"F940_7",
+	"F940_8",
+	"F940_12",
+	...formLines.W2,
+	...formLines.W3,
+	...formLines.C3,
+	...formLines.F1099R
+] as const satisfies readonly LineHandle[]
+const lineHandles = [
+	...formLines.F941,
+	...formLines.F940,
+	...formLines.W2,
+	...formLines.W3,
+	...formLines.C3,
+	...formLines.F1099R,
+	...formLines.F1096
+] as const
+const formOfLine = Object.fromEntries(
+	Object.entries(formLines).flatMap(([form, lines]) => lines.map((line) => [line, form]))
+) as { readonly [L in LineHandle]: FormHandle }
+export const Line = closed(
+	"Line",
+	lineHandles,
+	{ form: closedId(Form), correctable: bool },
+	Object.fromEntries(
+		lineHandles.map((line) => [
+			line,
+			{ form: formOfLine[line], correctable: (correctable as readonly string[]).includes(line) }
+		])
+	) as { readonly [L in LineHandle]: { readonly form: FormHandle; readonly correctable: boolean } }
+)
+
+/** Where tax is paid. A payment names its account's `period`; tax accrues by
+ * `accrues` and each accrual is due by the same rule as a return. Once the
+ * account's return is filed for a period, its `liability` line is what the
+ * period owes. */
+export const TaxAccount = closed(
+	"TaxAccount",
+	["Federal941", "Federal940", "TexasUI"],
+	{
+		jurisdiction: closedId(Jurisdiction),
+		processor: closedId(Processor),
+		period: closedId(Periodicity),
+		accrues: closedId(Periodicity),
+		dueDay: u64,
+		dueOffset: u64,
+		liability: closedId(Line)
+	},
+	{
+		Federal941: {
+			jurisdiction: "Federal",
+			processor: "EFTPS",
+			period: "Quarter",
+			accrues: "Month",
+			...due(15n, 1n),
+			liability: "F941_12"
+		},
+		Federal940: {
+			jurisdiction: "Federal",
+			processor: "EFTPS",
+			period: "Year",
+			accrues: "Year",
+			...due(31n, 1n),
+			liability: "F940_12"
+		},
+		TexasUI: {
+			jurisdiction: "TX",
+			processor: "TWC",
+			period: "Quarter",
+			accrues: "Quarter",
+			...due(31n, 1n),
+			liability: "C3_tax"
+		}
+	}
+)
+export type AccountHandle = (typeof TaxAccount.handles)[number]
+
+const tax = (account: AccountHandle, employee: boolean, employer: boolean, banded: boolean) => ({
+	account,
+	employee,
+	employer,
+	banded
 })
-export const PlanReceiptDate = relation("PlanReceiptDate", { receipt: uuid, day: i64, evidence: uuid })
-export const BankObservation = relation("BankObservation", {
-	id: uuid,
-	business: uuid,
-	artifact: uuid,
-	row: u64,
-	status: closedId(BankStatus),
-	observedOn: i64,
-	amount: u64,
-	evidence: uuid
-})
-export const BankSource = relation("BankSource", { movement: uuid, observation: uuid, business: uuid })
-export const BankRetry = relation("BankRetry", { failed: uuid, succeeded: uuid, evidence: uuid })
-export const CashAllocation = relation("CashAllocation", {
-	id: uuid,
-	movement: uuid,
-	business: uuid,
-	purpose: closedId(CashPurpose),
-	amount: u64,
-	evidence: uuid
-})
-export const PayrollCashBinding = relation("PayrollCashBinding", {
-	allocation: uuid,
-	wage: uuid,
-	business: uuid
-})
-export const BankTaxPayment = relation("BankTaxPayment", { allocation: uuid, payment: uuid, business: uuid })
-export const Owner = relation("Owner", { business: uuid, employee: uuid, evidence: uuid })
-export const OwnerDistribution = relation("OwnerDistribution", {
-	id: uuid,
-	allocation: uuid,
-	business: uuid,
-	owner: uuid,
-	paidOn: i64,
-	amount: u64,
-	evidence: uuid
-})
-export const DistributionReturn = relation("DistributionReturn", {
-	id: uuid,
-	distribution: uuid,
-	allocation: uuid,
-	business: uuid,
-	amount: u64,
-	paidOn: i64,
-	evidence: uuid
-})
-export const DistributionReview = relation("DistributionReview", {
-	id: uuid,
-	business: uuid,
+/** Each payroll tax: the account it is paid into, who bears it, and whether
+ * it is priced by a band of the year's policy. FIT is supplied, not banded. */
+export const Tax = closed(
+	"Tax",
+	["FIT", "SocialSecurity", "Medicare", "FederalUnemployment", "TexasUnemployment"],
+	{ account: closedId(TaxAccount), employee: bool, employer: bool, banded: bool },
+	{
+		FIT: tax("Federal941", true, false, false),
+		SocialSecurity: tax("Federal941", true, true, true),
+		Medicare: tax("Federal941", true, true, true),
+		FederalUnemployment: tax("Federal940", false, true, true),
+		TexasUnemployment: tax("TexasUI", false, true, true)
+	}
+)
+export type TaxHandle = (typeof Tax.handles)[number]
+const federal = (handle: TaxHandle) =>
+	TaxAccount.axioms[Tax.axioms[handle].account].jurisdiction === "Federal"
+/** The taxes every year's policy must price, and every paycheck must withhold. */
+export const federalBanded = Tax.handles.filter((handle) => federal(handle) && Tax.axioms[handle].banded)
+export const federalWithheld = Tax.handles.filter((handle) => federal(handle) && Tax.axioms[handle].employee)
+
+export const TransferKind = closed("TransferKind", [
+	"NetPay",
+	"RothDeferral",
+	"AfterTax",
+	"Distribution",
+	"Tax"
+])
+/** Deposit and Balance pay the period's tax; a Penalty never does. */
+export const PaymentKind = closed("PaymentKind", ["Deposit", "Balance", "Penalty"])
+/** Every tax payment is funded by its Mercury debit, except history's. */
+export const Funding = closed("Funding", ["Mercury", "OutsideMercury"])
+/** How a return was filed. Attested is history's: filed, but how is unknown. */
+export const Method = closed("Method", ["Electronic", "CertifiedMail", "Furnished", "Attested"])
+/** Form 1099-R box 7: G a direct rollover or in-plan Roth conversion, H a
+ * designated Roth rollover to a Roth IRA. */
+export const DistributionCode = closed("DistributionCode", ["G", "H"])
+/** The plan's accounts and the one way money leaves each: its 1099-R code;
+ * `taxed` when the move into a Roth is income (pretax money); `implied` when
+ * Carry converts every deposit as it settles, so its 1099-R follows from the
+ * AfterTax transfers and it is never swept by hand. */
+export const PlanAccount = closed(
+	"PlanAccount",
+	["Pretax", "AfterTax", "Roth"],
+	{ code: closedId(DistributionCode), taxed: bool, implied: bool },
+	{
+		Pretax: { code: "G", taxed: true, implied: false },
+		AfterTax: { code: "G", taxed: false, implied: true },
+		Roth: { code: "H", taxed: false, implied: false }
+	}
+)
+export type PlanAccountHandle = (typeof PlanAccount.handles)[number]
+
+// ── Who and where ───────────────────────────────────────────────────────────
+
+/** The employer, its one employee and the 401(k) plan, which files its own
+ * 1099-R and 1096. `tin` is the EIN or SSN. */
+export const Party = relation("Party", { role: closedId(Role), name: str, tin: str, address: str })
+/** The employer's account with each state it employs in (TWC for Texas). */
+export const Registration = relation("Registration", { state: closedId(Jurisdiction), number: str })
+/** When and where the owner works for the business: 941 line 1, the C-3's
+ * monthly counts, and which state's taxes and returns apply. */
+export const Employment = relation("Employment", { span: interval(i64), state: closedId(Jurisdiction) })
+/** Where each plan account is held, and its number there. */
+export const Custody = relation("Custody", { account: closedId(PlanAccount), custodian: str, number: str })
+/** Days the ledger did not record. A filing for a period inside them may be
+ * attested; a payment made inside them may have been paid outside Mercury.
+ * Only an import writes it. */
+export const History = relation("History", { span: interval(i64) })
+
+// ── Policy, per year ────────────────────────────────────────────────────────
+
+/** The year's federal plan limits and the ceiling on wages the ledger holds:
+ * above $200,000 Additional Medicare and faster deposit rules would apply. */
+export const TaxYear = relation("TaxYear", {
 	year: i64,
-	digest: str,
-	evidence: uuid
-})
-export const RetirementPlan = relation("RetirementPlan", {
-	id: uuid,
-	business: uuid,
-	employee: uuid,
-	name: str,
-	ein: str,
-	evidence: uuid
-})
-export const PlanAccount = relation("PlanAccount", {
-	id: uuid,
-	plan: uuid,
-	kind: closedId(PlanAccountKind),
-	provider: str,
-	reference: str,
-	evidence: uuid
-})
-export const RetirementAnnual = relation("RetirementAnnual", {
-	id: uuid,
-	plan: uuid,
-	employee: uuid,
-	year: i64,
-	valid: interval(i64),
+	span: interval(i64),
 	deferralLimit: u64,
 	additionsLimit: u64,
-	compensationCap: u64,
-	outsideDeferrals: u64,
-	outsideAdditions: u64,
-	otherPlans: bool,
-	outsideAssets: bool,
-	evidence: uuid
+	compensationLimit: u64,
+	wageCeiling: u64
 })
-export const RetirementContribution = relation("RetirementContribution", {
-	id: uuid,
-	business: uuid,
-	plan: uuid,
-	employee: uuid,
-	year: i64,
-	amount: u64,
-	source: closedId(ContributionSource),
-	origin: closedId(ContributionOrigin),
-	evidence: uuid
-})
-export const ContributionCancellation = relation("ContributionCancellation", {
-	id: uuid,
-	contribution: uuid,
-	evidence: uuid
-})
-export const ContributionElection = relation("ContributionElection", {
-	contribution: uuid,
-	document: uuid,
-	employee: uuid,
-	year: i64
-})
-export const ContributionAuthorization = relation("ContributionAuthorization", {
-	contribution: uuid,
-	annual: uuid,
-	employee: uuid,
-	year: i64,
-	authorizedOn: interval(i64, 1n)
-})
-export const ContributionDeduction = relation("ContributionDeduction", {
-	contribution: uuid,
-	wage: uuid,
-	employee: uuid,
-	year: i64,
-	amount: u64,
-	kind: closedId(DeductionKind)
-})
-// After-tax funding reuses the distribution allocation, never a second cash allocation.
-export const ContributionFunding = relation("ContributionFunding", {
-	contribution: uuid,
-	allocation: uuid,
-	business: uuid,
-	source: closedId(ContributionSource),
-	amount: u64
-})
+/** The slice of the year's wage axis a tax applies to, at its rate. Wages
+ * beyond the band are not taxed: a wage base is just where the band ends. */
+export const TaxBand = relation("TaxBand", { year: i64, tax: closedId(Tax), wages: interval(u64), rate: u64 })
+export const PayPlan = relation("PayPlan", { year: i64, salary: u64, fitPerCheck: u64 })
+/** The signed plan election for a year: employee Roth and voluntary after-tax. */
+export const Election = relation("Election", { year: i64, roth: u64, afterTax: u64, signedOn: i64 })
 
-export const ProviderOperation = relation("ProviderOperation", {
-	id: uuid,
-	plan: uuid,
-	provider: str,
-	reference: str,
-	evidence: uuid
-})
-export const PlanReceipt = relation("PlanReceipt", {
-	id: uuid,
-	plan: uuid,
-	operation: uuid,
-	account: uuid,
-	source: closedId(ContributionSource),
-	year: i64,
-	observedOn: i64,
-	amount: u64,
-	evidence: uuid
-})
-export const ReceiptAllocation = relation("ReceiptAllocation", {
-	receipt: uuid,
-	contribution: uuid,
-	plan: uuid,
-	amount: u64
-})
-export const RothConversion = relation("RothConversion", {
-	id: uuid,
-	plan: uuid,
-	operation: uuid,
-	fromAccount: uuid,
-	toAccount: uuid,
-	convertedOn: i64,
-	amount: u64,
-	evidence: uuid
-})
-export const ConversionReceipt = relation("ConversionReceipt", {
-	conversion: uuid,
-	receipt: uuid,
-	plan: uuid,
-	amount: u64
-})
-export const SuppliedConversionTax = relation("SuppliedConversionTax", {
-	conversion: uuid,
-	field: closedId(ConversionTaxField),
-	amount: u64,
-	evidence: uuid
-})
-/** A provider's year-end report, recorded as stated. The form decides which
- * typed arm carries its figures; the ledger never derives boxes from events. */
-export const RetirementReport = relation("RetirementReport", {
-	id: uuid,
-	plan: uuid,
-	year: i64,
-	artifact: uuid,
-	form: closedId(ReportForm),
-	evidence: uuid
-})
-export const Reported1099R = relation("Reported1099R", {
-	report: uuid,
-	plan: uuid,
-	account: uuid,
-	distributionCode: closedId(DistributionCode),
-	gross: u64,
-	taxable: u64
-})
-/** Box 5 (employee contributions or designated Roth basis) when the form states it. */
-export const Reported1099RBasis = relation("Reported1099RBasis", { report: uuid, amount: u64 })
-export const Reported1096 = relation("Reported1096", { report: uuid, forms: u64, gross: u64 })
-// A supplied historical report can confirm a full receipt's conversion without
-// inventing an event date. It cannot also consume dated conversion allocations.
-export const ReportedReceiptConversion = relation("ReportedReceiptConversion", {
-	id: uuid,
-	receipt: uuid,
-	report: uuid,
-	plan: uuid,
-	evidence: uuid
-})
-export const PlanBalance = relation("PlanBalance", {
-	id: uuid,
-	account: uuid,
-	asOf: i64,
-	amount: u64,
-	evidence: uuid
-})
-export const PlanSubject = relation("PlanSubject", { subject: uuid, plan: uuid, business: uuid })
-export const RetirementFilingBasis = relation("RetirementFilingBasis", {
-	version: uuid,
-	filing: uuid,
-	digest: str
-})
+// ── Paychecks ───────────────────────────────────────────────────────────────
 
-export const Business = relation("Business", {
-	id: uuid,
-	name: str,
-	ein: str,
-	state: closedId(State),
-	timeZone: str
-})
-export const BusinessAddress = relation("BusinessAddress", {
-	business: uuid,
-	kind: closedId(AddressKind),
-	street: str,
-	city: str,
-	state: str,
-	zip: str,
-	country: str
-})
-export const StateAccount = relation("StateAccount", {
-	business: uuid,
-	state: closedId(State),
-	taxpayerNumber: str,
-	evidence: uuid
-})
-export const Employee = relation("Employee", {
-	id: uuid,
-	business: uuid,
-	firstName: str,
-	lastName: str,
-	ssn: str,
-	address: str,
-	filingStatus: closedId(FilingStatus)
-})
-export const TaxAccount = relation("TaxAccount", {
-	id: uuid,
-	business: uuid,
-	family: closedId(AccountFamily),
-	evidence: uuid
-})
-export const AnnualBudget = relation("AnnualBudget", {
-	id: uuid,
-	employee: uuid,
-	year: i64,
-	limit: u64,
-	evidence: uuid
-})
-export const BudgetCommitment = relation("BudgetCommitment", {
-	id: uuid,
-	employee: uuid,
-	year: i64,
-	amount: u64,
-	origin: closedId(CommitmentOrigin),
-	evidence: uuid
-})
-// Assignment is separate so an actual historical observation survives a missing budget.
-export const BudgetAssignment = relation("BudgetAssignment", {
-	commitment: uuid,
-	budget: uuid,
-	employee: uuid,
-	year: i64,
-	amount: u64
-})
+/** One paycheck per day. Its place on the year's wage axis, [ytd, ytd + gross),
+ * follows from the gross paid on earlier days, so it is never stored. */
 export const Wage = relation("Wage", {
 	id: uuid,
-	requiresTransfer: bool,
-	business: uuid,
-	employee: uuid,
-	year: i64,
-	calendar: uuid,
 	paidOn: interval(i64, 1n),
-	commitment: uuid,
+	year: i64,
 	gross: u64,
-	initialRevision: uuid
+	roth: u64
 })
-export const RegularWork = relation("RegularWork", { wage: uuid, employee: uuid, span: interval(i64) })
-export const RegularCommitment = relation("RegularCommitment", { commitment: uuid, wage: uuid })
-export const ObservedCompensation = relation("ObservedCompensation", {
-	wage: uuid,
-	commitment: uuid,
-	evidence: uuid
-})
-export const Deduction = relation("Deduction", {
-	wage: uuid,
-	employee: uuid,
-	year: i64,
-	kind: closedId(DeductionKind),
-	amount: u64,
-	evidence: uuid
-})
-export const Election = relation("Election", {
-	id: uuid,
-	employee: uuid,
-	year: i64,
-	calendar: uuid,
-	allowance: uuid,
-	maximum: u64,
-	signedOn: i64,
-	effective: interval(i64),
-	limit: u64,
-	evidence: uuid
-})
-// Operational authorization is qualified by its signed source and annual review.
-export const ElectionSource = relation("ElectionSource", {
-	election: uuid,
-	document: uuid,
-	annual: uuid,
-	employee: uuid,
-	year: i64,
-	signedOn: i64,
-	kind: closedId(ElectionContributionKind),
-	limit: u64
-})
-export const ElectionUse = relation("ElectionUse", {
-	wage: uuid,
-	election: uuid,
-	employee: uuid,
-	day: interval(i64, 1n),
-	kind: closedId(DeductionKind),
-	amount: u64
-})
-export const DeferralPolicy = relation("DeferralPolicy", {
-	id: uuid,
-	release: uuid,
-	year: i64,
-	limit: u64,
-	evidence: uuid
-})
+/** What each employee tax took from a paycheck, as assessed. FICA on a
+ * paycheck that could not cover it was advanced and is recovered later. */
+export const Withholding = relation("Withholding", { wage: uuid, tax: closedId(Tax), amount: u64 })
+/** Net pay overpaid on `wage`, withheld back from `recoveredBy`'s net. */
+export const Recovery = relation("Recovery", { wage: uuid, recoveredBy: uuid, amount: u64 })
 
-export const GrossSuggestionPolicy = relation("GrossSuggestionPolicy", {
-	id: uuid,
-	release: uuid,
-	method: closedId(GrossSuggestionMethod),
-	evidence: uuid
-})
-export const EmployeeAllowance = relation("EmployeeAllowance", {
-	id: uuid,
-	employee: uuid,
-	year: i64,
-	policy: uuid,
-	maximum: u64,
-	limit: u64,
-	evidence: uuid
-})
-export const Recovery = relation("Recovery", {
-	id: uuid,
-	fromWage: uuid,
-	owedOnWage: uuid,
-	employee: uuid,
-	component: closedId(Component),
-	kind: closedId(DeductionKind),
-	amount: u64,
-	evidence: uuid
-})
+// ── Money out ───────────────────────────────────────────────────────────────
 
-export const PolicyRelease = relation("PolicyRelease", {
-	id: uuid,
-	sha256: str,
-	title: str,
-	evidence: uuid
-})
-export const PolicyBinding = relation("PolicyBinding", { business: uuid, release: uuid, evidence: uuid })
-// Published rules are independently observable. Employer approval is a separate,
-// release-specific proof bounded by exactly one reviewed calendar year.
+/** Every movement out of Mercury, keyed by its Mercury Tracking ID. Exactly one
+ * arm says what it was and holds what Mercury sent. */
+export const Transfer = relation("Transfer", { mercury: str, sentOn: i64, kind: closedId(TransferKind) })
+export const NetPay = relation("NetPay", { transfer: str, wage: uuid, amount: u64 })
+/** Wired to the plan's Roth account. */
+export const RothDeferral = relation("RothDeferral", { transfer: str, wage: uuid, amount: u64 })
+/** The mega backdoor: wired to the plan's after-tax account as an S-corp
+ * distribution, converted in-plan. `year` is the plan's contribution year. */
+export const AfterTax = relation("AfterTax", { transfer: str, year: i64, amount: u64 })
+export const Distribution = relation("Distribution", { transfer: str, amount: u64 })
+/** The Mercury debit that paid a tax payment: an arm of both. */
+export const TaxDebit = relation("TaxDebit", { transfer: str, payment: str })
 
-export const AnnualPolicy = relation("AnnualPolicy", {
-	id: uuid,
-	business: uuid,
-	authority: closedId(Authority),
-	year: i64,
-	calendar: uuid,
-	valid: interval(i64),
-	evidence: uuid
-})
-export const AnnualSource = relation("AnnualSource", {
-	annual: uuid,
-	artifact: uuid,
-	evidence: uuid
-})
-export const PublishedRate = relation("PublishedRate", {
-	annual: uuid,
-	kind: closedId(PublishedRateKind),
-	schedule: uuid,
-	artifact: uuid,
-	evidence: uuid
-})
-export const PolicyLimit = relation("PolicyLimit", {
-	annual: uuid,
-	kind: closedId(PolicyLimitKind),
-	amount: u64,
-	artifact: uuid,
-	evidence: uuid
-})
-export const LookbackPeriod = relation("LookbackPeriod", {
-	annual: uuid,
-	span: interval(i64),
-	artifact: uuid,
-	evidence: uuid
-})
-export const AnnualEvidence = relation("AnnualEvidence", {
-	id: uuid,
-	annual: uuid,
-	kind: closedId(PolicyEvidenceKind),
-	artifact: uuid,
-	evidence: uuid
-})
-export const AnnualApproval = relation("AnnualApproval", {
-	id: uuid,
-	annual: uuid,
-	release: uuid,
-	business: uuid,
-	authority: closedId(Authority),
-	year: i64,
-	valid: interval(i64),
-	evidence: uuid
-})
-export const CalculationPolicy = relation("CalculationPolicy", {
-	calculation: uuid,
-	annual: uuid,
-	release: uuid,
-	business: uuid,
-	authority: closedId(Authority),
-	day: interval(i64, 1n)
-})
-
-export const ElectionDocument = relation("ElectionDocument", {
-	id: uuid,
-	employee: uuid,
-	year: i64,
-	signedOn: i64,
-	artifact: uuid,
-	evidence: uuid
-})
-export const ElectionDocumentRevision = relation("ElectionDocumentRevision", {
-	document: uuid,
-	predecessor: uuid,
-	employee: uuid,
-	year: i64
-})
-export const ElectionDocumentAmount = relation("ElectionDocumentAmount", {
-	document: uuid,
-	kind: closedId(ElectionContributionKind),
-	amount: u64
-})
-
-export const EmployerRateNotice = relation("EmployerRateNotice", {
-	id: uuid,
-	business: uuid,
-	state: closedId(State),
-	schedule: uuid,
-	valid: interval(i64),
-	evidence: uuid
-})
-export const EmployerSchedule = relation("EmployerSchedule", {
-	version: uuid,
-	notice: uuid,
-	business: uuid,
-	schedule: uuid,
-	valid: interval(i64)
-})
-export const FutaBasis = relation("FutaBasis", { version: uuid, evidence: uuid })
-export const SupportedPayrollDomain = relation("SupportedPayrollDomain", {
-	id: uuid,
-	release: uuid,
-	state: closedId(State),
-	federalDepositLimit: u64,
-	valid: interval(i64),
-	evidence: uuid
-})
-export const MonthlyDepositor = relation("MonthlyDepositor", {
-	id: uuid,
-	business: uuid,
-	valid: interval(i64),
-	evidence: uuid
-})
-export const SupportedProgram = relation("SupportedProgram", {
-	id: uuid,
-	domain: uuid,
-	program: closedId(Program),
-	eligible: interval(u64),
-	evidence: uuid
-})
-export const PolicyCoverage = relation("PolicyCoverage", {
-	release: uuid,
-	business: uuid,
-	component: closedId(Component),
-	span: interval(i64)
-})
-export const RateVersion = relation("RateVersion", {
-	id: uuid,
-	release: uuid,
-	business: uuid,
-	component: closedId(Component),
-	valid: interval(i64),
-	schedule: uuid,
-	evidence: uuid
-})
-export const RateSchedule = relation("RateSchedule", {
-	id: uuid,
-	denominator: u64,
-	domain: interval(u64),
-	evidence: uuid
-})
-export const TaxBand = relation("TaxBand", {
-	id: uuid,
-	schedule: uuid,
-	wages: interval(u64),
-	numerator: u64,
-	role: closedId(BandRole)
-})
-export const TaxBaseScope = relation("TaxBaseScope", {
-	id: uuid,
-	business: uuid,
-	employee: uuid,
-	program: closedId(Program),
-	year: i64,
-	calendar: uuid,
-	span: interval(i64)
-})
-export const StateBaseScope = relation("StateBaseScope", { scope: uuid, state: closedId(State) })
-export const AssessmentSet = relation("AssessmentSet", {
-	id: uuid,
-	business: uuid,
-	employee: uuid,
-	paidOn: interval(i64, 1n),
-	gross: u64,
-	origin: closedId(AssessmentOrigin)
-})
-export const ObservedSet = relation("ObservedSet", { set: uuid, evidence: uuid })
-export const PayrollCalculation = relation("PayrollCalculation", {
-	id: uuid,
-	set: uuid,
-	request: uuid,
-	domain: uuid,
-	business: uuid,
-	paidOn: interval(i64, 1n),
-	release: uuid,
-	purpose: closedId(CalculationPurpose),
-	sourceStamp: str,
-	recordingDay: i64,
-	contextHash: str,
-	evidence: uuid
-})
-export const ProposedWage = relation("ProposedWage", {
-	calculation: uuid,
-	business: uuid,
-	paidOn: interval(i64, 1n),
-	depositor: uuid,
-	span: interval(i64),
-	roth: u64,
-	evidence: uuid
-})
-export const ProposedRevision = relation("ProposedRevision", {
-	calculation: uuid,
-	set: uuid,
-	business: uuid,
-	wage: uuid,
-	predecessor: uuid,
-	employee: uuid,
-	paidOn: interval(i64, 1n),
-	gross: u64,
-	evidence: uuid
-})
-export const CalculationRecoveryClaim = relation("CalculationRecoveryClaim", {
-	calculation: uuid,
-	set: uuid,
-	employee: uuid,
-	owedOnWage: uuid,
-	component: closedId(Component),
-	amount: u64,
-	evidence: uuid
-})
-export const Assessment = relation("Assessment", {
-	set: uuid,
-	origin: closedId(AssessmentOrigin),
-	component: closedId(Component),
-	method: closedId(CalculationMethod)
-})
-export const ObservedAssessment = relation("ObservedAssessment", {
-	set: uuid,
-	component: closedId(Component),
-	amount: u64,
-	evidence: uuid
-})
-export const TaxableWages = relation("TaxableWages", {
-	set: uuid,
-	program: closedId(Program),
-	amount: u64,
-	evidence: uuid
-})
-export const CalculatedAssessment = relation("CalculatedAssessment", {
-	set: uuid,
-	component: closedId(Component),
-	basis: uuid
-})
-export const AppliedRule = relation("AppliedRule", {
-	set: uuid,
-	component: closedId(Component),
-	version: uuid,
-	schedule: uuid,
-	release: uuid,
-	business: uuid,
-	day: interval(i64, 1n)
-})
-export const CalculationBasis = relation("CalculationBasis", {
-	id: uuid,
-	set: uuid,
-	component: closedId(Component),
-	scope: uuid,
-	domain: uuid,
-	support: uuid,
-	business: uuid,
-	employee: uuid,
-	year: i64,
-	paidOn: interval(i64, 1n),
-	schedule: uuid,
-	earning: interval(u64),
-	gross: u64
-})
-// Components sharing a base program share one captured earning interval.
-// Context evidence records the inspected wages; it is not an editable YTD override.
-export const CalculationWageBase = relation("CalculationWageBase", {
-	set: uuid,
-	scope: uuid,
-	gross: u64,
-	earning: interval(u64),
-	context: str
-})
-export const AssessmentRevision = relation("AssessmentRevision", {
-	id: uuid,
-	wage: uuid,
-	set: uuid,
-	business: uuid,
-	employee: uuid,
-	paidOn: interval(i64, 1n),
-	gross: u64,
-	kind: closedId(RevisionKind)
-})
-export const CorrectionAssessment = relation("CorrectionAssessment", {
-	revision: uuid,
-	predecessor: uuid,
-	wage: uuid,
-	evidence: uuid
-})
-export const RevisionAccount = relation("RevisionAccount", {
-	revision: uuid,
-	account: uuid,
-	business: uuid,
-	family: closedId(AccountFamily)
-})
-
-export const Artifact = relation("Artifact", { id: uuid, sha256: str, mediaType: str })
-/** Exact bytes were measured once at registration. */
-export const VerifiedArtifact = relation("VerifiedArtifact", { artifact: uuid, length: u64 })
-/** The canonical permanent copy. Its UUIDv7 is the verification instant; the
- * archive command downloads the Drive bytes and matches Artifact.sha256 first. */
-export const DriveCopy = relation("DriveCopy", {
-	id: uuid,
-	artifact: uuid,
-	driveId: str,
-	remote: str,
-	evidence: uuid
-})
-/** A location superseded by the Drive copy, retained as history. */
-export const PriorLocation = relation("PriorLocation", {
-	copy: uuid,
-	artifact: uuid,
-	locator: str,
-	evidence: uuid
-})
-export const ArtifactLocation = relation("ArtifactLocation", { artifact: uuid, locator: str, evidence: uuid })
+/** EFTPS and TWC alike, keyed by the processor's tracker (EFT # or TWC
+ * confirmation #). The processor follows from the account. */
 export const TaxPayment = relation("TaxPayment", {
-	id: uuid,
-	business: uuid,
-	account: uuid,
-	sentOn: i64,
+	tracker: str,
+	account: closedId(TaxAccount),
+	kind: closedId(PaymentKind),
+	period: interval(i64),
 	amount: u64,
-	evidence: uuid
-})
-export const PaymentSettlement = relation("PaymentSettlement", {
-	payment: uuid,
-	settlesOn: i64,
-	evidence: uuid
-})
-/** An acknowledgement number the issuer assigned to the payment, unique per account. */
-export const PaymentReference = relation("PaymentReference", {
-	payment: uuid,
-	account: uuid,
-	issuer: closedId(PaymentIssuer),
-	value: str
-})
-export const PaymentEvidence = relation("PaymentEvidence", { payment: uuid, artifact: uuid })
-export const PaymentReconciliation = relation("PaymentReconciliation", {
-	id: uuid,
-	payment: uuid,
-	business: uuid,
-	account: uuid,
-	period: interval(i64),
-	evidence: uuid
-})
-export const PaymentAllocation = relation("PaymentAllocation", {
-	revision: uuid,
-	account: uuid,
-	business: uuid,
-	reconciliation: uuid,
-	paidOn: interval(i64, 1n)
-})
-/** Evidence authorizing one negative entry's application to a payment. */
-export const NegativeApplication = relation("NegativeApplication", {
-	revision: uuid,
-	account: uuid,
-	evidence: uuid
-})
-export const PaymentAdjustment = relation("PaymentAdjustment", {
-	id: uuid,
-	reconciliation: uuid,
-	amount: i64,
-	period: interval(i64),
-	evidence: uuid
+	initiatedOn: interval(i64, 1n),
+	funding: closedId(Funding)
 })
 
-export const SignedDisposition = relation("SignedDisposition", {
-	revision: uuid,
-	account: uuid,
-	disposition: closedId(Disposition),
-	evidence: uuid
-})
+// ── Filings ─────────────────────────────────────────────────────────────────
 
-export const CalendarCoverage = relation("CalendarCoverage", {
-	release: uuid,
-	authority: closedId(Authority),
-	kind: closedId(PeriodKind),
-	span: interval(i64)
-})
-export const CalendarPeriod = relation("CalendarPeriod", {
-	id: uuid,
-	release: uuid,
-	authority: closedId(Authority),
-	kind: closedId(PeriodKind),
-	span: interval(i64),
-	year: i64,
-	ordinal: u64
-})
-export const BusinessDayCoverage = relation("BusinessDayCoverage", {
-	release: uuid,
-	authority: closedId(Authority),
-	span: interval(i64),
-	evidence: uuid
-})
-export const BusinessDay = relation("BusinessDay", {
-	release: uuid,
-	authority: closedId(Authority),
-	span: interval(i64, 1n),
-	eligible: bool,
-	evidence: uuid
-})
-export const DepositPolicy = relation("DepositPolicy", {
-	id: uuid,
-	release: uuid,
-	business: uuid,
-	account: uuid,
-	family: closedId(AccountFamily),
-	periodKind: closedId(PeriodKind),
-	valid: interval(i64),
-	authority: closedId(Authority),
-	dueRule: closedId(DueRule),
-	evidence: uuid
-})
-export const DepositTrigger = relation("DepositTrigger", {
-	policy: uuid,
-	kind: closedId(CheckpointKind),
-	actionable: interval(u64)
-})
-export const DepositCheckpoint = relation("DepositCheckpoint", {
-	id: uuid,
-	policy: uuid,
-	business: uuid,
-	account: uuid,
-	calendar: uuid,
-	periodKind: closedId(PeriodKind),
-	span: interval(i64),
-	year: i64,
-	kind: closedId(CheckpointKind),
-	opensOn: i64,
-	dueOn: i64,
-	evidence: uuid
-})
-export const FilingRequirement = relation("FilingRequirement", {
-	id: uuid,
-	business: uuid,
-	form: closedId(Form),
-	subjectKind: closedId(SubjectKind),
-	startsOn: i64,
-	evidence: uuid
-})
-export const FilingRule = relation("FilingRule", {
-	id: uuid,
-	release: uuid,
-	form: closedId(Form),
-	periodKind: closedId(PeriodKind),
-	authority: closedId(Authority),
-	dueRule: closedId(DueRule),
-	evidence: uuid
-})
-export const RequirementEnd = relation("RequirementEnd", {
-	requirement: uuid,
-	endsBefore: i64,
-	evidence: uuid
-})
-export const FilingSubject = relation("FilingSubject", {
-	id: uuid,
-	business: uuid,
-	kind: closedId(SubjectKind)
-})
-export const BusinessSubject = relation("BusinessSubject", { subject: uuid, business: uuid })
-export const EmployeeSubject = relation("EmployeeSubject", { subject: uuid, employee: uuid, business: uuid })
-export const FilingScope = relation("FilingScope", {
-	id: uuid,
-	requirement: uuid,
-	subject: uuid,
-	business: uuid,
-	form: closedId(Form),
-	kind: closedId(PeriodKind),
-	span: interval(i64)
-})
 export const Filing = relation("Filing", {
 	id: uuid,
-	requirement: uuid,
-	subject: uuid,
-	business: uuid,
 	form: closedId(Form),
 	period: interval(i64),
-	kind: closedId(FilingKind),
-	opensOn: i64,
-	dueOn: i64,
-	evidence: uuid
+	method: closedId(Method)
 })
-export const OriginalFiling = relation("OriginalFiling", {
+export const Electronic = relation("Electronic", { filing: uuid, on: i64, confirmation: str })
+export const CertifiedMail = relation("CertifiedMail", { filing: uuid, mailedOn: i64, tracking: str })
+/** Recipient copies: the W-2 to the employee, the 1099-R to the recipient. */
+export const Furnished = relation("Furnished", { filing: uuid, on: i64 })
+/** Every line of a return exactly as filed. Once filed, a return's liability
+ * line is what its period owes. */
+export const FiledFigures = relation("FiledFigures", { filing: uuid, line: closedId(Line), value: i64 })
+/** A correction of a filed return, keyed by the day it went out: a 941-X, an
+ * amended 940 or C-3, a W-2c or W-3c, or corrected 1099-Rs with the 1096 that
+ * transmits them. `tracking` is the certified mail number, or the
+ * confirmation of one filed online. A return takes any number, one a day. */
+export const Correction = relation("Correction", { filing: uuid, mailedOn: i64, tracking: str })
+/** The lines a correction restates, as corrected. Every other line stands as
+ * it stood before. */
+export const CorrectedFigures = relation("CorrectedFigures", {
 	filing: uuid,
-	scope: uuid,
-	requirement: uuid,
-	subject: uuid,
-	business: uuid,
-	form: closedId(Form),
-	canonical: uuid,
-	kind: closedId(PeriodKind),
-	period: interval(i64)
-})
-export const CorrectionFiling = relation("CorrectionFiling", {
-	filing: uuid,
-	parent: uuid,
-	form: closedId(Form),
-	parentForm: closedId(Form),
-	business: uuid,
-	subject: uuid,
-	period: interval(i64),
-	evidence: uuid
-})
-export const DeadlineRevision = relation("DeadlineRevision", {
-	id: uuid,
-	filing: uuid,
-	sequence: u64,
-	dueOn: i64,
-	evidence: uuid
-})
-export const FormMethodPolicy = relation("FormMethodPolicy", {
-	id: uuid,
-	release: uuid,
-	form: closedId(Form),
-	method: closedId(SubmissionMethod),
-	requiredCount: u64
-})
-export const DocumentRequirement = relation("DocumentRequirement", {
-	policy: uuid,
-	slot: str,
-	role: closedId(DocumentRole)
-})
-export const FilingVersion = relation("FilingVersion", {
-	id: uuid,
-	filing: uuid,
-	business: uuid,
-	form: closedId(Form),
-	release: uuid,
-	sequence: u64,
-	origin: closedId(VersionOrigin),
-	evidence: uuid
-})
-export const PreparedVersion = relation("PreparedVersion", { version: uuid, snapshot: str })
-export const AttestedVersion = relation("AttestedVersion", { version: uuid, evidence: uuid })
-// One scoped association supplies both captured return bases and amendment
-// liabilities. Its ownership/period proof is shared by those two uses.
-export const FilingRevision = relation("FilingRevision", {
-	filing: uuid,
-	revision: uuid,
-	business: uuid,
-	subject: uuid,
-	form: closedId(Form),
-	family: closedId(AccountFamily),
-	employee: uuid,
-	paidOn: interval(i64, 1n)
-})
-export const FilingBasis = relation("FilingBasis", { version: uuid, filing: uuid, revision: uuid })
-export const FilingDocument = relation("FilingDocument", {
-	version: uuid,
-	slot: str,
-	role: closedId(DocumentRole),
-	artifact: uuid,
-	part: str
-})
-export const FormAdjustment = relation("FormAdjustment", {
-	id: uuid,
-	filing: uuid,
-	amount: i64,
-	evidence: uuid
-})
-export const FilingAdjustmentBasis = relation("FilingAdjustmentBasis", {
-	version: uuid,
-	filing: uuid,
-	adjustment: uuid
-})
-export const AmendmentLiability = relation("AmendmentLiability", {
-	filing: uuid,
-	revision: uuid,
-	account: uuid,
-	business: uuid,
-	family: closedId(AccountFamily),
-	evidence: uuid
-})
-export const GrandfatheredEligibility = relation("GrandfatheredEligibility", { filing: uuid, evidence: uuid })
-export const CertifiedMailing = relation("CertifiedMailing", {
-	id: uuid,
-	business: uuid,
-	carrier: str,
-	number: str,
 	mailedOn: i64,
-	receipt: uuid,
-	evidence: uuid
-})
-export const MailingEvidence = relation("MailingEvidence", { mailing: uuid, artifact: uuid })
-export const Submission = relation("Submission", {
-	id: uuid,
-	version: uuid,
-	business: uuid,
-	form: closedId(Form),
-	release: uuid,
-	policy: uuid,
-	method: closedId(SubmissionMethod),
-	requiredCount: u64
-})
-export const GrandfatheredSubmission = relation("GrandfatheredSubmission", {
-	submission: uuid,
-	version: uuid,
-	filing: uuid,
-	evidence: uuid
-})
-export const DigitalSubmission = relation("DigitalSubmission", {
-	submission: uuid,
-	submittedOn: i64,
-	evidence: uuid
-})
-export const DigitalReference = relation("DigitalReference", {
-	submission: uuid,
-	version: uuid,
-	filing: uuid,
-	value: str,
-	sourceText: str
-})
-export const CertifiedMailSubmission = relation("CertifiedMailSubmission", {
-	submission: uuid,
-	version: uuid,
-	business: uuid,
-	mailing: uuid
-})
-export const SubmissionDocument = relation("SubmissionDocument", {
-	submission: uuid,
-	version: uuid,
-	policy: uuid,
-	slot: str,
-	role: closedId(DocumentRole),
-	artifact: uuid,
-	part: str
-})
-export const Rejection = relation("Rejection", { id: uuid, submission: uuid, evidence: uuid })
-export const ImportProvenance = relation("ImportProvenance", {
-	id: uuid,
-	sourceHash: str,
-	mapHash: str,
-	auditHash: str,
-	artifact: uuid
+	line: closedId(Line),
+	value: i64
 })
 
-/** Prose is stored once. Every fact's `evidence` names the statement that
- * justified writing it; identical text written by any command is one row. */
-export const Statement = relation("Statement", { id: uuid, text: str })
-export const StatementByText = key(Statement, ["text"])
+// ── The plan's books ────────────────────────────────────────────────────────
 
-/** Header of an open question. Each kind has exactly one typed sidecar
- * (exhaustive alternatives); an Answer closes it. The id is the asking instant. */
-export const Question = relation("Question", {
-	id: uuid,
-	business: uuid,
-	kind: closedId(QuestionKind),
-	detail: str
-})
-export const EmployeeQuestion = relation("EmployeeQuestion", {
-	question: uuid,
-	business: uuid,
-	employee: uuid,
-	year: i64,
-	topic: str
-})
-export const PlanQuestion = relation("PlanQuestion", {
-	question: uuid,
-	business: uuid,
-	plan: uuid,
-	evidence: uuid
-})
-export const BookkeepingQuestion = relation("BookkeepingQuestion", { question: uuid, evidence: uuid })
-export const AccountQuestion = relation("AccountQuestion", {
-	question: uuid,
-	business: uuid,
-	account: uuid,
-	evidence: uuid
-})
-export const Answer = relation("Answer", { id: uuid, question: uuid, evidence: uuid })
+/** A whole-account sweep of a plan account into the owner's Roth IRA. Roth
+ * basis enters the plan only as RothDeferral and AfterTax wires, so the basis a
+ * sweep carries is derived from the wires sent since the previous sweep and is
+ * never stored; a partial sweep cannot be written down. */
+export const Rollover = relation("Rollover", { account: closedId(PlanAccount), on: i64, gross: u64 })
 
 export const relations = {
-	ContributionCancellation,
-	MercuryTransaction,
-	PayrollTransaction,
-	PlanReceiptDate,
-	CashDirection,
-	BankStatus,
-	CashPurpose,
-	ContributionSource,
-	ContributionOrigin,
-	PlanAccountKind,
-	BankMovement,
-	BankObservation,
-	BankSource,
-	BankRetry,
-	CashAllocation,
-	PayrollCashBinding,
-	BankTaxPayment,
-	Owner,
-	OwnerDistribution,
-	DistributionReturn,
-	DistributionReview,
-	RetirementPlan,
-	PlanAccount,
-	RetirementAnnual,
-	RetirementContribution,
-	ContributionElection,
-	ContributionAuthorization,
-	ContributionDeduction,
-	ContributionFunding,
-	ProviderOperation,
-	PlanReceipt,
-	ReceiptAllocation,
-	RothConversion,
-	ConversionReceipt,
-	SuppliedConversionTax,
-	RetirementReport,
-	Reported1099R,
-	Reported1099RBasis,
-	Reported1096,
-	ReportForm,
-	DistributionCode,
-	ConversionTaxField,
-	ReportedReceiptConversion,
-	PlanBalance,
-	PlanSubject,
-	RetirementFilingBasis,
-
-	State,
-	Payer,
-	Program,
-	AccountFamily,
-	CalculationMethod,
-	Component,
+	Role,
+	Jurisdiction,
+	Periodicity,
+	Trigger,
+	Processor,
 	Form,
-	SubmissionMethod,
-	DocumentRole,
-	PeriodKind,
-	Authority,
-	AssessmentOrigin,
-	RevisionKind,
-	CalculationPurpose,
-	CommitmentOrigin,
-	DeductionKind,
-	VersionOrigin,
-	FilingKind,
-	SubjectKind,
-	BandRole,
-	CheckpointKind,
-	DueRule,
-	Business,
-	BusinessAddress,
-	AddressKind,
-	StateAccount,
-	Employee,
-	FilingStatus,
+	Line,
 	TaxAccount,
-	AnnualBudget,
-	BudgetCommitment,
-	BudgetAssignment,
-	Wage,
-	RegularWork,
-	RegularCommitment,
-	ObservedCompensation,
-	Deduction,
-	Election,
-	ElectionSource,
-	ElectionUse,
-	DeferralPolicy,
-	GrossSuggestionMethod,
-	GrossSuggestionPolicy,
-	EmployeeAllowance,
-	Recovery,
-	PolicyRelease,
-	PolicyBinding,
-	PublishedRateKind,
-	PolicyLimitKind,
-	PolicyEvidenceKind,
-	AnnualPolicy,
-	AnnualSource,
-	PublishedRate,
-	PolicyLimit,
-	LookbackPeriod,
-	AnnualEvidence,
-	AnnualApproval,
-	CalculationPolicy,
-	ElectionContributionKind,
-	ElectionDocument,
-	ElectionDocumentAmount,
-	ElectionDocumentRevision,
-	EmployerRateNotice,
-	EmployerSchedule,
-	FutaBasis,
-	SupportedPayrollDomain,
-	MonthlyDepositor,
-	SupportedProgram,
-	PolicyCoverage,
-	RateVersion,
-	RateSchedule,
+	Tax,
+	TransferKind,
+	PaymentKind,
+	Funding,
+	Method,
+	PlanAccount,
+	DistributionCode,
+	Party,
+	Registration,
+	Employment,
+	Custody,
+	History,
+	TaxYear,
 	TaxBand,
-	TaxBaseScope,
-	StateBaseScope,
-	AssessmentSet,
-	ObservedSet,
-	PayrollCalculation,
-	ProposedWage,
-	ProposedRevision,
-	CalculationRecoveryClaim,
-	Assessment,
-	ObservedAssessment,
-	TaxableWages,
-	CalculatedAssessment,
-	AppliedRule,
-	CalculationBasis,
-	CalculationWageBase,
-	AssessmentRevision,
-	CorrectionAssessment,
-	RevisionAccount,
-	Artifact,
-	VerifiedArtifact,
-	ArtifactLocation,
+	PayPlan,
+	Election,
+	Wage,
+	Withholding,
+	Recovery,
+	Transfer,
+	NetPay,
+	RothDeferral,
+	AfterTax,
+	Distribution,
+	TaxDebit,
 	TaxPayment,
-	PaymentSettlement,
-	PaymentReference,
-	PaymentIssuer,
-	PaymentEvidence,
-	PaymentReconciliation,
-	PaymentAllocation,
-	PaymentAdjustment,
-	QuestionKind,
-	SignedDisposition,
-	Disposition,
-	CalendarCoverage,
-	CalendarPeriod,
-	BusinessDay,
-	BusinessDayCoverage,
-	DepositPolicy,
-	DepositTrigger,
-	DepositCheckpoint,
-	FilingRequirement,
-	FilingRule,
-	RequirementEnd,
-	FilingSubject,
-	BusinessSubject,
-	EmployeeSubject,
-	FilingScope,
 	Filing,
-	OriginalFiling,
-	CorrectionFiling,
-	DeadlineRevision,
-	FormMethodPolicy,
-	DocumentRequirement,
-	FilingVersion,
-	PreparedVersion,
-	AttestedVersion,
-	FilingBasis,
-	FilingRevision,
-	FilingDocument,
-	FormAdjustment,
-	FilingAdjustmentBasis,
-	AmendmentLiability,
-	GrandfatheredEligibility,
-	CertifiedMailing,
-	MailingEvidence,
-	Submission,
-	GrandfatheredSubmission,
-	DigitalSubmission,
-	DigitalReference,
-	CertifiedMailSubmission,
-	SubmissionDocument,
-	Rejection,
-	ImportProvenance,
-	Statement,
-	Question,
-	EmployeeQuestion,
-	PlanQuestion,
-	BookkeepingQuestion,
-	AccountQuestion,
-	Answer,
-	DriveCopy,
-	PriorLocation,
-	NegativeApplication
+	Electronic,
+	CertifiedMail,
+	Furnished,
+	FiledFigures,
+	Correction,
+	CorrectedFigures,
+	Rollover
 }
 
-const submissionIdKey = key(Submission, ["id"])
-const grandfatheredSubmissionSubmissionKey = key(GrandfatheredSubmission, ["submission"])
-const digitalSubmissionSubmissionKey = key(DigitalSubmission, ["submission"])
-const certifiedMailSubmissionSubmissionKey = key(CertifiedMailSubmission, ["submission"])
-const assessmentSetIdKey = key(AssessmentSet, ["id"])
-const observedSetSetKey = key(ObservedSet, ["set"])
-const payrollCalculationSetKey = key(PayrollCalculation, ["set"])
-const payrollCalculationIdKey = key(PayrollCalculation, ["id"])
-const proposedWageCalculationKey = key(ProposedWage, ["calculation"])
-const proposedRevisionCalculationKey = key(ProposedRevision, ["calculation"])
-const filingVersionIdKey = key(FilingVersion, ["id"])
-const preparedVersionVersionKey = key(PreparedVersion, ["version"])
-const attestedVersionVersionKey = key(AttestedVersion, ["version"])
-const filingIdKey = key(Filing, ["id"])
-const originalFilingFilingKey = key(OriginalFiling, ["filing"])
-const correctionFilingFilingKey = key(CorrectionFiling, ["filing"])
-const filingSubjectIdKey = key(FilingSubject, ["id"])
-const businessSubjectSubjectKey = key(BusinessSubject, ["subject"])
-const employeeSubjectSubjectKey = key(EmployeeSubject, ["subject"])
-const planSubjectSubjectKey = key(PlanSubject, ["subject"])
-const budgetCommitmentIdKey = key(BudgetCommitment, ["id"])
-const regularCommitmentCommitmentKey = key(RegularCommitment, ["commitment"])
-const observedCompensationCommitmentKey = key(ObservedCompensation, ["commitment"])
+// ── Laws ───────────────────────────────────────────────────────────────────
 
-const retirementReportIdKey = key(RetirementReport, ["id"])
-const reported1099RReportKey = key(Reported1099R, ["report"])
-const reported1096ReportKey = key(Reported1096, ["report"])
-const questionIdKey = key(Question, ["id"])
-const questionArms = [
-	key(EmployeeQuestion, ["question"]),
-	key(PlanQuestion, ["question"]),
-	key(BookkeepingQuestion, ["question"]),
-	key(AccountQuestion, ["question"])
-] as const
+export const WageById = key(Wage, ["id"])
+export const WageByDay = key(Wage, ["paidOn"])
+export const TransferByMercury = key(Transfer, ["mercury"])
+export const PaymentByTracker = key(TaxPayment, ["tracker"])
+export const FilingById = key(Filing, ["id"])
+export const FilingByPeriod = key(Filing, ["form", "period"])
+const transferArms = {
+	NetPay: key(NetPay, ["transfer"]),
+	RothDeferral: key(RothDeferral, ["transfer"]),
+	AfterTax: key(AfterTax, ["transfer"]),
+	Distribution: key(Distribution, ["transfer"]),
+	Tax: key(TaxDebit, ["transfer"])
+}
+/** Methods with something to record; Attested has nothing, so no arm. */
+const methodArms = { Electronic, CertifiedMail, Furnished }
+const filed = ["Electronic", "CertifiedMail", "Furnished"] as const
 
-export const identityLaws = [
-	key(Business, ["id"]),
-	key(Business, ["ein"]),
-	key(BusinessAddress, ["business", "kind"]),
-	key(StateAccount, ["business", "state"]),
-	key(Employee, ["id"]),
-	key(Employee, ["id", "business"]),
-	key(TaxAccount, ["id"]),
-	key(TaxAccount, ["business", "family"]),
-	key(TaxAccount, ["id", "business", "family"]),
-	key(TaxAccount, ["id", "business"]),
-	key(AnnualBudget, ["id"]),
-	key(AnnualBudget, ["employee", "year"]),
-	key(AnnualBudget, ["id", "employee", "year"]),
-	budgetCommitmentIdKey,
-	key(BudgetCommitment, ["id", "employee", "year", "amount"]),
-	key(BudgetCommitment, ["id", "employee", "amount"]),
-	key(BudgetAssignment, ["commitment"]),
-	key(Wage, ["id"]),
-	key(Wage, ["id", "business"]),
-	key(Wage, ["initialRevision", "id"]),
-	key(Wage, ["commitment"]),
-	key(Wage, ["id", "commitment"]),
-	key(Wage, ["id", "employee"]),
-	key(Wage, ["id", "employee", "year"]),
-	key(Wage, ["id", "employee", "paidOn"]),
-	key(Wage, ["id", "business", "employee", "gross", "paidOn"]),
-	key(RegularWork, ["wage"]),
-	key(RegularWork, ["employee", "span"]),
-	regularCommitmentCommitmentKey,
-	key(RegularCommitment, ["wage"]),
-	observedCompensationCommitmentKey,
-	key(ObservedCompensation, ["wage"]),
-	key(Deduction, ["wage", "kind"]),
-	key(Deduction, ["wage", "kind", "amount"]),
-	key(Election, ["id"]),
-	key(Election, ["id", "employee", "year", "signedOn", "limit"]),
-	key(ElectionSource, ["election"]),
-	key(ElectionSource, ["document"]),
-	key(ElectionDocument, ["id", "employee", "year", "signedOn"]),
-	key(RetirementAnnual, ["id", "employee", "year"]),
-	key(Election, ["employee", "effective"]),
-	key(Election, ["id", "employee", "effective"]),
-	key(DeferralPolicy, ["id"]),
-	key(GrossSuggestionPolicy, ["id"]),
-	key(GrossSuggestionPolicy, ["release"]),
-	key(DeferralPolicy, ["release", "year"]),
-	key(DeferralPolicy, ["id", "year", "limit"]),
-	key(EmployeeAllowance, ["id"]),
-	key(EmployeeAllowance, ["employee", "year"]),
-	key(EmployeeAllowance, ["id", "employee", "year", "limit"]),
-	key(ElectionUse, ["wage"]),
-	key(Recovery, ["id"]),
-	key(Recovery, ["fromWage", "owedOnWage", "component"]),
-	key(PolicyRelease, ["id"]),
-	key(PolicyRelease, ["sha256"]),
-	key(PolicyBinding, ["business"]),
-	key(AnnualPolicy, ["id"]),
-	key(AnnualPolicy, ["id", "business", "authority", "year", "valid"]),
-	key(AnnualSource, ["annual", "artifact"]),
-	key(PublishedRate, ["annual", "kind"]),
-	key(PolicyLimit, ["annual", "kind"]),
-	key(LookbackPeriod, ["annual"]),
-	key(AnnualEvidence, ["annual", "kind"]),
-	key(AnnualApproval, ["annual"]),
-	key(AnnualApproval, ["release", "business", "authority", "year"]),
-	key(AnnualApproval, ["annual", "release", "business", "authority", "valid"]),
-	key(CalculationPolicy, ["calculation", "authority"]),
-	key(ElectionDocument, ["id"]),
-	key(ElectionDocument, ["id", "employee", "year"]),
-	key(ElectionDocumentRevision, ["document"]),
-	key(ElectionDocumentRevision, ["predecessor"]),
-	key(ElectionDocument, ["employee", "artifact"]),
-	key(ElectionDocumentAmount, ["document", "kind"]),
-	key(ElectionDocumentAmount, ["document", "kind", "amount"]),
-	key(CalendarPeriod, ["id", "authority", "year", "span"]),
-	key(PayrollCalculation, ["id", "release", "business", "paidOn"]),
+export const ledger = schema("WagieTools", relations, [
+	// Identity: natural keys; intervals keyed pointwise never overlap.
+	key(Party, ["role"]),
+	key(Party, ["tin"]),
+	key(Registration, ["state"]),
+	key(Employment, ["span"]),
+	key(Custody, ["account"]),
+	key(Custody, ["number"]),
+	key(History, ["span"]),
+	key(TaxYear, ["year"]),
+	key(TaxYear, ["year", "span"]),
+	key(TaxBand, ["year", "tax"]),
+	key(PayPlan, ["year"]),
+	key(Election, ["year"]),
+	WageById,
+	WageByDay,
+	key(Withholding, ["wage", "tax"]),
+	key(Recovery, ["wage", "recoveredBy"]),
+	TransferByMercury,
+	PaymentByTracker,
+	key(TaxDebit, ["payment"]),
+	FilingById,
+	FilingByPeriod,
+	...Object.values(transferArms),
+	...Object.values(methodArms).map((arm) => key(arm, ["filing"])),
+	key(CertifiedMail, ["tracking"]),
+	key(FiledFigures, ["filing", "line"]),
+	key(Correction, ["filing", "mailedOn"]),
+	key(CorrectedFigures, ["filing", "mailedOn", "line"]),
+	key(Rollover, ["account", "on"]),
 
-	key(EmployerRateNotice, ["id"]),
-	key(EmployerRateNotice, ["id", "business", "schedule", "valid"]),
-	key(EmployerSchedule, ["version"]),
-	key(FutaBasis, ["version"]),
-	key(EmployerSchedule, ["version", "business", "schedule", "valid"]),
-	key(SupportedPayrollDomain, ["release", "state", "valid"]),
-	key(SupportedPayrollDomain, ["id"]),
-	key(SupportedPayrollDomain, ["id", "release", "valid"]),
-	key(MonthlyDepositor, ["id"]),
-	key(MonthlyDepositor, ["business", "valid"]),
-	key(MonthlyDepositor, ["id", "business", "valid"]),
-	key(SupportedProgram, ["id"]),
-	key(SupportedProgram, ["domain", "program"]),
-	key(SupportedProgram, ["id", "domain"]),
-	key(SupportedProgram, ["id", "eligible"]),
-	key(PolicyCoverage, ["release", "business", "component", "span"]),
-	key(RateVersion, ["id"]),
-	key(RateVersion, ["id", "business", "schedule", "valid"]),
-	key(RateVersion, ["release", "business", "component", "valid"]),
-	key(RateVersion, ["id", "release", "business", "component", "schedule", "valid"]),
-	key(RateSchedule, ["id"]),
-	key(RateSchedule, ["id", "domain"]),
-	key(TaxBand, ["id"]),
-	key(TaxBand, ["schedule", "wages"]),
-	key(TaxBand, ["id", "schedule", "wages"]),
-	key(TaxBaseScope, ["id"]),
-	key(TaxBaseScope, ["id", "business", "employee", "year", "span"]),
-	key(TaxBaseScope, ["business", "employee", "program", "year"]),
-	key(StateBaseScope, ["scope"]),
-	assessmentSetIdKey,
-	key(AssessmentSet, ["id", "origin"]),
-	key(AssessmentSet, ["id", "employee"]),
-	key(AssessmentSet, ["id", "business", "employee", "gross", "paidOn"]),
-	key(AssessmentSet, ["id", "gross"]),
-	key(AssessmentSet, ["id", "business", "paidOn"]),
-	observedSetSetKey,
-	payrollCalculationIdKey,
-	payrollCalculationSetKey,
-	key(PayrollCalculation, ["request"]),
-	key(PayrollCalculation, ["set", "domain"]),
-	key(PayrollCalculation, ["id", "set"]),
-	key(PayrollCalculation, ["id", "business", "paidOn"]),
-	key(PayrollCalculation, ["set", "release"]),
-	proposedWageCalculationKey,
-	proposedRevisionCalculationKey,
-	key(CalculationRecoveryClaim, ["calculation", "owedOnWage", "component"]),
-	key(Assessment, ["set", "component"]),
-	key(Assessment, ["set", "component", "method"]),
-	key(ObservedAssessment, ["set", "component"]),
-	key(TaxableWages, ["set", "program"]),
-	key(CalculatedAssessment, ["set", "component"]),
-	key(CalculatedAssessment, ["basis"]),
-	key(AppliedRule, ["set", "component"]),
-	key(AppliedRule, ["set", "component", "schedule"]),
-	key(CalculationBasis, ["id"]),
-	key(CalculationBasis, ["id", "gross", "earning"]),
-	key(CalculationBasis, ["set", "component"]),
-	key(CalculationBasis, ["id", "schedule", "earning"]),
-	key(CalculationBasis, ["id", "set", "component"]),
-	key(CalculationWageBase, ["set", "scope"]),
-	key(CalculationWageBase, ["set", "scope", "gross", "earning"]),
-	key(AssessmentRevision, ["id"]),
-	key(AssessmentRevision, ["set"]),
-	key(AssessmentRevision, ["id", "wage"]),
-	key(AssessmentRevision, ["id", "business"]),
-	key(AssessmentRevision, ["id", "business", "paidOn"]),
-	key(AssessmentRevision, ["id", "business", "employee", "paidOn"]),
-	key(CorrectionAssessment, ["revision"]),
-	key(CorrectionAssessment, ["revision", "wage"]),
-	key(CorrectionAssessment, ["predecessor"]),
-	key(RevisionAccount, ["revision", "account"]),
-	key(RevisionAccount, ["revision", "family"]),
-	key(RevisionAccount, ["revision", "account", "business"]),
-	key(RevisionAccount, ["revision", "account", "business", "family"]),
-	key(Artifact, ["id"]),
-	key(Artifact, ["sha256"]),
-	key(VerifiedArtifact, ["artifact"]),
-	key(ArtifactLocation, ["artifact", "locator"]),
-	key(TaxPayment, ["id"]),
-	key(TaxPayment, ["id", "business"]),
-	key(TaxPayment, ["id", "business", "account"]),
-	key(TaxPayment, ["id", "account"]),
-	key(PaymentSettlement, ["payment"]),
-	key(PaymentReference, ["issuer", "account", "value"]),
-	key(PaymentEvidence, ["payment", "artifact"]),
-	key(PaymentReconciliation, ["id"]),
-	key(PaymentReconciliation, ["payment"]),
-	key(PaymentReconciliation, ["id", "business", "account"]),
-	key(PaymentReconciliation, ["id", "business", "account", "period"]),
-	key(PaymentAllocation, ["revision", "account"]),
-	key(PaymentAdjustment, ["id"]),
-	key(SignedDisposition, ["revision", "account"]),
-	key(CalendarCoverage, ["release", "authority", "kind", "span"]),
-	key(CalendarPeriod, ["id"]),
-	key(CalendarPeriod, ["release", "authority", "kind", "span"]),
-	key(CalendarPeriod, ["id", "kind", "span"]),
-	key(CalendarPeriod, ["id", "year", "span"]),
-	key(CalendarPeriod, ["id", "kind", "year", "span"]),
-	key(BusinessDayCoverage, ["release", "authority", "span"]),
-	key(BusinessDay, ["release", "authority", "span"]),
-	key(DepositPolicy, ["id"]),
-	key(DepositPolicy, ["release", "account", "valid"]),
-	key(DepositPolicy, ["id", "business", "account", "periodKind", "valid"]),
-	key(DepositTrigger, ["policy", "kind"]),
-	key(DepositCheckpoint, ["id"]),
-	key(DepositCheckpoint, ["account", "calendar"]),
-	key(DepositCheckpoint, ["policy", "business", "account", "periodKind", "span"]),
-	key(FilingRequirement, ["id"]),
-	key(FilingRequirement, ["business", "form"]),
-	key(FilingRequirement, ["id", "business", "form"]),
-	key(FilingRule, ["release", "form"]),
-	key(FilingRule, ["id"]),
-	key(RequirementEnd, ["requirement"]),
-	filingSubjectIdKey,
-	key(FilingSubject, ["id", "business"]),
-	businessSubjectSubjectKey,
-	key(BusinessSubject, ["business"]),
-	employeeSubjectSubjectKey,
-	key(EmployeeSubject, ["employee"]),
-	key(EmployeeSubject, ["subject", "employee", "business"]),
-	key(FilingScope, ["id"]),
-	key(FilingScope, ["requirement", "subject"]),
-	key(FilingScope, ["id", "kind", "span"]),
-	key(FilingScope, ["id", "requirement", "subject", "business", "form"]),
-	filingIdKey,
-	key(Filing, ["id", "business", "form"]),
-	key(Filing, ["id", "form"]),
-	key(Filing, ["id", "business", "subject", "period"]),
-	key(Filing, ["id", "business", "subject", "form", "period"]),
-	key(Filing, ["id", "period"]),
-	key(Filing, ["id", "requirement", "subject", "business", "form"]),
-	originalFilingFilingKey,
-	key(OriginalFiling, ["scope", "kind", "period"]),
-	key(OriginalFiling, ["scope", "canonical"]),
-	key(OriginalFiling, ["scope", "period"]),
-	correctionFilingFilingKey,
-	key(CorrectionFiling, ["parent"]),
-	key(DeadlineRevision, ["id"]),
-	key(DeadlineRevision, ["filing", "sequence"]),
-	key(FormMethodPolicy, ["id"]),
-	key(FormMethodPolicy, ["release", "form", "method"]),
-	key(FormMethodPolicy, ["id", "release", "form", "method", "requiredCount"]),
-	key(DocumentRequirement, ["policy", "slot"]),
-	key(DocumentRequirement, ["policy", "slot", "role"]),
-	filingVersionIdKey,
-	key(FilingVersion, ["filing", "sequence"]),
-	key(FilingVersion, ["id", "filing"]),
-	key(FilingVersion, ["id", "business"]),
-	key(FilingVersion, ["id", "business", "form", "release"]),
-	preparedVersionVersionKey,
-	attestedVersionVersionKey,
-	key(FilingBasis, ["version", "revision"]),
-	key(FilingRevision, ["filing", "revision"]),
-	key(FilingRevision, ["filing", "revision", "business", "family"]),
-	key(FilingDocument, ["version", "slot"]),
-	key(FilingDocument, ["version", "slot", "role", "artifact", "part"]),
-	key(FormAdjustment, ["id"]),
-	key(FormAdjustment, ["id", "filing"]),
-	key(FilingAdjustmentBasis, ["version", "adjustment"]),
-	key(AmendmentLiability, ["filing", "revision", "account"]),
-	key(GrandfatheredEligibility, ["filing"]),
-	key(CertifiedMailing, ["id"]),
-	key(CertifiedMailing, ["carrier", "number"]),
-	key(CertifiedMailing, ["id", "business"]),
-	key(MailingEvidence, ["mailing", "artifact"]),
-	submissionIdKey,
-	key(Submission, ["id", "version", "business"]),
-	key(Submission, ["id", "version"]),
-	key(Submission, ["id", "version", "policy"]),
-	grandfatheredSubmissionSubmissionKey,
-	digitalSubmissionSubmissionKey,
-	key(DigitalReference, ["filing", "value"]),
-	certifiedMailSubmissionSubmissionKey,
-	key(CertifiedMailSubmission, ["mailing", "version"]),
-	key(SubmissionDocument, ["submission", "slot"]),
-	key(Rejection, ["submission"]),
-	key(ImportProvenance, ["id"]),
-	key(ImportProvenance, ["sourceHash"])
-]
+	// The rosters' columns name rosters.
+	contained(on(Form, "jurisdiction"), on(Jurisdiction, "id")),
+	contained(on(Form, "period"), on(Periodicity, "id")),
+	contained(on(Form, "trigger"), on(Trigger, "id")),
+	contained(on(Line, "form"), on(Form, "id")),
+	contained(on(TaxAccount, "jurisdiction"), on(Jurisdiction, "id")),
+	contained(on(TaxAccount, "processor"), on(Processor, "id")),
+	contained(on(TaxAccount, "period"), on(Periodicity, "id")),
+	contained(on(TaxAccount, "accrues"), on(Periodicity, "id")),
+	contained(on(TaxAccount, "liability"), on(Line, "id")),
+	contained(on(Tax, "account"), on(TaxAccount, "id")),
+	contained(on(PlanAccount, "code"), on(DistributionCode, "id")),
 
-export const laws = [
-	...alternatives(submissionIdKey, "method", SubmissionMethod, {
-		Grandfathered: grandfatheredSubmissionSubmissionKey,
-		Digital: digitalSubmissionSubmissionKey,
-		CertifiedMail: certifiedMailSubmissionSubmissionKey
-	}),
-	...alternatives(assessmentSetIdKey, "origin", AssessmentOrigin, {
-		Observed: observedSetSetKey,
-		Calculated: payrollCalculationSetKey
-	}),
-	...alternatives(payrollCalculationIdKey, "purpose", CalculationPurpose, {
-		NewWage: proposedWageCalculationKey,
-		TaxRevision: proposedRevisionCalculationKey
-	}),
-	...alternatives(filingVersionIdKey, "origin", VersionOrigin, {
-		Prepared: preparedVersionVersionKey,
-		Attested: attestedVersionVersionKey
-	}),
-	...alternatives(filingIdKey, "kind", FilingKind, {
-		Original: originalFilingFilingKey,
-		Correction: correctionFilingFilingKey
-	}),
-	...alternatives(filingSubjectIdKey, "kind", SubjectKind, {
-		Business: businessSubjectSubjectKey,
-		Employee: employeeSubjectSubjectKey,
-		Plan: planSubjectSubjectKey
-	}),
-	...alternatives(budgetCommitmentIdKey, "origin", CommitmentOrigin, {
-		Regular: regularCommitmentCommitmentKey,
-		Observed: observedCompensationCommitmentKey
-	}),
-	key(ReportedReceiptConversion, ["receipt"]),
-	key(RetirementReport, ["id", "plan"]),
-	contained(on(ReportedReceiptConversion, ["report", "plan"]), on(RetirementReport, ["id", "plan"])),
-	contained(on(ReportedReceiptConversion, ["receipt", "plan"]), on(PlanReceipt, ["id", "plan"])),
-	contained(
-		on(ReportedReceiptConversion, "receipt"),
-		on(select(PlanReceipt, { source: "EmployeeAfterTax" }), "id")
-	),
-	capacity(on(ReportedReceiptConversion, "receipt"), {
-		from: on(ConversionReceipt, "receipt"),
-		within: within(0n)
-	}),
-	key(DistributionReturn, ["allocation"]),
-	key(ContributionCancellation, ["contribution"]),
-	contained(
-		on(ContributionCancellation, "contribution"),
-		on(select(RetirementContribution, { origin: "Authorized" }), "id")
-	),
-	capacity(on(ContributionCancellation, "contribution"), {
-		from: on(ContributionFunding, "contribution"),
-		within: within(0n)
-	}),
-	capacity(on(ContributionCancellation, "contribution"), {
-		from: on(ReceiptAllocation, "contribution"),
-		within: within(0n)
-	}),
-	key(RetirementPlan, ["id", "business", "employee"]),
-	key(RetirementContribution, ["id", "business"]),
-	contained(
-		on(RetirementContribution, ["plan", "business", "employee"]),
-		on(RetirementPlan, ["id", "business", "employee"])
-	),
-	contained(
-		on(ContributionFunding, ["contribution", "business"]),
-		on(RetirementContribution, ["id", "business"])
-	),
-	mirrors(
-		on(select(RetirementContribution, { source: "EmployeeRothDeferral" }), "id"),
-		on(ContributionDeduction, "contribution")
-	),
-	mirrors(on(select(CashAllocation, { purpose: "PayrollCash" }), "id"), on(PayrollCashBinding, "allocation")),
-	mirrors(
-		on(select(CashAllocation, { purpose: "OwnerDistribution" }), "id"),
-		on(OwnerDistribution, "allocation")
-	),
-	mirrors(
-		on(select(CashAllocation, { purpose: "DistributionReturn" }), "id"),
-		on(DistributionReturn, "allocation")
-	),
-	mirrors(on(select(CashAllocation, { purpose: "TaxPayment" }), "id"), on(BankTaxPayment, "allocation")),
-	key(CashAllocation, ["id", "amount"]),
-	capacity(on(select(CashAllocation, { purpose: "RothRemittance" }), "id"), {
-		from: on(select(ContributionFunding, { source: "EmployeeRothDeferral" }), "allocation"),
-		within: within(1n)
-	}),
-	contained(
-		on(select(ContributionFunding, { source: "EmployeeRothDeferral" }), ["allocation", "amount"]),
-		on(CashAllocation, ["id", "amount"])
-	),
-	...[
-		BankMovement,
-		CashAllocation,
-		OwnerDistribution,
-		DistributionReturn,
-		RetirementContribution,
-		PlanReceipt,
-		RothConversion
-	].map((r) =>
-		capacity(on(r, "id"), { from: on(r, "id"), weight: weigh("amount"), within: within(1n, "*") })
-	),
-	key(Deduction, ["wage", "kind", "employee", "year", "amount"]),
-	contained(on(ContributionDeduction, "kind"), on(DeductionKind, "id")),
-	contained(
-		on(ContributionDeduction, "contribution"),
-		on(select(ContributionDeduction, { kind: "Roth" }), "contribution")
-	),
+	// Who and where: one of each party; registered wherever the owner works.
+	contained(on(Party, "role"), on(Role, "id")),
+	contained(on(Registration, "state"), on(select(Jurisdiction, { state: true }), "id")),
+	contained(on(Employment, "state"), on(Registration, "state")),
+	contained(on(Custody, "account"), on(PlanAccount, "id")),
 
-	key(MercuryTransaction, ["movement"]),
-	key(MercuryTransaction, ["reference"]),
-	key(PayrollTransaction, ["wage", "movement"]),
-	key(PlanReceiptDate, ["receipt"]),
-	mirrors(on(BankMovement, "id"), on(MercuryTransaction, "movement")),
-	capacity(on(select(MercuryTransaction, { reference: "" }), "movement"), {
-		from: on(MercuryTransaction, "movement"),
-		within: within(0n)
+	// Policy: every year prices every federal banded tax exactly once.
+	contained(on(TaxBand, "year"), on(TaxYear, "year")),
+	contained(on(TaxBand, "tax"), on(select(Tax, { banded: true }), "id")),
+	...federalBanded.map((handle) =>
+		capacity(on(TaxYear, "year"), { from: on(select(TaxBand, { tax: handle }), "year"), within: within(1n) })
+	),
+	contained(on(PayPlan, "year"), on(TaxYear, "year")),
+	contained(on(Election, "year"), on(TaxYear, "year")),
+	capacity(on(TaxYear, "year"), {
+		from: on(Election, "year"),
+		weight: weigh("roth"),
+		within: within(0n, ref("deferralLimit"))
 	}),
-	contained(on(PayrollTransaction, ["wage", "business"]), on(Wage, ["id", "business"])),
-	contained(on(PayrollTransaction, ["movement", "business"]), on(BankMovement, ["id", "business"])),
-	// Every banked wage retains its actual Mercury movement(s). No-transfer wages
-	// cannot have any bank movement. Arithmetic is proved at the posting boundary.
-	contained(on(PayrollTransaction, "wage"), on(select(Wage, { requiresTransfer: true }), "id")),
-	capacity(on(select(Wage, { requiresTransfer: true }), "id"), {
-		from: on(PayrollTransaction, "wage"),
+
+	// A paycheck: paid while employed, in its tax year, under an election, at
+	// least a cent, never more Roth than gross, every federal withholding once.
+	contained(on(Wage, "paidOn"), on(Employment, "span")),
+	contained(on(Wage, ["year", "paidOn"]), on(TaxYear, ["year", "span"])),
+	contained(on(Wage, "year"), on(Election, "year")),
+	capacity(on(Wage, "id"), { from: on(Wage, "id"), weight: weigh("gross"), within: within(1n, "*") }),
+	capacity(on(Wage, "id"), { from: on(Wage, "id"), weight: weigh("roth"), within: within(0n, ref("gross")) }),
+	capacity(on(Election, "year"), {
+		from: on(Wage, "year"),
+		weight: weigh("roth"),
+		within: within(0n, ref("roth"))
+	}),
+	capacity(on(TaxYear, "year"), {
+		from: on(Wage, "year"),
+		weight: weigh("gross"),
+		within: within(0n, ref("wageCeiling"))
+	}),
+	contained(on(Withholding, "wage"), on(Wage, "id")),
+	contained(on(Withholding, "tax"), on(select(Tax, { employee: true }), "id")),
+	...federalWithheld.map((handle) =>
+		capacity(on(Wage, "id"), { from: on(select(Withholding, { tax: handle }), "wage"), within: within(1n) })
+	),
+	contained(on(Recovery, "wage"), on(Wage, "id")),
+	contained(on(Recovery, "recoveredBy"), on(Wage, "id")),
+	capacity(on(Recovery, ["wage", "recoveredBy"]), {
+		from: on(Recovery, ["wage", "recoveredBy"]),
+		weight: weigh("amount"),
 		within: within(1n, "*")
 	}),
-	contained(on(PlanReceiptDate, "receipt"), on(PlanReceipt, "id")),
 
-	contained(on(ContributionFunding, "source"), on(ContributionSource, "id")),
-	key(BankMovement, ["id"]),
-	key(BankObservation, ["id"]),
-	key(CashAllocation, ["id"]),
-	key(OwnerDistribution, ["id"]),
-	key(DistributionReturn, ["id"]),
-	key(DistributionReview, ["id"]),
-	key(RetirementPlan, ["id"]),
-	key(PlanAccount, ["id"]),
-	key(RetirementAnnual, ["id"]),
-	key(RetirementContribution, ["id"]),
-	key(ProviderOperation, ["id"]),
-	key(PlanReceipt, ["id"]),
-	key(RothConversion, ["id"]),
-	retirementReportIdKey,
-	reported1099RReportKey,
-	reported1096ReportKey,
-	key(PlanBalance, ["id"]),
-	key(BankMovement, ["id", "business"]),
-	key(BankMovement, ["id", "amount"]),
-	key(BankObservation, ["artifact", "row"]),
-	key(BankObservation, ["id", "business"]),
-	key(BankSource, ["observation"]),
-	key(BankRetry, ["failed"]),
-	key(CashAllocation, ["id", "business", "amount"]),
-	key(CashAllocation, ["id", "business"]),
-	key(Owner, ["business"]),
-	key(Owner, ["business", "employee"]),
-	key(OwnerDistribution, ["allocation"]),
-	key(OwnerDistribution, ["id", "business"]),
-	key(RetirementPlan, ["business"]),
-	key(RetirementPlan, ["id", "business"]),
-	key(RetirementPlan, ["id", "employee"]),
-	key(PlanAccount, ["provider", "reference"]),
-	key(PlanAccount, ["id", "plan"]),
-	key(RetirementAnnual, ["plan", "year"]),
-	key(RetirementAnnual, ["id", "employee", "year", "valid"]),
-	key(RetirementContribution, ["id", "employee", "year", "amount"]),
-	key(RetirementContribution, ["id", "employee", "year"]),
-	key(RetirementContribution, ["id", "source"]),
-	key(RetirementContribution, ["id", "plan"]),
-	key(ContributionElection, ["contribution"]),
-	key(ContributionAuthorization, ["contribution"]),
-	key(ContributionDeduction, ["contribution"]),
-	key(ContributionDeduction, ["wage"]),
-	key(ContributionFunding, ["contribution", "allocation"]),
-	key(ProviderOperation, ["plan", "provider", "reference"]),
-	key(ProviderOperation, ["id", "plan"]),
-	key(PlanReceipt, ["id", "plan"]),
-	key(ReceiptAllocation, ["receipt", "contribution"]),
-	key(RothConversion, ["id", "plan"]),
-	key(ConversionReceipt, ["conversion", "receipt"]),
-	key(SuppliedConversionTax, ["conversion", "field"]),
-	planSubjectSubjectKey,
-	key(PlanSubject, ["plan"]),
-	key(RetirementFilingBasis, ["version"]),
-	key(PayrollCashBinding, ["allocation"]),
-	key(BankTaxPayment, ["allocation"]),
-	contained(on(BankMovement, "business"), on(Business, "id")),
-	contained(on(BankMovement, "direction"), on(CashDirection, "id")),
-	contained(on(BankObservation, "business"), on(Business, "id")),
-	contained(on(BankObservation, "artifact"), on(Artifact, "id")),
-	contained(on(BankObservation, "status"), on(BankStatus, "id")),
-	contained(on(BankSource, ["movement", "business"]), on(BankMovement, ["id", "business"])),
-	contained(on(BankSource, ["observation", "business"]), on(BankObservation, ["id", "business"])),
-	contained(on(BankSource, "observation"), on(select(BankObservation, { status: "Sent" }), "id")),
-	contained(on(BankRetry, "failed"), on(select(BankObservation, { status: "Failed" }), "id")),
-	contained(on(BankRetry, "succeeded"), on(select(BankObservation, { status: "Sent" }), "id")),
-	contained(on(CashAllocation, ["movement", "business"]), on(BankMovement, ["id", "business"])),
-	contained(on(CashAllocation, "purpose"), on(CashPurpose, "id")),
-	contained(on(Owner, ["employee", "business"]), on(Employee, ["id", "business"])),
-	contained(on(OwnerDistribution, ["business", "owner"]), on(Owner, ["business", "employee"])),
-	contained(
-		on(OwnerDistribution, ["allocation", "business", "amount"]),
-		on(CashAllocation, ["id", "business", "amount"])
-	),
-	contained(
-		on(DistributionReturn, ["allocation", "business", "amount"]),
-		on(CashAllocation, ["id", "business", "amount"])
-	),
-	contained(on(DistributionReturn, ["distribution", "business"]), on(OwnerDistribution, ["id", "business"])),
-	contained(on(DistributionReview, "business"), on(Business, "id")),
-	contained(on(PayrollCashBinding, ["allocation", "business"]), on(CashAllocation, ["id", "business"])),
-	contained(on(PayrollCashBinding, ["wage", "business"]), on(Wage, ["id", "business"])),
-	contained(on(BankTaxPayment, ["allocation", "business"]), on(CashAllocation, ["id", "business"])),
-	contained(on(BankTaxPayment, ["payment", "business"]), on(TaxPayment, ["id", "business"])),
-	contained(on(RetirementPlan, ["employee", "business"]), on(Owner, ["employee", "business"])),
-	contained(on(PlanAccount, "plan"), on(RetirementPlan, "id")),
-	contained(on(PlanAccount, "kind"), on(PlanAccountKind, "id")),
-	contained(on(RetirementAnnual, ["plan", "employee"]), on(RetirementPlan, ["id", "employee"])),
-	contained(on(RetirementContribution, ["plan", "employee"]), on(RetirementPlan, ["id", "employee"])),
-	contained(on(RetirementContribution, "source"), on(ContributionSource, "id")),
-	contained(on(RetirementContribution, "origin"), on(ContributionOrigin, "id")),
-	contained(
-		on(ContributionElection, ["contribution", "employee", "year"]),
-		on(RetirementContribution, ["id", "employee", "year"])
-	),
-	contained(
-		on(ContributionElection, ["document", "employee", "year"]),
-		on(ElectionDocument, ["id", "employee", "year"])
-	),
-	contained(
-		on(ContributionAuthorization, ["contribution", "employee", "year"]),
-		on(RetirementContribution, ["id", "employee", "year"])
-	),
-	contained(
-		on(ContributionAuthorization, ["annual", "employee", "year", "authorizedOn"]),
-		on(RetirementAnnual, ["id", "employee", "year", "valid"])
-	),
-	contained(
-		on(ContributionDeduction, ["contribution", "employee", "year", "amount"]),
-		on(RetirementContribution, ["id", "employee", "year", "amount"])
-	),
-	contained(
-		on(ContributionDeduction, ["wage", "kind", "employee", "year", "amount"]),
-		on(Deduction, ["wage", "kind", "employee", "year", "amount"])
-	),
-	contained(
-		on(ContributionFunding, ["contribution", "source"]),
-		on(RetirementContribution, ["id", "source"])
-	),
-	contained(on(ContributionFunding, ["allocation", "business"]), on(CashAllocation, ["id", "business"])),
-	contained(on(ProviderOperation, "plan"), on(RetirementPlan, "id")),
-	contained(on(PlanReceipt, ["operation", "plan"]), on(ProviderOperation, ["id", "plan"])),
-	contained(on(PlanReceipt, ["account", "plan"]), on(PlanAccount, ["id", "plan"])),
-	contained(on(PlanReceipt, "source"), on(ContributionSource, "id")),
-	contained(on(ReceiptAllocation, ["receipt", "plan"]), on(PlanReceipt, ["id", "plan"])),
-	contained(on(ReceiptAllocation, ["contribution", "plan"]), on(RetirementContribution, ["id", "plan"])),
-	contained(on(RothConversion, ["operation", "plan"]), on(ProviderOperation, ["id", "plan"])),
-	contained(on(RothConversion, ["fromAccount", "plan"]), on(PlanAccount, ["id", "plan"])),
-	contained(on(RothConversion, ["toAccount", "plan"]), on(PlanAccount, ["id", "plan"])),
-	contained(on(ConversionReceipt, ["conversion", "plan"]), on(RothConversion, ["id", "plan"])),
-	contained(on(ConversionReceipt, ["receipt", "plan"]), on(PlanReceipt, ["id", "plan"])),
-	contained(on(SuppliedConversionTax, "conversion"), on(RothConversion, "id")),
-	contained(on(SuppliedConversionTax, "field"), on(ConversionTaxField, "id")),
-	contained(on(RetirementReport, "plan"), on(RetirementPlan, "id")),
-	contained(on(RetirementReport, "artifact"), on(Artifact, "id")),
-	...alternatives(retirementReportIdKey, "form", ReportForm, {
-		F1099R: reported1099RReportKey,
-		F1096: reported1096ReportKey
-	}),
-	contained(on(Reported1099R, ["report", "plan"]), on(RetirementReport, ["id", "plan"])),
-	contained(on(Reported1099R, ["account", "plan"]), on(PlanAccount, ["id", "plan"])),
-	contained(on(Reported1099R, "distributionCode"), on(DistributionCode, "id")),
-	key(Reported1099RBasis, ["report"]),
-	contained(on(Reported1099RBasis, "report"), on(Reported1099R, "report")),
-	contained(on(PlanBalance, "account"), on(PlanAccount, "id")),
-	contained(on(PlanSubject, ["plan", "business"]), on(RetirementPlan, ["id", "business"])),
-	contained(on(PlanSubject, ["subject", "business"]), on(FilingSubject, ["id", "business"])),
-	contained(on(RetirementFilingBasis, ["version", "filing"]), on(FilingVersion, ["id", "filing"])),
-	contained(
-		on(select(CashAllocation, { purpose: "PayrollCash" }), "movement"),
-		on(select(BankMovement, { direction: "Outflow" }), "id")
-	),
-	contained(
-		on(select(CashAllocation, { purpose: "RothRemittance" }), "movement"),
-		on(select(BankMovement, { direction: "Outflow" }), "id")
-	),
-	contained(
-		on(select(CashAllocation, { purpose: "OwnerDistribution" }), "movement"),
-		on(select(BankMovement, { direction: "Outflow" }), "id")
-	),
-	contained(
-		on(select(CashAllocation, { purpose: "TaxPayment" }), "movement"),
-		on(select(BankMovement, { direction: "Outflow" }), "id")
-	),
-	contained(
-		on(select(CashAllocation, { purpose: "DistributionReturn" }), "movement"),
-		on(select(BankMovement, { direction: "Inflow" }), "id")
-	),
-	contained(
-		on(select(ContributionFunding, { source: "EmployeeRothDeferral" }), "allocation"),
-		on(select(CashAllocation, { purpose: "RothRemittance" }), "id")
-	),
-	contained(
-		on(select(ContributionFunding, { source: "EmployeeAfterTax" }), "allocation"),
-		on(select(CashAllocation, { purpose: "OwnerDistribution" }), "id")
-	),
-	capacity(on(BankMovement, "id"), {
-		from: on(CashAllocation, "movement"),
-		weight: weigh("amount"),
-		within: within(0n, ref("amount"))
-	}),
-	capacity(on(CashAllocation, "id"), {
-		from: on(ContributionFunding, "allocation"),
-		weight: weigh("amount"),
-		within: within(0n, ref("amount"))
-	}),
-	capacity(on(RetirementContribution, "id"), {
-		from: on(ContributionFunding, "contribution"),
-		weight: weigh("amount"),
-		within: within(0n, ref("amount"))
-	}),
-	capacity(on(PlanReceipt, "id"), {
-		from: on(ReceiptAllocation, "receipt"),
-		weight: weigh("amount"),
-		within: within(0n, ref("amount"))
-	}),
-	capacity(on(RetirementContribution, "id"), {
-		from: on(ReceiptAllocation, "contribution"),
-		weight: weigh("amount"),
-		within: within(0n, ref("amount"))
-	}),
-	capacity(on(PlanReceipt, "id"), {
-		from: on(ConversionReceipt, "receipt"),
-		weight: weigh("amount"),
-		within: within(0n, ref("amount"))
-	}),
-	capacity(on(RothConversion, "id"), {
-		from: on(ConversionReceipt, "conversion"),
-		weight: weigh("amount"),
-		within: within(0n, ref("amount"))
-	}),
-	capacity(on(OwnerDistribution, "id"), {
-		from: on(DistributionReturn, "distribution"),
-		weight: weigh("amount"),
-		within: within(0n, ref("amount"))
-	}),
-	mirrors(
-		on(select(RetirementContribution, { origin: "Authorized" }), "id"),
-		on(ContributionAuthorization, "contribution")
-	),
-
-	...identityLaws,
-	contained(on(AnnualPolicy, "business"), on(Business, "id")),
-	contained(on(AnnualPolicy, "authority"), on(Authority, "id")),
-	contained(
-		on(AnnualPolicy, ["calendar", "authority", "year", "valid"]),
-		on(select(CalendarPeriod, { kind: "Year" }), ["id", "authority", "year", "span"])
-	),
-	contained(on(AnnualSource, "annual"), on(AnnualPolicy, "id")),
-	contained(on(AnnualSource, "artifact"), on(VerifiedArtifact, "artifact")),
-	capacity(on(AnnualPolicy, "id"), { from: on(AnnualSource, "annual"), within: within(1n, 1000n) }),
-	contained(on(PublishedRate, "kind"), on(PublishedRateKind, "id")),
-	contained(on(PublishedRate, ["annual", "artifact"]), on(AnnualSource, ["annual", "artifact"])),
-	contained(on(PublishedRate, "schedule"), on(RateSchedule, "id")),
-	contained(on(PolicyLimit, "kind"), on(PolicyLimitKind, "id")),
-	contained(on(PolicyLimit, ["annual", "artifact"]), on(AnnualSource, ["annual", "artifact"])),
-	contained(on(LookbackPeriod, ["annual", "artifact"]), on(AnnualSource, ["annual", "artifact"])),
-	contained(on(AnnualEvidence, "kind"), on(PolicyEvidenceKind, "id")),
-	contained(on(AnnualEvidence, "annual"), on(AnnualPolicy, "id")),
-	contained(on(AnnualEvidence, "artifact"), on(VerifiedArtifact, "artifact")),
-	contained(on(AnnualApproval, "authority"), on(Authority, "id")),
-	...Authority.handles.flatMap((authority) => [
-		...annualRequirements[authority].rates.map((kind) =>
-			capacity(on(select(AnnualApproval, { authority }), "annual"), {
-				from: on(select(PublishedRate, { kind }), "annual"),
-				within: within(1n, 1n)
-			})
-		),
-		...annualRequirements[authority].limits.map((kind) =>
-			capacity(on(select(AnnualApproval, { authority }), "annual"), {
-				from: on(select(PolicyLimit, { kind }), "annual"),
-				within: within(1n, 1n)
-			})
-		),
-		...annualRequirements[authority].evidence.map((kind) =>
-			capacity(on(select(AnnualApproval, { authority }), "annual"), {
-				from: on(select(AnnualEvidence, { kind }), "annual"),
-				within: within(1n, 1n)
-			})
-		)
-	]),
-	contained(on(select(AnnualApproval, { authority: "FederalDC" }), "annual"), on(LookbackPeriod, "annual")),
-	contained(on(AnnualApproval, "release"), on(PolicyRelease, "id")),
-	contained(
-		on(AnnualApproval, ["annual", "business", "authority", "year", "valid"]),
-		on(AnnualPolicy, ["id", "business", "authority", "year", "valid"])
-	),
-	contained(on(CalculationPolicy, "authority"), on(Authority, "id")),
-	contained(
-		on(CalculationPolicy, ["calculation", "release", "business", "day"]),
-		on(PayrollCalculation, ["id", "release", "business", "paidOn"])
-	),
-	contained(
-		on(CalculationPolicy, ["annual", "release", "business", "authority", "day"]),
-		on(AnnualApproval, ["annual", "release", "business", "authority", "valid"])
-	),
-	capacity(on(PayrollCalculation, "id"), {
-		from: on(CalculationPolicy, "calculation"),
-		within: within(BigInt(Authority.handles.length), BigInt(Authority.handles.length))
-	}),
-	contained(on(ElectionDocument, "employee"), on(Employee, "id")),
-	contained(on(ElectionDocument, "artifact"), on(VerifiedArtifact, "artifact")),
-	contained(
-		on(ElectionDocumentRevision, ["document", "employee", "year"]),
-		on(ElectionDocument, ["id", "employee", "year"])
-	),
-	contained(
-		on(ElectionDocumentRevision, ["predecessor", "employee", "year"]),
-		on(ElectionDocument, ["id", "employee", "year"])
-	),
-	contained(on(ElectionDocumentAmount, "document"), on(ElectionDocument, "id")),
-	contained(on(ElectionDocumentAmount, "kind"), on(ElectionContributionKind, "id")),
-	capacity(on(ElectionDocument, "id"), {
-		from: on(ElectionDocumentAmount, "document"),
-		within: within(
-			BigInt(ElectionContributionKind.handles.length),
-			BigInt(ElectionContributionKind.handles.length)
-		)
-	}),
-
-	contained(on(Business, "state"), on(State, "id")),
-	contained(on(BusinessAddress, "kind"), on(AddressKind, "id")),
-	contained(on(Employee, "filingStatus"), on(FilingStatus, "id")),
-	contained(on(StateAccount, "state"), on(State, "id")),
-	contained(on(TaxAccount, "family"), on(AccountFamily, "id")),
-	contained(on(Deduction, "kind"), on(DeductionKind, "id")),
-	contained(on(Recovery, "component"), on(Component, "id")),
-	contained(on(Recovery, "kind"), on(DeductionKind, "id")),
-	contained(on(EmployerRateNotice, "state"), on(State, "id")),
-	contained(on(SupportedPayrollDomain, "state"), on(State, "id")),
-	contained(on(SupportedProgram, "program"), on(Program, "id")),
-	contained(on(PolicyCoverage, "component"), on(Component, "id")),
-	contained(on(RateVersion, "component"), on(Component, "id")),
-	contained(on(TaxBand, "role"), on(BandRole, "id")),
-	contained(on(TaxBaseScope, "program"), on(Program, "id")),
-	contained(on(StateBaseScope, "state"), on(State, "id")),
-	contained(on(Assessment, "origin"), on(AssessmentOrigin, "id")),
-	contained(on(Assessment, "component"), on(Component, "id")),
-	contained(on(Assessment, "method"), on(CalculationMethod, "id")),
-	contained(on(ObservedAssessment, "component"), on(Component, "id")),
-	contained(on(TaxableWages, "program"), on(Program, "id")),
-	contained(on(CalculatedAssessment, "component"), on(Component, "id")),
-	contained(on(AppliedRule, "component"), on(Component, "id")),
-	contained(on(CalculationBasis, "component"), on(Component, "id")),
-	contained(on(AssessmentRevision, "kind"), on(RevisionKind, "id")),
-	contained(on(RevisionAccount, "family"), on(AccountFamily, "id")),
-	contained(on(CalendarCoverage, "authority"), on(Authority, "id")),
-	contained(on(CalendarCoverage, "kind"), on(PeriodKind, "id")),
-	contained(on(CalendarPeriod, "authority"), on(Authority, "id")),
-	contained(on(CalendarPeriod, "kind"), on(PeriodKind, "id")),
-	contained(on(BusinessDay, "authority"), on(Authority, "id")),
-	contained(on(BusinessDayCoverage, "authority"), on(Authority, "id")),
-	contained(on(DepositPolicy, "authority"), on(Authority, "id")),
-	contained(on(DepositPolicy, "family"), on(AccountFamily, "id")),
-	contained(on(DepositPolicy, "periodKind"), on(PeriodKind, "id")),
-	contained(on(DepositPolicy, "dueRule"), on(DueRule, "id")),
-	contained(on(DepositTrigger, "kind"), on(CheckpointKind, "id")),
-	contained(on(DepositCheckpoint, "kind"), on(CheckpointKind, "id")),
-	contained(on(DepositCheckpoint, "periodKind"), on(PeriodKind, "id")),
-	contained(on(FilingRequirement, "form"), on(Form, "id")),
-	contained(on(FilingRequirement, "subjectKind"), on(SubjectKind, "id")),
-	contained(on(FilingScope, "form"), on(Form, "id")),
-	contained(on(FilingScope, "kind"), on(PeriodKind, "id")),
-	contained(on(Filing, "form"), on(Form, "id")),
-	contained(on(OriginalFiling, "kind"), on(PeriodKind, "id")),
-	contained(on(FormMethodPolicy, "form"), on(Form, "id")),
-	contained(on(FormMethodPolicy, "method"), on(SubmissionMethod, "id")),
-	contained(on(DocumentRequirement, "role"), on(DocumentRole, "id")),
-	contained(on(FilingVersion, "form"), on(Form, "id")),
-	contained(on(FilingDocument, "role"), on(DocumentRole, "id")),
-	contained(on(Submission, "form"), on(Form, "id")),
-	contained(on(SubmissionDocument, "role"), on(DocumentRole, "id")),
-	contained(on(Component, "payer"), on(Payer, "id")),
-	contained(on(Component, "program"), on(Program, "id")),
-	contained(on(Component, "family"), on(AccountFamily, "id")),
-	contained(on(Component, "method"), on(CalculationMethod, "id")),
-	contained(on(Employee, "business"), on(Business, "id")),
-	contained(on(BusinessAddress, "business"), on(Business, "id")),
-	contained(on(StateAccount, "business"), on(Business, "id")),
-	contained(on(TaxAccount, "business"), on(Business, "id")),
-	contained(on(AnnualBudget, "employee"), on(Employee, "id")),
-	contained(on(BudgetCommitment, "employee"), on(Employee, "id")),
-	contained(
-		on(BudgetAssignment, ["commitment", "employee", "year", "amount"]),
-		on(BudgetCommitment, ["id", "employee", "year", "amount"])
-	),
-	contained(
-		on(BudgetAssignment, ["budget", "employee", "year"]),
-		on(AnnualBudget, ["id", "employee", "year"])
-	),
-	capacity(on(AnnualBudget, "id"), {
-		from: on(BudgetAssignment, "budget"),
-		weight: weigh("amount"),
-		within: within(0n, ref("limit"))
-	}),
-	contained(on(Wage, ["employee", "business"]), on(Employee, ["id", "business"])),
-	contained(
-		on(Wage, ["calendar", "year", "paidOn"]),
-		on(select(CalendarPeriod, { kind: "Year" }), ["id", "year", "span"])
-	),
-	contained(
-		on(Wage, ["commitment", "employee", "year", "gross"]),
-		on(BudgetCommitment, ["id", "employee", "year", "amount"])
-	),
-	contained(on(RegularWork, ["wage", "employee"]), on(Wage, ["id", "employee"])),
-	contained(on(RegularCommitment, ["wage", "commitment"]), on(Wage, ["id", "commitment"])),
-	mirrors(on(RegularCommitment, "wage"), on(RegularWork, "wage")),
-	contained(on(ObservedCompensation, ["wage", "commitment"]), on(Wage, ["id", "commitment"])),
-	contained(on(Deduction, "wage"), on(Wage, "id")),
-	contained(on(Deduction, ["wage", "employee", "year"]), on(Wage, ["id", "employee", "year"])),
+	// Money out: exactly one arm per transfer, real paychecks, never more Roth
+	// wired than withheld, after-tax within the election, and never zero.
+	...alternatives(TransferByMercury, "kind", TransferKind, transferArms),
+	contained(on(NetPay, "wage"), on(Wage, "id")),
+	contained(on(RothDeferral, "wage"), on(Wage, "id")),
 	capacity(on(Wage, "id"), {
-		from: on(Deduction, "wage"),
+		from: on(RothDeferral, "wage"),
 		weight: weigh("amount"),
-		within: within(0n, ref("gross"))
+		within: within(0n, ref("roth"))
 	}),
-	contained(on(ElectionSource, "kind"), on(ElectionContributionKind, "id")),
-	mirrors(on(Election, "id"), on(ElectionSource, "election")),
-	contained(
-		on(ElectionSource, ["election", "employee", "year", "signedOn", "limit"]),
-		on(Election, ["id", "employee", "year", "signedOn", "limit"])
-	),
-	contained(
-		on(ElectionSource, ["document", "employee", "year", "signedOn"]),
-		on(ElectionDocument, ["id", "employee", "year", "signedOn"])
-	),
-	contained(
-		on(ElectionSource, ["document", "kind", "limit"]),
-		on(ElectionDocumentAmount, ["document", "kind", "amount"])
-	),
-	contained(
-		on(ElectionSource, ["annual", "employee", "year"]),
-		on(RetirementAnnual, ["id", "employee", "year"])
-	),
-	contained(on(ElectionSource, "election"), on(select(ElectionSource, { kind: "Roth" }), "election")),
-	contained(on(Election, "employee"), on(Employee, "id")),
-	contained(
-		on(Election, ["calendar", "year", "effective"]),
-		on(select(CalendarPeriod, { kind: "Year" }), ["id", "year", "span"])
-	),
-	contained(
-		on(Election, ["allowance", "employee", "year", "maximum"]),
-		on(EmployeeAllowance, ["id", "employee", "year", "limit"])
-	),
-	capacity(on(Election, "id"), {
-		from: on(Election, "id"),
-		weight: weigh("limit"),
-		within: within(0n, ref("maximum"))
-	}),
-	contained(on(DeferralPolicy, "release"), on(PolicyRelease, "id")),
-	contained(on(GrossSuggestionPolicy, "release"), on(PolicyRelease, "id")),
-	contained(on(GrossSuggestionPolicy, "method"), on(GrossSuggestionMethod, "id")),
-	contained(on(EmployeeAllowance, "employee"), on(Employee, "id")),
-	contained(
-		on(EmployeeAllowance, ["policy", "year", "maximum"]),
-		on(DeferralPolicy, ["id", "year", "limit"])
-	),
-	capacity(on(EmployeeAllowance, "id"), {
-		from: on(EmployeeAllowance, "id"),
-		weight: weigh("limit"),
-		within: within(0n, ref("maximum"))
-	}),
-	// Historical Roth remains observable without an election or allowance.
-	// Once an allowance exists, ALL observed Roth counts toward its capacity.
-	capacity(on(EmployeeAllowance, ["employee", "year"]), {
-		from: on(select(Deduction, { kind: "Roth" }), ["employee", "year"]),
+	contained(on(AfterTax, "year"), on(Election, "year")),
+	capacity(on(Election, "year"), {
+		from: on(AfterTax, "year"),
 		weight: weigh("amount"),
-		within: within(0n, ref("limit"))
+		within: within(0n, ref("afterTax"))
 	}),
-	contained(on(ElectionUse, ["wage", "employee", "day"]), on(Wage, ["id", "employee", "paidOn"])),
-	contained(on(ElectionUse, "kind"), on(DeductionKind, "id")),
-	contained(on(ElectionUse, "wage"), on(select(ElectionUse, { kind: "Roth" }), "wage")),
-	contained(on(ElectionUse, ["wage", "kind", "amount"]), on(Deduction, ["wage", "kind", "amount"])),
-	contained(on(ElectionUse, ["election", "employee", "day"]), on(Election, ["id", "employee", "effective"])),
-	capacity(on(Election, "id"), {
-		from: on(ElectionUse, "election"),
+	capacity(on(NetPay, "transfer"), {
+		from: on(NetPay, "transfer"),
 		weight: weigh("amount"),
-		within: within(0n, ref("limit"))
+		within: within(1n, "*")
 	}),
-	contained(on(Recovery, ["fromWage", "employee"]), on(Wage, ["id", "employee"])),
-	contained(on(Recovery, ["owedOnWage", "employee"]), on(Wage, ["id", "employee"])),
-	contained(on(Recovery, "component"), on(select(Component, { payer: "Employee" }), "id")),
-	contained(on(Recovery, ["fromWage", "kind"]), on(Deduction, ["wage", "kind"])),
-	contained(on(Recovery, "id"), on(select(Recovery, { kind: "Recovery" }), "id")),
-	capacity(on(Deduction, ["wage", "kind"]), {
-		from: on(Recovery, ["fromWage", "kind"]),
+	capacity(on(RothDeferral, "transfer"), {
+		from: on(RothDeferral, "transfer"),
 		weight: weigh("amount"),
-		within: within(0n, ref("amount"))
+		within: within(1n, "*")
 	}),
-	contained(on(PolicyBinding, "business"), on(Business, "id")),
-	contained(on(PolicyBinding, "release"), on(PolicyRelease, "id")),
-	contained(on(EmployerRateNotice, "business"), on(Business, "id")),
-	contained(on(EmployerRateNotice, "schedule"), on(RateSchedule, "id")),
-	mirrors(on(select(RateVersion, { component: "FUTA" }), "id"), on(FutaBasis, "version")),
-	mirrors(on(select(RateVersion, { component: "SUTA" }), "id"), on(EmployerSchedule, "version")),
-	mirrors(
-		on(select(RateVersion, { component: "SUTA" }), ["id", "business", "schedule", "valid"]),
-		on(EmployerSchedule, ["version", "business", "schedule", "valid"])
+	capacity(on(AfterTax, "transfer"), {
+		from: on(AfterTax, "transfer"),
+		weight: weigh("amount"),
+		within: within(1n, "*")
+	}),
+	capacity(on(Distribution, "transfer"), {
+		from: on(Distribution, "transfer"),
+		weight: weigh("amount"),
+		within: within(1n, "*")
+	}),
+
+	// Tax payments: funded by exactly one Mercury debit, or made in history.
+	contained(on(TaxPayment, "account"), on(TaxAccount, "id")),
+	contained(on(TaxPayment, "kind"), on(PaymentKind, "id")),
+	contained(on(TaxPayment, "funding"), on(Funding, "id")),
+	mirrors(on(select(TaxPayment, { funding: "Mercury" }), "tracker"), on(TaxDebit, "payment")),
+	contained(on(select(TaxPayment, { funding: "OutsideMercury" }), "initiatedOn"), on(History, "span")),
+	capacity(on(TaxPayment, "tracker"), {
+		from: on(TaxPayment, "tracker"),
+		weight: weigh("amount"),
+		within: within(1n, "*")
+	}),
+
+	// Filings: filed only as the form allows, attested only in history, and
+	// every line of the form exactly once.
+	contained(on(Filing, "form"), on(Form, "id")),
+	contained(on(Filing, "method"), on(Method, "id")),
+	...filed.map((method) => mirrors(on(select(Filing, { method }), "id"), on(methodArms[method], "filing"))),
+	contained(
+		on(select(Filing, { method: "Electronic" }), "form"),
+		on(select(Form, { electronic: true }), "id")
 	),
 	contained(
-		on(EmployerSchedule, ["notice", "business", "schedule", "valid"]),
-		on(EmployerRateNotice, ["id", "business", "schedule", "valid"])
+		on(select(Filing, { method: "CertifiedMail" }), "form"),
+		on(select(Form, { certifiedMail: true }), "id")
 	),
-	contained(on(SupportedPayrollDomain, "release"), on(PolicyRelease, "id")),
-	capacity(on(SupportedPayrollDomain, "id"), {
-		from: on(SupportedPayrollDomain, "id"),
-		weight: weigh("federalDepositLimit"),
-		within: within(1n, ref("federalDepositLimit"))
-	}),
-	contained(on(MonthlyDepositor, "business"), on(Business, "id")),
-	contained(on(SupportedProgram, "domain"), on(SupportedPayrollDomain, "id")),
-	...Array.from(
-		new Set(
-			components
-				.filter((component) => componentPolicy[component].method === "MarginalBands")
-				.map((component) => componentPolicy[component].program)
-		)
-	).map((program) =>
-		capacity(on(SupportedPayrollDomain, "id"), {
-			from: on(select(SupportedProgram, { program }), "domain"),
-			within: within(1n)
+	contained(on(select(Filing, { method: "Furnished" }), "form"), on(select(Form, { furnished: true }), "id")),
+	contained(on(select(Filing, { method: "Attested" }), "period"), on(History, "span")),
+	contained(on(FiledFigures, "line"), on(Line, "id")),
+	...Form.handles.map((form) =>
+		capacity(on(select(Filing, { form }), "id"), {
+			from: on(FiledFigures, "filing"),
+			within: within(BigInt(formLines[form].length))
 		})
 	),
-	capacity(on(SupportedPayrollDomain, "id"), {
-		from: on(select(SupportedProgram, { program: "Income" }), "domain"),
-		within: within(0n)
-	}),
-	contained(on(PolicyCoverage, "release"), on(PolicyRelease, "id")),
-	contained(on(PolicyCoverage, "business"), on(Business, "id")),
-	mirrors(
-		on(PolicyCoverage, ["release", "business", "component", "span"]),
-		on(RateVersion, ["release", "business", "component", "valid"])
-	),
-	contained(on(RateVersion, "schedule"), on(RateSchedule, "id")),
-	capacity(on(RateSchedule, "id"), {
-		from: on(RateSchedule, "id"),
-		weight: weigh("denominator"),
-		within: within(1n, ref("denominator"))
-	}),
-	mirrors(on(TaxBand, ["schedule", "wages"]), on(RateSchedule, ["id", "domain"])),
-	capacity(on(select(TaxBand, { role: "Excess" }), "id"), {
-		from: on(TaxBand, "id"),
-		weight: weigh("numerator"),
-		within: within(0n)
-	}),
-	contained(on(TaxBaseScope, ["employee", "business"]), on(Employee, ["id", "business"])),
-	contained(
-		on(TaxBaseScope, ["calendar", "year", "span"]),
-		on(select(CalendarPeriod, { kind: "Year" }), ["id", "year", "span"])
-	),
-	mirrors(on(select(TaxBaseScope, { program: "StateUnemployment" }), "id"), on(StateBaseScope, "scope")),
-	contained(on(AssessmentSet, ["employee", "business"]), on(Employee, ["id", "business"])),
-	contained(on(PayrollCalculation, "release"), on(PolicyRelease, "id")),
-	contained(
-		on(PayrollCalculation, ["set", "business", "paidOn"]),
-		on(AssessmentSet, ["id", "business", "paidOn"])
-	),
-	contained(
-		on(PayrollCalculation, ["domain", "release", "paidOn"]),
-		on(SupportedPayrollDomain, ["id", "release", "valid"])
-	),
-	contained(
-		on(ProposedWage, ["calculation", "business", "paidOn"]),
-		on(PayrollCalculation, ["id", "business", "paidOn"])
-	),
-	contained(
-		on(ProposedWage, ["depositor", "business", "paidOn"]),
-		on(MonthlyDepositor, ["id", "business", "valid"])
-	),
-	contained(on(ProposedRevision, ["predecessor", "wage"]), on(AssessmentRevision, ["id", "wage"])),
-	contained(on(ProposedRevision, ["calculation", "set"]), on(PayrollCalculation, ["id", "set"])),
-	contained(
-		on(CalculationRecoveryClaim, ["calculation", "set"]),
-		on(select(PayrollCalculation, { purpose: "NewWage" }), ["id", "set"])
-	),
-	contained(on(CalculationRecoveryClaim, ["set", "employee"]), on(AssessmentSet, ["id", "employee"])),
-	contained(on(CalculationRecoveryClaim, ["owedOnWage", "employee"]), on(Wage, ["id", "employee"])),
-	contained(
-		on(CalculationRecoveryClaim, "component"),
-		on(select(Component, { payer: "Employee", method: "MarginalBands" }), "id")
-	),
-	contained(
-		on(ProposedRevision, ["set", "business", "employee", "gross", "paidOn"]),
-		on(AssessmentSet, ["id", "business", "employee", "gross", "paidOn"])
-	),
-	contained(
-		on(ProposedRevision, ["wage", "business", "employee", "gross", "paidOn"]),
-		on(Wage, ["id", "business", "employee", "gross", "paidOn"])
-	),
-	contained(on(Assessment, ["set", "origin"]), on(AssessmentSet, ["id", "origin"])),
-	...CalculationMethod.handles.map((method) =>
+	...lineHandles.map((line) =>
 		contained(
-			on(select(Assessment, { origin: "Calculated", method }), "component"),
-			on(select(Component, { method }), "id")
+			on(select(FiledFigures, { line }), "filing"),
+			on(select(Filing, { form: formOfLine[line] }), "id")
 		)
 	),
-	capacity(on(select(AssessmentSet, { origin: "Observed" }), "id"), {
-		from: on(select(Assessment, { method: "MarginalBands" }), "set"),
-		within: within(0n)
+
+	// A correction restates at least one correctable line of the return it
+	// corrects; a return without correctable lines can't be corrected.
+	contained(on(Correction, "filing"), on(Filing, "id")),
+	contained(on(CorrectedFigures, ["filing", "mailedOn"]), on(Correction, ["filing", "mailedOn"])),
+	contained(on(CorrectedFigures, "line"), on(select(Line, { correctable: true }), "id")),
+	...correctable.map((line) =>
+		contained(
+			on(select(CorrectedFigures, { line }), "filing"),
+			on(select(Filing, { form: formOfLine[line] }), "id")
+		)
+	),
+	capacity(on(Correction, ["filing", "mailedOn"]), {
+		from: on(CorrectedFigures, ["filing", "mailedOn"]),
+		within: within(1n, "*")
 	}),
-	mirrors(
-		on(select(Assessment, { method: "SuppliedAmount" }), ["set", "component"]),
-		on(ObservedAssessment, ["set", "component"])
-	),
-	mirrors(
-		on(select(Assessment, { method: "MarginalBands" }), ["set", "component"]),
-		on(CalculatedAssessment, ["set", "component"])
-	),
-	capacity(on(AssessmentSet, "id"), {
-		from: on(Assessment, "set"),
-		within: within(BigInt(components.length), BigInt(components.length))
-	}),
-	contained(on(ObservedAssessment, ["set", "component"]), on(Assessment, ["set", "component"])),
-	contained(on(TaxableWages, "set"), on(AssessmentSet, "id")),
-	contained(
-		on(CalculatedAssessment, ["basis", "set", "component"]),
-		on(CalculationBasis, ["id", "set", "component"])
-	),
-	mirrors(on(CalculatedAssessment, ["set", "component"]), on(AppliedRule, ["set", "component"])),
-	contained(on(AppliedRule, ["set", "release"]), on(PayrollCalculation, ["set", "release"])),
-	contained(on(AppliedRule, ["set", "business", "day"]), on(AssessmentSet, ["id", "business", "paidOn"])),
-	contained(
-		on(AppliedRule, ["version", "release", "business", "component", "schedule", "day"]),
-		on(RateVersion, ["id", "release", "business", "component", "schedule", "valid"])
-	),
-	contained(
-		on(CalculationBasis, ["set", "component", "schedule"]),
-		on(AppliedRule, ["set", "component", "schedule"])
-	),
-	contained(on(CalculationWageBase, "set"), on(PayrollCalculation, "set")),
-	contained(on(CalculationWageBase, "scope"), on(TaxBaseScope, "id")),
-	contained(
-		on(CalculationBasis, ["set", "scope", "gross", "earning"]),
-		on(CalculationWageBase, ["set", "scope", "gross", "earning"])
-	),
-	capacity(on(CalculationWageBase, ["set", "scope"]), {
-		from: on(CalculationBasis, ["set", "scope"]),
-		within: within(1n, BigInt(components.length))
-	}),
-	capacity(on(CalculationWageBase, ["set", "scope"]), {
-		from: on(CalculationWageBase, ["set", "scope"]),
+
+	// The plan's books: only hand-swept accounts are swept, never for nothing.
+	contained(on(Rollover, "account"), on(select(PlanAccount, { implied: false }), "id")),
+	capacity(on(Rollover, ["account", "on"]), {
+		from: on(Rollover, ["account", "on"]),
 		weight: weigh("gross"),
-		within: within(0n, duration("earning"))
-	}),
-	capacity(on(CalculationWageBase, ["set", "scope"]), {
-		from: on(CalculationWageBase, ["set", "scope"]),
-		weight: weigh(duration("earning")),
-		within: within(0n, ref("gross"))
-	}),
-	contained(
-		on(CalculationBasis, ["set", "business", "employee", "gross", "paidOn"]),
-		on(AssessmentSet, ["id", "business", "employee", "gross", "paidOn"])
-	),
-	contained(
-		on(CalculationBasis, ["scope", "business", "employee", "year", "paidOn"]),
-		on(TaxBaseScope, ["id", "business", "employee", "year", "span"])
-	),
-	...components.map((component) =>
-		contained(
-			on(select(CalculationBasis, { component }), "scope"),
-			on(select(TaxBaseScope, { program: componentPolicy[component].program }), "id")
-		)
-	),
-	contained(on(CalculationBasis, ["set", "domain"]), on(PayrollCalculation, ["set", "domain"])),
-	contained(on(CalculationBasis, ["support", "domain"]), on(SupportedProgram, ["id", "domain"])),
-	contained(on(CalculationBasis, ["support", "earning"]), on(SupportedProgram, ["id", "eligible"])),
-	...components.map((component) =>
-		contained(
-			on(select(CalculationBasis, { component }), "support"),
-			on(select(SupportedProgram, { program: componentPolicy[component].program }), "id")
-		)
-	),
-	// TaxBand's pointwise key forbids overlap; its partition of RateSchedule
-	// forbids gaps. Every captured earning range must lie in that exact schedule.
-	contained(on(CalculationBasis, ["schedule", "earning"]), on(RateSchedule, ["id", "domain"])),
-	capacity(on(CalculationBasis, "id"), {
-		from: on(CalculationBasis, "id"),
-		weight: weigh("gross"),
-		within: within(0n, duration("earning"))
-	}),
-	capacity(on(CalculationBasis, "id"), {
-		from: on(CalculationBasis, "id"),
-		weight: weigh(duration("earning")),
-		within: within(0n, ref("gross"))
-	}),
-	contained(
-		on(AssessmentRevision, ["wage", "business", "employee", "gross", "paidOn"]),
-		on(Wage, ["id", "business", "employee", "gross", "paidOn"])
-	),
-	contained(
-		on(AssessmentRevision, ["set", "business", "employee", "gross", "paidOn"]),
-		on(AssessmentSet, ["id", "business", "employee", "gross", "paidOn"])
-	),
-	mirrors(
-		on(Wage, ["initialRevision", "id"]),
-		on(select(AssessmentRevision, { kind: "Initial" }), ["id", "wage"])
-	),
-	mirrors(
-		on(select(AssessmentRevision, { kind: "Correction" }), ["id", "wage"]),
-		on(CorrectionAssessment, ["revision", "wage"])
-	),
-	contained(on(CorrectionAssessment, ["predecessor", "wage"]), on(AssessmentRevision, ["id", "wage"])),
-	contained(on(RevisionAccount, ["revision", "business"]), on(AssessmentRevision, ["id", "business"])),
-	capacity(on(AssessmentRevision, "id"), {
-		from: on(RevisionAccount, "revision"),
-		within: within(BigInt(AccountFamily.handles.length))
-	}),
-	contained(
-		on(RevisionAccount, ["account", "business", "family"]),
-		on(TaxAccount, ["id", "business", "family"])
-	),
-	contained(on(VerifiedArtifact, "artifact"), on(Artifact, "id")),
-	contained(on(ArtifactLocation, "artifact"), on(Artifact, "id")),
-	contained(on(TaxPayment, ["account", "business"]), on(TaxAccount, ["id", "business"])),
-	contained(on(PaymentSettlement, "payment"), on(TaxPayment, "id")),
-	contained(on(PaymentReference, ["payment", "account"]), on(TaxPayment, ["id", "account"])),
-	contained(on(PaymentReference, "issuer"), on(PaymentIssuer, "id")),
-	contained(on(PaymentEvidence, "payment"), on(TaxPayment, "id")),
-	contained(on(PaymentEvidence, "artifact"), on(Artifact, "id")),
-	contained(
-		on(PaymentReconciliation, ["payment", "business", "account"]),
-		on(TaxPayment, ["id", "business", "account"])
-	),
-	contained(
-		on(PaymentAllocation, ["revision", "account", "business"]),
-		on(RevisionAccount, ["revision", "account", "business"])
-	),
-	contained(
-		on(PaymentAllocation, ["reconciliation", "business", "account"]),
-		on(PaymentReconciliation, ["id", "business", "account"])
-	),
-	contained(
-		on(PaymentAllocation, ["revision", "business", "paidOn"]),
-		on(AssessmentRevision, ["id", "business", "paidOn"])
-	),
-	contained(
-		on(PaymentAllocation, ["reconciliation", "business", "account", "paidOn"]),
-		on(PaymentReconciliation, ["id", "business", "account", "period"])
-	),
-	contained(on(PaymentAdjustment, "reconciliation"), on(PaymentReconciliation, "id")),
-	contained(on(SignedDisposition, ["revision", "account"]), on(RevisionAccount, ["revision", "account"])),
-	contained(on(SignedDisposition, "disposition"), on(Disposition, "id")),
-	contained(on(CalendarCoverage, "release"), on(PolicyRelease, "id")),
-	mirrors(
-		on(CalendarCoverage, ["release", "authority", "kind", "span"]),
-		on(CalendarPeriod, ["release", "authority", "kind", "span"])
-	),
-	contained(on(BusinessDay, "release"), on(PolicyRelease, "id")),
-	contained(on(BusinessDayCoverage, "release"), on(PolicyRelease, "id")),
-	mirrors(
-		on(BusinessDayCoverage, ["release", "authority", "span"]),
-		on(BusinessDay, ["release", "authority", "span"])
-	),
-	contained(on(DepositPolicy, "release"), on(PolicyRelease, "id")),
-	contained(
-		on(DepositPolicy, ["account", "business", "family"]),
-		on(TaxAccount, ["id", "business", "family"])
-	),
-	contained(on(DepositTrigger, "policy"), on(DepositPolicy, "id")),
-	capacity(on(DepositPolicy, "id"), {
-		from: on(DepositTrigger, "policy"),
-		within: within(BigInt(CheckpointKind.handles.length))
-	}),
-	mirrors(
-		on(DepositPolicy, ["id", "business", "account", "periodKind", "valid"]),
-		on(DepositCheckpoint, ["policy", "business", "account", "periodKind", "span"])
-	),
-	contained(
-		on(DepositCheckpoint, ["calendar", "periodKind", "year", "span"]),
-		on(CalendarPeriod, ["id", "kind", "year", "span"])
-	),
-	contained(on(FilingRequirement, "business"), on(Business, "id")),
-	contained(on(FilingRule, "release"), on(PolicyRelease, "id")),
-	contained(on(FilingRule, "form"), on(Form, "id")),
-	contained(on(FilingRule, "periodKind"), on(PeriodKind, "id")),
-	contained(on(FilingRule, "authority"), on(Authority, "id")),
-	contained(on(FilingRule, "dueRule"), on(DueRule, "id")),
-	contained(on(RequirementEnd, "requirement"), on(FilingRequirement, "id")),
-	contained(on(FilingSubject, "business"), on(Business, "id")),
-	contained(on(BusinessSubject, ["subject", "business"]), on(FilingSubject, ["id", "business"])),
-	contained(on(EmployeeSubject, ["subject", "business"]), on(FilingSubject, ["id", "business"])),
-	contained(on(EmployeeSubject, ["employee", "business"]), on(Employee, ["id", "business"])),
-	contained(
-		on(FilingScope, ["requirement", "business", "form"]),
-		on(FilingRequirement, ["id", "business", "form"])
-	),
-	contained(on(FilingScope, ["subject", "business"]), on(FilingSubject, ["id", "business"])),
-	...forms.flatMap((form) => [
-		contained(
-			on(select(FilingRule, { form }), "id"),
-			on(select(FilingRule, { periodKind: formPolicy[form].period }), "id")
-		),
-		contained(
-			on(select(FilingRequirement, { form }), "id"),
-			on(select(FilingRequirement, { subjectKind: formPolicy[form].subject }), "id")
-		),
-		contained(
-			on(select(FilingScope, { form }), "id"),
-			on(select(FilingScope, { kind: formPolicy[form].period }), "id")
-		),
-		contained(
-			on(select(FilingScope, { form }), "subject"),
-			on(select(FilingSubject, { kind: formPolicy[form].subject }), "id")
-		),
-		contained(
-			on(select(Filing, { form }), "subject"),
-			on(select(FilingSubject, { kind: formPolicy[form].subject }), "id")
-		)
-	]),
-	contained(
-		on(Filing, ["requirement", "business", "form"]),
-		on(FilingRequirement, ["id", "business", "form"])
-	),
-	contained(on(Filing, ["subject", "business"]), on(FilingSubject, ["id", "business"])),
-	contained(on(OriginalFiling, ["filing", "period"]), on(Filing, ["id", "period"])),
-	contained(
-		on(OriginalFiling, ["filing", "requirement", "subject", "business", "form"]),
-		on(Filing, ["id", "requirement", "subject", "business", "form"])
-	),
-	contained(
-		on(OriginalFiling, ["scope", "requirement", "subject", "business", "form"]),
-		on(FilingScope, ["id", "requirement", "subject", "business", "form"])
-	),
-	mirrors(on(FilingScope, ["id", "kind", "span"]), on(OriginalFiling, ["scope", "kind", "period"])),
-	contained(on(OriginalFiling, ["canonical", "kind", "period"]), on(CalendarPeriod, ["id", "kind", "span"])),
-	contained(
-		on(CorrectionFiling, ["filing", "business", "subject", "period"]),
-		on(Filing, ["id", "business", "subject", "period"])
-	),
-	contained(
-		on(CorrectionFiling, ["parent", "business", "subject", "period"]),
-		on(Filing, ["id", "business", "subject", "period"])
-	),
-	contained(on(CorrectionFiling, ["filing", "form"]), on(Filing, ["id", "form"])),
-	contained(on(CorrectionFiling, ["parent", "parentForm"]), on(Filing, ["id", "form"])),
-	contained(on(CorrectionFiling, "form"), on(Form, "id")),
-	contained(on(CorrectionFiling, "parentForm"), on(Form, "id")),
-	...forms.map((parentForm) =>
-		contained(
-			on(select(CorrectionFiling, { parentForm }), "filing"),
-			on(select(CorrectionFiling, { form: formPolicy[parentForm].correction }), "filing")
-		)
-	),
-	contained(on(DeadlineRevision, "filing"), on(Filing, "id")),
-	contained(on(FormMethodPolicy, "release"), on(PolicyRelease, "id")),
-	contained(on(DocumentRequirement, "policy"), on(FormMethodPolicy, "id")),
-	...submissionSlots.flatMap(({ form, method, slots }) => [
-		...slots.map((role) =>
-			capacity(on(select(FormMethodPolicy, { form, method }), "id"), {
-				from: on(select(DocumentRequirement, { slot: role, role }), "policy"),
-				within: within(1n)
-			})
-		),
-		capacity(on(select(FormMethodPolicy, { form, method }), "id"), {
-			from: on(DocumentRequirement, "policy"),
-			within: within(BigInt(slots.length))
-		}),
-		capacity(on(select(FormMethodPolicy, { form, method }), "id"), {
-			from: on(FormMethodPolicy, "id"),
-			weight: weigh("requiredCount"),
-			within: within(BigInt(slots.length))
-		}),
-		capacity(on(select(Submission, { form, method }), "id"), {
-			from: on(SubmissionDocument, "submission"),
-			within: within(BigInt(slots.length))
-		})
-	]),
-	contained(on(FilingVersion, ["filing", "business", "form"]), on(Filing, ["id", "business", "form"])),
-	contained(on(FilingVersion, "release"), on(PolicyRelease, "id")),
-	contained(on(FilingBasis, ["version", "filing"]), on(FilingVersion, ["id", "filing"])),
-	contained(on(FilingBasis, ["filing", "revision"]), on(FilingRevision, ["filing", "revision"])),
-	contained(
-		on(FilingRevision, ["filing", "business", "subject", "form", "paidOn"]),
-		on(Filing, ["id", "business", "subject", "form", "period"])
-	),
-	contained(
-		on(FilingRevision, ["revision", "business", "employee", "paidOn"]),
-		on(AssessmentRevision, ["id", "business", "employee", "paidOn"])
-	),
-	contained(on(FilingRevision, "form"), on(Form, "id")),
-	...(["F1099RIRS", "F1099RRecipient"] as const).map((form) =>
-		capacity(on(select(Filing, { form }), "id"), { from: on(FilingRevision, "filing"), within: within(0n) })
-	),
-	contained(on(FilingRevision, "family"), on(AccountFamily, "id")),
-	...payrollForms.flatMap((form) => [
-		contained(
-			on(select(FilingRevision, { form }), ["filing", "revision"]),
-			on(select(FilingRevision, { family: formPolicy[form].family }), ["filing", "revision"])
-		),
-		...(formPolicy[form].subject === "Employee"
-			? [
-					contained(
-						on(select(FilingRevision, { form }), ["subject", "employee", "business"]),
-						on(EmployeeSubject, ["subject", "employee", "business"])
-					)
-				]
-			: [])
-	]),
-	contained(on(FilingDocument, "version"), on(FilingVersion, "id")),
-	contained(on(FilingDocument, "artifact"), on(Artifact, "id")),
-	contained(on(FormAdjustment, "filing"), on(Filing, "id")),
-	contained(on(FilingAdjustmentBasis, ["version", "filing"]), on(FilingVersion, ["id", "filing"])),
-	contained(on(FilingAdjustmentBasis, ["adjustment", "filing"]), on(FormAdjustment, ["id", "filing"])),
-	contained(on(AmendmentLiability, "filing"), on(CorrectionFiling, "filing")),
-	...forms
-		.filter((form) => !formPolicy[form].payment)
-		.map((form) =>
-			capacity(on(select(FilingRevision, { form }), ["filing", "revision"]), {
-				from: on(AmendmentLiability, ["filing", "revision"]),
-				within: within(0n)
-			})
-		),
-	contained(
-		on(AmendmentLiability, ["filing", "revision", "business", "family"]),
-		on(FilingRevision, ["filing", "revision", "business", "family"])
-	),
-	contained(
-		on(AmendmentLiability, ["revision", "account", "business", "family"]),
-		on(RevisionAccount, ["revision", "account", "business", "family"])
-	),
-	contained(on(GrandfatheredEligibility, "filing"), on(select(Filing, { kind: "Original" }), "id")),
-	contained(on(CertifiedMailing, "business"), on(Business, "id")),
-	contained(on(CertifiedMailing, "receipt"), on(Artifact, "id")),
-	contained(on(MailingEvidence, "mailing"), on(CertifiedMailing, "id")),
-	contained(on(MailingEvidence, "artifact"), on(Artifact, "id")),
-	contained(
-		on(Submission, ["version", "business", "form", "release"]),
-		on(FilingVersion, ["id", "business", "form", "release"])
-	),
-	contained(
-		on(Submission, ["policy", "release", "form", "method", "requiredCount"]),
-		on(FormMethodPolicy, ["id", "release", "form", "method", "requiredCount"])
-	),
-	contained(on(DigitalReference, "submission"), on(DigitalSubmission, "submission")),
-	contained(on(DigitalReference, ["submission", "version"]), on(Submission, ["id", "version"])),
-	contained(on(DigitalReference, ["version", "filing"]), on(FilingVersion, ["id", "filing"])),
-	contained(on(GrandfatheredSubmission, ["submission", "version"]), on(Submission, ["id", "version"])),
-	contained(on(GrandfatheredSubmission, ["version", "filing"]), on(FilingVersion, ["id", "filing"])),
-	contained(on(GrandfatheredSubmission, "filing"), on(GrandfatheredEligibility, "filing")),
-	contained(
-		on(CertifiedMailSubmission, ["submission", "version", "business"]),
-		on(Submission, ["id", "version", "business"])
-	),
-	contained(on(CertifiedMailSubmission, ["mailing", "business"]), on(CertifiedMailing, ["id", "business"])),
-	contained(
-		on(SubmissionDocument, ["submission", "version", "policy"]),
-		on(Submission, ["id", "version", "policy"])
-	),
-	contained(
-		on(SubmissionDocument, ["policy", "slot", "role"]),
-		on(DocumentRequirement, ["policy", "slot", "role"])
-	),
-	contained(
-		on(SubmissionDocument, ["version", "slot", "role", "artifact", "part"]),
-		on(FilingDocument, ["version", "slot", "role", "artifact", "part"])
-	),
-
-	contained(on(Rejection, "submission"), on(Submission, "id")),
-	key(Rejection, ["id"]),
-	key(ContributionCancellation, ["id"]),
-	key(ReportedReceiptConversion, ["id"]),
-	key(AnnualEvidence, ["id"]),
-	key(AnnualApproval, ["id"]),
-
-	key(Statement, ["id"]),
-	StatementByText,
-	...Object.values(relations).flatMap((relation) =>
-		relation.kind === "relation" && "evidence" in relation.fields
-			? [contained(on(relation as typeof Answer, "evidence"), on(Statement, "id"))]
-			: []
-	),
-
-	questionIdKey,
-	key(Question, ["id", "business"]),
-	...questionArms,
-	...alternatives(questionIdKey, "kind", QuestionKind, {
-		Review: questionArms[0],
-		PlanSetup: questionArms[1],
-		Bookkeeping: questionArms[2],
-		TaxAccount: questionArms[3]
-	}),
-	contained(on(Question, "business"), on(Business, "id")),
-	contained(on(EmployeeQuestion, ["question", "business"]), on(Question, ["id", "business"])),
-	contained(on(EmployeeQuestion, ["employee", "business"]), on(Employee, ["id", "business"])),
-	contained(on(PlanQuestion, ["question", "business"]), on(Question, ["id", "business"])),
-	contained(on(PlanQuestion, ["plan", "business"]), on(RetirementPlan, ["id", "business"])),
-	contained(on(AccountQuestion, ["question", "business"]), on(Question, ["id", "business"])),
-	contained(on(AccountQuestion, ["account", "business"]), on(TaxAccount, ["id", "business"])),
-	key(Answer, ["id"]),
-	key(Answer, ["question"]),
-	contained(on(Answer, "question"), on(Question, "id")),
-
-	key(NegativeApplication, ["revision", "account"]),
-	contained(on(NegativeApplication, ["revision", "account"]), on(PaymentAllocation, ["revision", "account"])),
-	key(DriveCopy, ["id"]),
-	key(DriveCopy, ["artifact"]),
-	key(DriveCopy, ["driveId"]),
-	key(DriveCopy, ["id", "artifact"]),
-	contained(on(DriveCopy, "artifact"), on(VerifiedArtifact, "artifact")),
-	key(PriorLocation, ["artifact", "locator", "evidence"]),
-	contained(on(PriorLocation, ["copy", "artifact"]), on(DriveCopy, ["id", "artifact"])),
-	contained(on(ImportProvenance, "artifact"), on(Artifact, "id"))
-]
-
-export const ledger = schema("WagieTools", relations, laws)
+		within: within(1n, "*")
+	})
+])
 export default ledger

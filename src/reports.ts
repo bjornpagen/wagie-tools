@@ -1,151 +1,229 @@
-import { query, type Uuid, v } from "@bjornpagen/bumbledb"
-import { Effect } from "effect"
-import { bookkeepingReport } from "./bookkeeping.ts"
-import { netCash } from "./calculations.ts"
-import { type CivilDaySpan, periodSpan, type UnixEpochDay } from "./core/time.ts"
-import { unsigned } from "./core/values.ts"
+import type { Fact } from "@bjornpagen/bumbledb"
+import { paychecks } from "./check.ts"
+import { formatDollars } from "./core/boundary.ts"
+import { covers, quarterSpan, sameSpan, yearOf, yearSpan } from "./core/time.ts"
+import { MAX_U64, sum } from "./core/values.ts"
+import type { Facts } from "./db.ts"
 import {
-	currentAssessments,
-	currentTaxableWages,
-	liabilityEntries,
-	relationRows,
-	rows,
-	select
-} from "./queries.ts"
-import type { Snapshot } from "./runtime.ts"
-import * as S from "./schema.ts"
-import { workRegister } from "./work.ts"
+	column4,
+	correctionDue,
+	correctionsOf,
+	figures,
+	formatLine,
+	latest,
+	mailed,
+	periodOf,
+	type Restatement,
+	restated,
+	transmittal
+} from "./forms.ts"
+import { sweeps } from "./plan.ts"
+import {
+	type Filing,
+	Form,
+	type FormHandle,
+	Jurisdiction,
+	type LineHandle,
+	PlanAccount,
+	type Role
+} from "./schema.ts"
 
-const paidWages = query(S.ledger).rule((r) => {
-	const wage = v(S.Wage)
-	const { amount: cash } = v(netCash)
-	return r
-		.match(S.Wage, wage)
-		.match(netCash, { wage: wage.id, amount: cash })
-		.find({ ...wage, cash })
-})
+/* A period's returns as the ledger computes them, headed by who they name,
+ * with the sums and rows behind them. */
 
-/** Totals are rows, never maps keyed by a name: the field `amount` carries the
- * unit. A total is `complete` only when every wage in the period has a fact
- * for that component; imported history can lack taxable-wage facts, and a
- * sum over the wages that have them is not the period's figure. */
-function totalBy<T, K extends string>(
-	values: readonly T[],
-	key: K,
-	name: (row: T) => string,
-	amount: (row: T) => bigint,
-	wageOf: (row: T) => string,
-	wageIds: ReadonlySet<string>,
-	coverage = true
-) {
-	const totals = new Map<string, { amount: bigint; wages: Set<string> }>()
-	for (const row of values) {
-		const entry = totals.get(name(row)) ?? { amount: 0n, wages: new Set<string>() }
-		entry.amount = unsigned(entry.amount + amount(row))
-		entry.wages.add(wageOf(row))
-		totals.set(name(row), entry)
-	}
-	return [...totals]
-		.sort(([a], [b]) => a.localeCompare(b))
-		.map(([label, entry]) => ({
-			[key]: label,
-			amount: entry.amount,
-			wagesCovered: BigInt(entry.wages.size),
-			...(coverage ? { complete: entry.wages.size === wageIds.size } : {})
-		}))
+/** Who each form names, the filer first. */
+const named: { readonly [F in FormHandle]: readonly (typeof Role.handles)[number][] } = {
+	F941: ["Employer"],
+	F940: ["Employer"],
+	W2: ["Employer", "Employee"],
+	W3: ["Employer"],
+	C3: ["Employer"],
+	F1099R: ["Plan", "Employee"],
+	F1096: ["Plan"]
 }
 
-/** One numerical/evidence selection shared by reports and immutable prepared
- * snapshots. Missing historical taxable-wage facts stay absent, not zero.
- */
-export const periodFigures = (snapshot: Snapshot, business: Uuid, period: CivilDaySpan, employee?: Uuid) =>
-	Effect.gen(function* () {
-		const wages = (yield* rows(snapshot, paidWages, {})).filter(
-			(row) =>
-				row.business === business &&
-				row.paidOn.start >= period.start &&
-				row.paidOn.end <= period.end &&
-				(employee === undefined || row.employee === employee)
-		)
-		const wageIds = new Set(wages.map((row) => row.id))
-		const assessed = (yield* rows(snapshot, currentAssessments, {})).filter((row) => wageIds.has(row.wage))
-		const deducted = (yield* relationRows(snapshot, S.Deduction)).filter((row) => wageIds.has(row.wage))
-		const entries = (yield* rows(snapshot, liabilityEntries, {})).filter((row) => wageIds.has(row.wage))
+const lineValues = (values: ReadonlyMap<LineHandle, bigint>) =>
+	Object.fromEntries([...values].map(([line, value]) => [line, formatLine(line, value)]))
 
-		const taxable = (yield* rows(snapshot, currentTaxableWages, {})).filter((row) => wageIds.has(row.wage))
-		const people = (yield* select(snapshot, S.Employee, { business })).filter(
-			(row) => employee === undefined || row.id === employee
-		)
-		const employeeIds = new Set(people.map((row) => row.id))
-		const relevantFilings = (yield* select(snapshot, S.Filing, { business })).filter(
-			(row) => row.period.start < period.end && row.period.end > period.start
-		)
-		const filingIds = new Set(relevantFilings.map((row) => row.id))
-		return {
-			business,
-			period,
-			state: snapshot.stateStamp,
-			wages,
-			assessed,
-			taxable,
-			deducted,
-			entries,
-			recoveries: (yield* relationRows(snapshot, S.Recovery)).filter(
-				(row) => wageIds.has(row.fromWage) || wageIds.has(row.owedOnWage)
-			),
-			budgets: (yield* relationRows(snapshot, S.AnnualBudget)).filter((row) => employeeIds.has(row.employee)),
-			commitments: (yield* relationRows(snapshot, S.BudgetCommitment)).filter((row) =>
-				employeeIds.has(row.employee)
-			),
-			formAdjustments: (yield* relationRows(snapshot, S.FormAdjustment)).filter((row) =>
-				filingIds.has(row.filing)
-			),
-			totals: {
-				wageCount: BigInt(wages.length),
-				gross: wages.reduce((sum, row) => unsigned(sum + row.gross), 0n),
-				cash: wages.reduce((sum, row) => unsigned(sum + row.cash), 0n),
-				assessed: totalBy(
-					assessed,
-					"component",
-					(row) => row.component,
-					(row) => row.amount,
-					(row) => row.wage,
-					wageIds
-				),
-				taxable: totalBy(
-					taxable,
-					"component",
-					(row) => row.component,
-					(row) => row.amount,
-					(row) => row.wage,
-					wageIds
-				),
-				deducted: totalBy(
-					deducted,
-					"kind",
-					(row) => row.kind,
-					(row) => row.amount,
-					(row) => row.wage,
-					wageIds
-				)
+/** A filed return's corrections: each one sent, oldest first, with each line
+ * it restates as it stood and as corrected; and the one the ledger now calls
+ * for, each line as the return stands and as it should. A 941-X adds the tax
+ * each difference carries and line 27; corrected 1099-Rs add the 1096 that
+ * transmits them. */
+const correctionViews = (facts: Facts, filing: Fact<typeof Filing>) => {
+	const view = (corrected: ReadonlyMap<LineHandle, bigint>, rows: readonly Restatement[]) => {
+		const shown = (row: Restatement) => ({
+			line: row.line,
+			original: formatLine(row.line, row.original),
+			corrected: formatLine(row.line, row.corrected),
+			difference: formatLine(row.line, row.difference)
+		})
+		if (filing.form !== "F941")
+			return {
+				lines: rows.map(shown),
+				...(filing.form === "F1099R" ? { transmittal: transmittal(corrected, rows) } : {})
 			}
-		}
-	})
-
-/** Reports never synchronize filings or calculate another completion state. */
-export const report = (
-	snapshot: Snapshot,
-	business: Uuid,
-	year: number,
-	quarter: number | undefined,
-	asOf: UnixEpochDay
-) =>
-	Effect.gen(function* () {
-		const period = periodSpan(year, quarter === undefined ? "Year" : "Quarter", quarter ?? 1)
+		const x = column4(facts, filing, rows)
 		return {
-			...(yield* periodFigures(snapshot, business, period)),
-			asOf,
-			bookkeeping: yield* bookkeepingReport(snapshot, business, year),
-			register: yield* workRegister(snapshot, business, asOf)
+			lines: x.rows.map((row) => ({ ...shown(row), tax: formatDollars(row.tax) })),
+			line27: formatDollars(x.owed)
 		}
-	})
+	}
+	const sent = correctionsOf(facts, filing.id)
+	const stands = latest(facts, filing.id)
+	const due = correctionDue(facts, filing)
+	return {
+		...(sent.length > 0 && {
+			corrections: sent.map((correction) => ({
+				mailedOn: correction.mailedOn,
+				tracking: correction.tracking,
+				...view(
+					latest(facts, filing.id, correction.mailedOn + 1n),
+					mailed(facts, filing.id, correction.mailedOn)
+				)
+			}))
+		}),
+		...(due.size > 0 && { correctionDue: view(new Map([...stands, ...due]), restated(stands, due)) })
+	}
+}
+
+export const report = (facts: Facts, year: number, quarter?: number) => {
+	const span = quarter === undefined ? yearSpan(year) : quarterSpan(year, quarter)
+	const period = periodOf(facts, span)
+	const forms = Form.handles.filter(
+		(form) => (Form.axioms[form].period === "Quarter") === (quarter !== undefined)
+	)
+	const party = (role: (typeof Role.handles)[number]) => facts.Party.find((row) => row.role === role)
+	const transfer = (mercury: string) => facts.Transfer.find((row) => row.mercury === mercury)
+	const sentIn = (mercury: string) => {
+		const found = transfer(mercury)
+		return found !== undefined && covers(span, found.sentOn)
+	}
+	const distributions = [
+		...facts.Distribution.filter((row) => sentIn(row.transfer)).map((row) => ({
+			kind: "Distribution",
+			...row
+		})),
+		...facts.AfterTax.filter((row) => sentIn(row.transfer)).map((row) => ({ kind: "AfterTax", ...row }))
+	]
+		.map(({ transfer: mercury, kind, amount }) => ({
+			mercury,
+			sentOn: transfer(mercury)?.sentOn ?? 0n,
+			kind,
+			amount
+		}))
+		.sort((a, b) => (a.sentOn < b.sentOn ? -1 : a.sentOn > b.sentOn ? 1 : a.mercury.localeCompare(b.mercury)))
+	const debit = (tracker: string) => facts.TaxDebit.find((row) => row.payment === tracker)
+	const limits = facts.TaxYear.find((row) => row.year === BigInt(year))
+	return {
+		period: span,
+		policy: {
+			...(limits && {
+				deferralLimit: limits.deferralLimit,
+				additionsLimit: limits.additionsLimit,
+				compensationLimit: limits.compensationLimit,
+				wageCeiling: limits.wageCeiling
+			}),
+			bands: facts.TaxBand.filter((band) => band.year === BigInt(year)).map((band) => ({
+				tax: band.tax,
+				rate: band.rate,
+				...(band.wages.end === MAX_U64 ? {} : { base: band.wages.end })
+			}))
+		},
+		totals: {
+			count: BigInt(period.checks.length),
+			gross: sum(period.checks.map((check) => check.gross)),
+			fit: sum(period.checks.map((check) => check.withheld.get("FIT") ?? 0n)),
+			ss: sum(period.checks.map((check) => check.withheld.get("SocialSecurity") ?? 0n)),
+			medicare: sum(period.checks.map((check) => check.withheld.get("Medicare") ?? 0n)),
+			roth: sum(period.checks.map((check) => check.roth)),
+			owedNet: sum(period.checks.map((check) => check.owedNet)),
+			sentNet: sum(period.checks.map((check) => check.sentNet))
+		},
+		forms: Object.fromEntries(
+			forms.map((form) => {
+				const state = Form.axioms[form].jurisdiction
+				const account = Jurisdiction.axioms[state].state
+					? facts.Registration.find((row) => row.state === state)?.number
+					: undefined
+				const filed = facts.Filing.find((row) => row.form === form && sameSpan(row.period, span))
+				return [
+					form,
+					{
+						names: named[form].flatMap((role) => {
+							const found = party(role)
+							return found ? [{ role, name: found.name, tin: found.tin, address: found.address }] : []
+						}),
+						...(account === undefined ? {} : { account }),
+						...(form === "F1099R"
+							? {
+									accounts: PlanAccount.handles.map((plan) => ({
+										account: plan,
+										code: PlanAccount.axioms[plan].code,
+										number: facts.Custody.find((row) => row.account === plan)?.number ?? "none"
+									}))
+								}
+							: {}),
+						lines: lineValues(figures(form, period)),
+						...(filed === undefined ? {} : correctionViews(facts, filed))
+					}
+				]
+			})
+		),
+		...(quarter === undefined
+			? {
+					sweeps: sweeps(facts)
+						.filter((sweep) => yearOf(sweep.on) === year)
+						.map(({ account, on, gross, taxable, basis, converted }) => ({
+							account,
+							on,
+							gross,
+							taxable,
+							basis,
+							converted
+						}))
+				}
+			: {}),
+		paychecks: paychecks(facts)
+			.filter((check) => covers(span, check.wage.paidOn.start))
+			.map((check) => ({
+				paidOn: check.wage.paidOn.start,
+				gross: check.gross,
+				ytd: check.ytd,
+				fit: check.withheld.get("FIT") ?? 0n,
+				ss: check.withheld.get("SocialSecurity") ?? 0n,
+				medicare: check.withheld.get("Medicare") ?? 0n,
+				roth: check.roth,
+				net: check.net,
+				owedNet: check.owedNet,
+				sentNet: check.sentNet,
+				sentRoth: check.sentRoth
+			})),
+		distributions: { amount: sum(distributions.map((row) => row.amount)), transfers: distributions },
+		// Payments toward the span's periods, as its returns' payment lines count
+		// them: a January deposit for December belongs to the year before.
+		taxPayments: facts.TaxPayment.filter(
+			(row) => span.start <= row.period.start && row.period.end <= span.end
+		)
+			.map((row) => {
+				const mercury = debit(row.tracker)?.transfer
+				return {
+					tracker: row.tracker,
+					account: row.account,
+					kind: row.kind,
+					period: row.period,
+					amount: row.amount,
+					initiatedOn: row.initiatedOn.start,
+					mercury: mercury ?? "outside Mercury",
+					...(mercury === undefined ? {} : { sentOn: transfer(mercury)?.sentOn ?? 0n })
+				}
+			})
+			.sort((a, b) =>
+				a.initiatedOn < b.initiatedOn
+					? -1
+					: a.initiatedOn > b.initiatedOn
+						? 1
+						: a.tracker.localeCompare(b.tracker)
+			)
+	}
+}

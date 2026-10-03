@@ -1,577 +1,920 @@
-import type { NativeRuntime, Uuid } from "@bjornpagen/bumbledb"
-import type { TerminalReceipt } from "@bjornpagen/bumbledb-log"
-import { Effect, Schema, type Scope } from "effect"
-import { auditLedger } from "./audit.ts"
-import { backupLedger, restoreArchive, verifyArchive } from "./backup.ts"
-import { BookkeepingInput, operations, recordBookkeeping } from "./bookkeeping.ts"
-import { civilDaySpan, today, type UnixEpochDay } from "./core/time.ts"
-import { Nonblank, Refusal } from "./core/values.ts"
+import type { Fact, NativeRuntime, Uuid } from "@bjornpagen/bumbledb"
+import { Effect, Schema } from "effect"
+import { assess, bandsFor, type Check, jurisdictionOf, netOf, paychecks, stateOn } from "./check.ts"
+import { formatDollars } from "./core/boundary.ts"
 import {
-	ArchiveInput,
-	AttachBankInput,
-	archiveArtifact,
-	attachBankArtifact,
-	collectDocuments,
-	inspectDocuments
-} from "./documents.ts"
-import {
-	ArtifactLocateInput,
-	ArtifactRecordInput,
-	ArtifactVerifyInput,
-	locateArtifact,
-	MailingRecordInput,
-	recordArtifact,
-	recordMailing,
-	verifyArtifact
-} from "./evidence.ts"
-import {
-	ExpectRetirementInput,
-	ensureFilings,
-	expectRetirementFiling,
-	FilingEnsureInput
-} from "./filing-coverage.ts"
-import {
-	amendFiling,
-	FilingAmendInput,
-	FilingDeadlineInput,
-	FilingPrepareInput,
-	FilingRejectInput,
-	FilingSubmitInput,
-	inspectFilings,
-	prepareFiling,
-	rejectFiling,
-	reviseDeadline,
-	submitFiling
-} from "./filings.ts"
-import type { WriteName } from "./op-names.ts"
-import {
-	DispositionInput,
-	disposeLiability,
-	PaymentReconcileInput,
-	PaymentRecordInput,
-	reconcilePayments,
-	recordPayment
-} from "./payments.ts"
-import {
-	CalculateInput,
-	calculatePayroll,
-	inspectCalculation,
-	PostInput,
-	payrollReadback,
-	postPayroll,
-	ReviseInput,
-	revisePayrollTax
-} from "./payroll.ts"
-import {
-	AnnualEvidenceInput,
-	AnnualPolicyInput,
-	ElectionDocumentInput,
-	RefreshInput,
-	recordAnnualEvidence,
-	recordAnnualPolicy,
-	recordElectionDocument,
-	refreshPolicy
-} from "./policy/annual.ts"
-import { ActivateInput, activatePolicy, inspectPolicy, installPolicy, PolicyInput } from "./policy/install.ts"
-import {
-	AssignmentInput,
-	assignCompensation,
-	BudgetInput,
-	BusinessInput,
-	configureBusiness,
-	ElectionInput,
-	EmployeeInput,
-	inspectProfiles,
-	recordBudget,
-	recordElection,
-	recordEmployee
-} from "./profiles.ts"
-import { relationRows } from "./queries.ts"
-import { AnswerInput, AskInput, answerQuestion, questions, recordQuestion } from "./questions.ts"
-import { RecoveryRecordInput, recordRecovery } from "./recoveries.ts"
+	covers,
+	formatDate,
+	formatPeriod,
+	monthOf,
+	point,
+	quarterOf,
+	type Span,
+	sameSpan,
+	todayIn,
+	yearOf,
+	yearSpan
+} from "./core/time.ts"
+import { canonicalJson, MAX_I64, MAX_U64, max, min, naturalId, refuse, sum } from "./core/values.ts"
+import * as Db from "./db.ts"
+import { correctionDue, correctionsOf, figures, periodOf } from "./forms.ts"
+import { CheckInput, fitting, priceCheck } from "./gross-up.ts"
+import { afterTaxRoom, type Obligation, obligations, status } from "./obligations.ts"
+import { sweeps } from "./plan.ts"
 import { report } from "./reports.ts"
-import { type Ledger, latest, parseStrict, resolveRequest } from "./runtime.ts"
-import { commandFields, Day, DaySpan, Id, YearNumber } from "./schema/input.ts"
+import {
+	Day,
+	MercuryTrackingId,
+	Money,
+	Period,
+	PositiveMoney,
+	parseStrict,
+	Rate,
+	Text,
+	Year
+} from "./schema/input.ts"
 import * as S from "./schema.ts"
-import { suggestGross } from "./suggestions.ts"
-import { workRegister } from "./work.ts"
 
-type Env = Ledger | NativeRuntime | Scope.Scope
-type Write = {
-	readonly summary: string
-	readonly input: Schema.Top
-	readonly run: (payload: unknown) => Effect.Effect<TerminalReceipt, unknown, Env>
-	readonly readback?: (receipt: TerminalReceipt) => Effect.Effect<unknown, unknown, Env>
+/* The op table. A write plans on one snapshot of the facts and the laws judge
+ * the result; an identical re-run is no change. */
+
+export const TIME_ZONE = "America/Chicago"
+type Facts = Db.Facts
+type Edit = Db.Edit
+
+/** Natural ids: the same paycheck or filing always gets the same id. */
+export const wageId = (paidOn: bigint) => naturalId("wage", paidOn)
+export const filingId = (form: S.FormHandle, period: Span) =>
+	naturalId("filing", form, period.start, period.end)
+
+const limitsFor = (facts: Facts, year: bigint) =>
+	facts.TaxYear.find((row) => row.year === year) ??
+	refuse("PolicyMissing", `Set the ${year} federal policy first: policy.set`)
+const wageOn = (facts: Facts, paidOn: bigint) => facts.Wage.find((wage) => wage.paidOn.start === paidOn)
+/** The year's gross paid before a day: where a paycheck that day starts. */
+const ytdBefore = (facts: Facts, year: bigint, paidOn: bigint) =>
+	sum(facts.Wage.filter((wage) => wage.year === year && wage.paidOn.start < paidOn).map((wage) => wage.gross))
+const describe = (item: Obligation) => {
+	const when = item.paidOn !== undefined ? formatDate(item.paidOn) : item.period && formatPeriod(item.period)
+	return `${item.what}${when ? ` ${when}` : ""}${item.amount === undefined ? "" : `: ${formatDollars(item.amount)}`}`
+}
+type Every = (typeof S.Periodicity.handles)[number]
+const shapes: { readonly [P in Every]: { readonly of: (day: bigint) => Span; readonly example: string } } = {
+	Month: { of: monthOf, example: '"2026-10"' },
+	Quarter: { of: quarterOf, example: '"2026Q3"' },
+	Year: { of: (day) => yearSpan(yearOf(day)), example: '"2026"' }
+}
+const requirePeriod = (span: Span, periodicity: Every) => {
+	if (!sameSpan(span, shapes[periodicity].of(span.start)))
+		refuse("InvalidPeriod", `Use a ${periodicity.toLowerCase()}, e.g. ${shapes[periodicity].example}`)
+}
+/** A row replaced whole; an identical one is no change. */
+const replace = <N extends Db.Name>(
+	name: N,
+	old: Fact<Db.Stored[N]> | undefined,
+	next: Fact<Db.Stored[N]>
+): Edit[] =>
+	old && canonicalJson(old) === canonicalJson(next)
+		? []
+		: [...(old ? Db.remove(name, old) : []), ...Db.insert(name, next)]
+
+// ── payroll ────────────────────────────────────────────────────────────────
+
+const withholding = (wage: Uuid, check: Check) =>
+	[...check.withheld].map(([tax, amount]) => ({ wage, tax, amount }))
+const same = (facts: Facts, wage: Fact<typeof S.Wage>, check: Check) =>
+	wage.gross === check.gross &&
+	wage.roth === check.roth &&
+	[...check.withheld].every(([tax, amount]) =>
+		facts.Withholding.some((row) => row.wage === wage.id && row.tax === tax && row.amount === amount)
+	)
+const wiredTo = (facts: Facts, account: S.PlanAccountHandle) => {
+	const held = facts.Custody.find((row) => row.account === account)
+	return held ? `${held.custodian} ${account} ${held.number}` : `the plan's ${account} account`
 }
 
-/** The flat input of one bookkeeping arm: the command fields plus the arm's
- * own fields. A two-shaped arm (Contribution) stays a union of both shapes. */
-const flatArm = (arm: Schema.Top): Schema.Top => {
-	if ("members" in arm && Array.isArray(arm.members)) return Schema.Union(arm.members.map(flatArm))
-	const { kind: _kind, ...fields } = (arm as unknown as { fields: Schema.Struct.Fields }).fields
-	return Schema.Struct({ ...commandFields, evidence: Nonblank, ...fields })
+/** A posted paycheck: its amounts, what it recovered from earlier ones, and
+ * the wires still to send for it. */
+const paycheck = (facts: Facts, id: Uuid) => {
+	const check =
+		paychecks(facts).find((row) => row.wage.id === id) ?? refuse("WageMissing", "No such paycheck")
+	const paidOn = new Map(facts.Wage.map((row) => [row.id, row.paidOn.start]))
+	const unsent = check.owedNet - check.sentNet
+	const rothUnsent = check.roth - check.sentRoth
+	return {
+		paidOn: check.wage.paidOn.start,
+		gross: check.gross,
+		ytd: check.ytd,
+		fit: check.withheld.get("FIT") ?? 0n,
+		ss: check.withheld.get("SocialSecurity") ?? 0n,
+		medicare: check.withheld.get("Medicare") ?? 0n,
+		roth: check.roth,
+		net: check.net,
+		owedNet: check.owedNet,
+		sentNet: check.sentNet,
+		sentRoth: check.sentRoth,
+		recovered: facts.Recovery.filter((row) => row.recoveredBy === id)
+			.map((row) => ({
+				paidOn: paidOn.get(row.wage) ?? refuse("WageMissing", "A recovery names no paycheck"),
+				amount: row.amount
+			}))
+			.sort((a, b) => (a.paidOn < b.paidOn ? -1 : 1)),
+		wires: [
+			...(unsent > 0n ? [{ kind: "NetPay", to: "the owner", amount: unsent }] : []),
+			...(rothUnsent > 0n ? [{ kind: "RothDeferral", to: wiredTo(facts, "Roth"), amount: rothUnsent }] : [])
+		]
+	}
 }
 
-/** One bookkeeping arm as a flat op: {request, business, evidence, ...arm}. */
-const bookkeeping = (kind: keyof typeof operations, summary: string): Write => ({
-	summary,
-	input: flatArm(operations[kind]),
-	run: (payload) =>
-		Effect.gen(function* () {
-			const { request, business, evidence, ...arm } = payload as Record<string, unknown>
-			return yield* recordBookkeeping({ request, business, evidence, operation: { kind, ...arm } })
+/** Roth comes out of pay only under a signed election: none from a paycheck
+ * paid before the year's election was signed. */
+const requireSigned = (facts: Facts, year: bigint, paidOn: bigint) => {
+	const election = facts.Election.find((row) => row.year === year)
+	if (election && paidOn < election.signedOn)
+		refuse(
+			"ElectionUnsigned",
+			`The ${year} election was signed ${formatDate(election.signedOn)}; no Roth comes out of pay before it`
+		)
+}
+
+/** A paycheck's 941 tax: FIT and both halves of FICA as withheld. */
+const liability941 = (check: Check) =>
+	sum(
+		[...check.withheld].map(([tax, amount]) =>
+			S.Tax.axioms[tax].account === "Federal941" ? amount * (S.Tax.axioms[tax].employer ? 2n : 1n) : 0n
+		)
+	)
+/** $100,000 of 941 tax accumulated before a deposit is due the next business
+ * day; the ledger schedules monthly deposits only. */
+const NEXT_DAY = 10_000_000n
+
+/** Paychecks sent more net pay than they owe, oldest first. */
+const overpaid = (facts: Facts) =>
+	paychecks(facts)
+		.filter((check) => check.sentNet > check.owedNet)
+		.map((check) => ({ wage: check.wage, excess: check.sentNet - check.owedNet }))
+
+const PayrollInput = Schema.Struct({ paidOn: Day, input: CheckInput, fit: Schema.optional(Money) })
+
+/** The paycheck for a day: sized, priced, recovering earlier overpayments
+ * oldest first. A post refuses while anything due by `paidOn` is open; a quote
+ * shows what would refuse it. `by: "net"` is net after recoveries: what lands. */
+const payroll =
+	(request: typeof PayrollInput.Type, quoting = false) =>
+	(facts: Facts): Db.Plan<object> => {
+		const { paidOn } = request
+		const year = BigInt(yearOf(paidOn))
+		const limits = limitsFor(facts, year)
+		const plan = facts.PayPlan.find((row) => row.year === year)
+		const fit =
+			request.fit ?? plan?.fitPerCheck ?? refuse("FitMissing", `Give fit, or set the ${year} pay plan`)
+		const bands = bandsFor(facts, year, stateOn(facts, paidOn))
+		const { blockers } = obligations(facts, paidOn)
+		const shown = (after: Facts, id: Uuid) => ({ ...paycheck(after, id), ...(quoting ? { blockers } : {}) })
+		const priced = (recovering: bigint) =>
+			priceCheck(
+				limits,
+				bands,
+				plan,
+				ytdBefore(facts, year, paidOn),
+				paidOn,
+				request.input.by === "net"
+					? { ...request.input, net: request.input.net + recovering }
+					: request.input,
+				fit
+			)
+
+		const existing = wageOn(facts, paidOn)
+		if (existing) {
+			const took = sum(
+				facts.Recovery.filter((row) => row.recoveredBy === existing.id).map((row) => row.amount)
+			)
+			if (!same(facts, existing, priced(took)))
+				refuse("WageExists", `A different paycheck is posted on ${formatDate(paidOn)}; use payroll.correct`)
+			return { edits: [], result: shown(facts, existing.id) }
+		}
+		if (facts.Wage.some((wage) => wage.year === year && wage.paidOn.start > paidOn))
+			refuse("Backdated", "A later paycheck is posted this year; paychecks stay in date order")
+		const filed = facts.Filing.find(
+			(row) => S.Form.axioms[row.form].trigger !== "PlanActivity" && covers(row.period, paidOn)
+		)
+		if (filed)
+			refuse("PeriodFiled", `${filed.form} ${formatPeriod(filed.period)} is filed; no paycheck can join it`)
+		if ((request.input.roth ?? 0n) > 0n) requireSigned(facts, year, paidOn)
+		if (blockers.length > 0 && !quoting) refuse("PayrollBlocked", blockers.map(describe).join("; "))
+
+		const owed = overpaid(facts)
+		const check = priced(sum(owed.map((row) => row.excess)))
+		const month = monthOf(paidOn)
+		const accrued = sum(
+			[...paychecks(facts).filter((row) => covers(month, row.wage.paidOn.start)), check].map(liability941)
+		)
+		if (accrued >= NEXT_DAY)
+			refuse(
+				"DepositNextDay",
+				`${formatDollars(accrued)} of 941 tax in one month must be deposited the next business day, which the ledger does not schedule`
+			)
+		const id = wageId(paidOn)
+		const wage = { id, paidOn: point(paidOn), year, gross: check.gross, roth: check.roth }
+		let left = netOf(check)
+		const taken = owed.flatMap(({ wage: earlier, excess }) => {
+			const amount = min(excess, left)
+			left -= amount
+			return amount > 0n ? [{ wage: earlier.id, recoveredBy: id, amount }] : []
 		})
+		const rows = withholding(id, check)
+		const after = {
+			...facts,
+			Wage: [...facts.Wage, wage],
+			Withholding: [...facts.Withholding, ...rows],
+			Recovery: [...facts.Recovery, ...taken]
+		}
+		return {
+			edits: [
+				...Db.insert("Wage", wage),
+				...Db.insert("Withholding", ...rows),
+				...Db.insert("Recovery", ...taken)
+			],
+			result: shown(after, id)
+		}
+	}
+
+const CorrectInput = Schema.Struct({
+	paidOn: Day,
+	gross: Schema.optional(PositiveMoney),
+	fit: Schema.optional(Money),
+	roth: Schema.optional(Money)
+})
+/** Reprice a posted paycheck. FICA moves only with gross, which only the
+ * year's latest paycheck may change, so later paychecks never shift.
+ * Differences surface as obligations: a wire to top up, an overpayment to
+ * recover, a 941-X. */
+const correct =
+	(request: typeof CorrectInput.Type) =>
+	(facts: Facts): Db.Plan<object> => {
+		const wage =
+			wageOn(facts, request.paidOn) ?? refuse("WageMissing", `No paycheck on ${formatDate(request.paidOn)}`)
+		const current =
+			paychecks(facts).find((row) => row.wage.id === wage.id) ?? refuse("WageMissing", "No such paycheck")
+		const gross = request.gross ?? wage.gross
+		if (
+			gross !== wage.gross &&
+			facts.Wage.some((row) => row.year === wage.year && row.paidOn.start > request.paidOn)
+		)
+			refuse("GrossNotLatest", "Gross can change only on the year's latest paycheck")
+		const fit = request.fit ?? current.withheld.get("FIT") ?? 0n
+		const roth = request.roth ?? wage.roth
+		if (roth > wage.roth) requireSigned(facts, wage.year, request.paidOn)
+		const check =
+			gross === wage.gross
+				? fitting({ gross, roth, withheld: new Map([...current.withheld, ["FIT", fit]]) })
+				: priceCheck(
+						limitsFor(facts, wage.year),
+						current.bands,
+						undefined,
+						current.ytd,
+						request.paidOn,
+						{ by: "gross", gross, roth },
+						fit
+					)
+		if (same(facts, wage, check)) return { edits: [], result: paycheck(facts, wage.id) }
+		const corrected = { ...wage, gross, roth }
+		const old = facts.Withholding.filter((row) => row.wage === wage.id)
+		const rows = withholding(wage.id, check)
+		const after = {
+			...facts,
+			Wage: facts.Wage.map((row) => (row.id === wage.id ? corrected : row)),
+			Withholding: [...facts.Withholding.filter((row) => row.wage !== wage.id), ...rows]
+		}
+		if (paychecks(after).some((row) => row.wage.id === wage.id && row.net < 0n))
+			refuse("NetNegative", "The corrected paycheck can't cover what it already recovered from earlier ones")
+		return {
+			edits: [
+				...replace("Wage", wage, corrected),
+				...rows.flatMap((row) =>
+					replace(
+						"Withholding",
+						old.find((each) => each.tax === row.tax),
+						row
+					)
+				)
+			],
+			result: paycheck(after, wage.id)
+		}
+	}
+
+// ── money out ──────────────────────────────────────────────────────────────
+
+const wire = { mercury: MercuryTrackingId, sentOn: Day, amount: PositiveMoney }
+const TransferInput = Schema.Union([
+	Schema.Struct({ kind: Schema.Literal("NetPay"), paidOn: Day, ...wire }),
+	Schema.Struct({ kind: Schema.Literal("RothDeferral"), paidOn: Day, ...wire }),
+	Schema.Struct({ kind: Schema.Literal("AfterTax"), year: Year, ...wire }),
+	Schema.Struct({ kind: Schema.Literal("Distribution"), ...wire })
+])
+/** A Mercury transfer and the arm saying what it paid. A Roth wire may not
+ * exceed the paycheck's Roth. Net pay Mercury sent is recorded whatever the
+ * paycheck now owes: past it, the paycheck is overpaid and the next one
+ * recovers it. An earlier record of the same transfer is judged by the laws
+ * instead, so a re-run is no change. */
+const transfer =
+	(request: typeof TransferInput.Type) =>
+	(facts: Facts): Db.Plan<object> => {
+		const { mercury, sentOn, amount, kind } = request
+		const recorded = facts.Transfer.some((row) => row.mercury === mercury)
+		const arm = (): Edit[] => {
+			switch (request.kind) {
+				case "NetPay":
+				case "RothDeferral": {
+					const wage =
+						wageOn(facts, request.paidOn) ??
+						refuse("WageMissing", `No paycheck on ${formatDate(request.paidOn)}`)
+					const check =
+						paychecks(facts).find((row) => row.wage.id === wage.id) ??
+						refuse("WageMissing", "No such paycheck")
+					if (request.kind === "RothDeferral" && !recorded && check.sentRoth + amount > check.roth)
+						refuse(
+							"Overpaid",
+							`${formatDate(request.paidOn)} has ${formatDollars(check.roth - check.sentRoth)} of ${kind} unsent`
+						)
+					return Db.insert(request.kind, { transfer: mercury, wage: wage.id, amount })
+				}
+				case "AfterTax": {
+					const year = BigInt(request.year)
+					// Treas. Reg. §1.415(c)-1(b)(6)(i)(C): an employee contribution counts
+					// toward a year only if made by 30 days after it closes.
+					const plan = yearSpan(request.year)
+					if (sentOn < plan.start || sentOn > plan.end + 29n)
+						refuse(
+							"OutsideCrediting",
+							`An after-tax contribution for ${year} goes out from ${formatDate(plan.start)} through ${formatDate(plan.end + 29n)}`
+						)
+					const room = afterTaxRoom(facts, year)
+					if (!recorded && room !== undefined && amount > room)
+						refuse(
+							"Over415c",
+							`At most ${formatDollars(max(0n, room))} more after-tax fits ${year}: the election and 415(c), the salary target standing in for pay to come`
+						)
+					return Db.insert("AfterTax", { transfer: mercury, year, amount })
+				}
+				case "Distribution":
+					return Db.insert("Distribution", { transfer: mercury, amount })
+			}
+		}
+		return { edits: [...Db.insert("Transfer", { mercury, sentOn, kind }), ...arm()], result: request }
+	}
+
+const TaxPaidInput = Schema.Struct({
+	tracker: Text,
+	account: Schema.Literals(S.TaxAccount.handles),
+	kind: Schema.Literals(S.PaymentKind.handles),
+	period: Period,
+	amount: PositiveMoney,
+	initiatedOn: Day,
+	mercury: MercuryTrackingId,
+	sentOn: Day
+})
+/** An EFTPS or TWC payment, recorded once its Mercury debit has posted. */
+const taxPaid = (request: typeof TaxPaidInput.Type) => (): Db.Plan<object> => {
+	const { tracker, account, kind, period, amount, initiatedOn, mercury, sentOn } = request
+	requirePeriod(period, S.TaxAccount.axioms[account].period)
+	return {
+		edits: [
+			...Db.insert("TaxPayment", {
+				tracker,
+				account,
+				kind,
+				period,
+				amount,
+				initiatedOn: point(initiatedOn),
+				funding: "Mercury"
+			}),
+			...Db.insert("Transfer", { mercury, sentOn, kind: "Tax" }),
+			...Db.insert("TaxDebit", { transfer: mercury, payment: tracker })
+		],
+		result: request
+	}
+}
+
+// ── the plan's books ───────────────────────────────────────────────────────
+
+const RolloverInput = Schema.Struct({
+	account: Schema.Literals(S.PlanAccount.handles),
+	on: Day,
+	gross: PositiveMoney
+})
+/** A whole-account sweep into the owner's Roth IRA. What it carries, and what
+ * the 1099-R reports for it, follow from the wires since the last sweep. */
+const rollover =
+	(request: typeof RolloverInput.Type) =>
+	(facts: Facts): Db.Plan<object> => {
+		if (S.PlanAccount.axioms[request.account].implied)
+			refuse(
+				"ImpliedConversion",
+				`Carry converts the ${request.account} account as deposits settle; its 1099-R follows from its transfers`
+			)
+		const row = { account: request.account, on: request.on, gross: request.gross }
+		const others = facts.Rollover.filter((old) => old.account !== row.account || old.on !== row.on)
+		const swept = sweeps({ ...facts, Rollover: [...others, row] }).find(
+			(sweep) => sweep.account === row.account && sweep.on === row.on
+		)
+		return { edits: Db.insert("Rollover", row), result: { ...request, ...swept } }
+	}
+
+// ── filings ────────────────────────────────────────────────────────────────
+
+const filed = { form: Schema.Literals(S.Form.handles), period: Period }
+const FilingInput = Schema.Union([
+	Schema.Struct({ ...filed, method: Schema.Literal("Electronic"), on: Day, confirmation: Text }),
+	Schema.Struct({ ...filed, method: Schema.Literal("CertifiedMail"), mailedOn: Day, tracking: Text }),
+	Schema.Struct({ ...filed, method: Schema.Literal("Furnished"), on: Day })
+])
+type FilingInput = typeof FilingInput.Type
+
+/** The day a return was filed, by its method; an attested one has none. */
+const filedOn = (facts: Facts, filing: Uuid) =>
+	facts.Electronic.find((row) => row.filing === filing)?.on ??
+	facts.CertifiedMail.find((row) => row.filing === filing)?.mailedOn ??
+	facts.Furnished.find((row) => row.filing === filing)?.on
+/** A tracking number names one mailing: a return, or the corrections sent
+ * together on one day (a W-2c with its W-3c). */
+const mailedUnder = (facts: Facts, tracking: string, correctedOn?: bigint) =>
+	facts.CertifiedMail.some((row) => row.tracking === tracking) ||
+	facts.Correction.some((row) => row.tracking === tracking && row.mailedOn !== correctedOn)
+/** Whether a return is recorded exactly as this request records it. */
+const recordedAs = (facts: Facts, filing: Fact<typeof S.Filing>, request: FilingInput) => {
+	if (filing.method !== request.method) return false
+	switch (request.method) {
+		case "Electronic":
+			return facts.Electronic.some(
+				(row) =>
+					row.filing === filing.id && row.on === request.on && row.confirmation === request.confirmation
+			)
+		case "CertifiedMail":
+			return facts.CertifiedMail.some(
+				(row) =>
+					row.filing === filing.id && row.mailedOn === request.mailedOn && row.tracking === request.tracking
+			)
+		case "Furnished":
+			return facts.Furnished.some((row) => row.filing === filing.id && row.on === request.on)
+	}
+}
+
+/** A return as filed: how, and every line as the ledger computes it now.
+ * What is filed must equal the ledger; fix the ledger first if it doesn't.
+ * A return is filed once its period is over: filed early, it would freeze a
+ * period's liability before its paychecks were all paid. Recording it again
+ * is no change, whatever has happened since. */
+const fileReturn =
+	(request: FilingInput) =>
+	(facts: Facts): Db.Plan<object> => {
+		const { form, period, method } = request
+		requirePeriod(period, S.Form.axioms[form].period)
+		const recorded = facts.Filing.find((row) => row.form === form && sameSpan(row.period, period))
+		if (recorded && recordedAs(facts, recorded, request)) return { edits: [], result: request }
+		if (recorded) refuse("Filed", `${form} ${formatPeriod(period)} is already recorded`)
+		if ((request.method === "CertifiedMail" ? request.mailedOn : request.on) < period.end)
+			refuse("PeriodOpen", `${form} ${formatPeriod(period)} can be filed once the period is over`)
+		if (request.method === "CertifiedMail" && mailedUnder(facts, request.tracking))
+			refuse("TrackingUsed", `Tracking ${request.tracking} already names another mailing`)
+		const id = filingId(form, period)
+		const lines = [...figures(form, periodOf(facts, period))].map(([line, value]) => ({
+			filing: id,
+			line,
+			value
+		}))
+		return {
+			edits: [
+				...Db.insert("Filing", { id, form, period, method }),
+				...(request.method === "Electronic"
+					? Db.insert("Electronic", { filing: id, on: request.on, confirmation: request.confirmation })
+					: request.method === "CertifiedMail"
+						? Db.insert("CertifiedMail", {
+								filing: id,
+								mailedOn: request.mailedOn,
+								tracking: request.tracking
+							})
+						: Db.insert("Furnished", { filing: id, on: request.on })),
+				...Db.insert("FiledFigures", ...lines)
+			],
+			result: request
+		}
+	}
+
+/** The returns a correction can be filed for: those with correctable lines. */
+const correctableForms = S.Form.handles.filter((form) =>
+	S.correctable.some((line) => S.Line.axioms[line].form === form)
+)
+const CorrectionInput = Schema.Struct({
+	form: Schema.Literals(correctableForms),
+	period: Period,
+	mailedOn: Day,
+	tracking: Text
+})
+/** A correction sent for a filed return: a 941-X, an amended 940 or C-3, a
+ * W-2c or W-3c, or corrected 1099-Rs with their own 1096. It restates each
+ * correctable line the ledger now computes differently; every other line
+ * stands as it stood. A return takes any number of corrections, each after
+ * the last. */
+const correctReturn =
+	(request: typeof CorrectionInput.Type) =>
+	(facts: Facts): Db.Plan<object> => {
+		const { form, period, mailedOn, tracking } = request
+		requirePeriod(period, S.Form.axioms[form].period)
+		const filing =
+			facts.Filing.find((row) => row.form === form && sameSpan(row.period, period)) ??
+			refuse("FilingMissing", `No ${form} is recorded for ${formatPeriod(period)}`)
+		const earlier = correctionsOf(facts, filing.id)
+		const same = earlier.find((row) => row.mailedOn === mailedOn)
+		if (same?.tracking === tracking) return { edits: [], result: request }
+		if (same) refuse("Corrected", `${form} ${formatPeriod(period)} already has a correction that day`)
+		const last = earlier.at(-1)
+		const after = last ? last.mailedOn + 1n : max(period.end, filedOn(facts, filing.id) ?? period.end)
+		if (mailedOn < after)
+			refuse("BeforeFiling", `${form} ${formatPeriod(period)} can be corrected from ${formatDate(after)} on`)
+		if (mailedUnder(facts, tracking, mailedOn))
+			refuse("TrackingUsed", `Tracking ${tracking} already names another mailing`)
+		const due = correctionDue(facts, filing)
+		if (due.size === 0)
+			refuse("NothingToCorrect", `${form} ${formatPeriod(period)} as filed matches what it reports`)
+		return {
+			edits: [
+				...Db.insert("Correction", { filing: filing.id, mailedOn, tracking }),
+				...Db.insert(
+					"CorrectedFigures",
+					...[...due].map(([line, value]) => ({ filing: filing.id, mailedOn, line, value }))
+				)
+			],
+			result: request
+		}
+	}
+
+// ── setup and policy ───────────────────────────────────────────────────────
+
+const states = S.Jurisdiction.handles.filter((handle) => S.Jurisdiction.axioms[handle].state)
+const PartyInput = Schema.Struct({ name: Text, tin: Text, address: Text })
+const SetupInput = Schema.Struct({
+	employer: PartyInput,
+	employee: PartyInput,
+	plan: PartyInput,
+	registrations: Schema.Array(Schema.Struct({ state: Schema.Literals(states), number: Text })),
+	employment: Schema.Struct({ from: Day, state: Schema.Literals(states) }),
+	custody: Schema.Struct({
+		Pretax: Schema.Struct({ custodian: Text, number: Text }),
+		AfterTax: Schema.Struct({ custodian: Text, number: Text }),
+		Roth: Schema.Struct({ custodian: Text, number: Text })
+	})
 })
 
-/** Every write the ledger accepts, by name. The CLI, `wagie schema`, the
- * skill file and the work register's `next` intents all use these names. */
-export const writes = {
-	"business.configure": {
-		summary: "Create or update the business, its addresses, state account and tax accounts",
-		input: BusinessInput,
-		run: configureBusiness
-	},
-	"employee.record": { summary: "Create or update an employee", input: EmployeeInput, run: recordEmployee },
-	"compensation.budget": {
-		summary: "Record an evidenced annual gross salary target",
-		input: BudgetInput,
-		run: recordBudget
-	},
-	"compensation.assign": {
-		summary: "Assign an observed compensation commitment to its annual budget",
-		input: AssignmentInput,
-		run: assignCompensation
-	},
-	"election.document": {
-		summary: "Record a signed retirement election document and its four amounts",
-		input: ElectionDocumentInput,
-		run: recordElectionDocument
-	},
-	"election.record": {
-		summary: "Activate a signed election document from an effective date",
-		input: ElectionInput,
-		run: recordElection
-	},
-	"question.ask": {
-		summary: "Open a question; its kind decides what it holds back",
-		input: AskInput,
-		run: recordQuestion
-	},
-	"question.answer": {
-		summary: "Close a question with the evidence that answers it",
-		input: AnswerInput,
-		run: answerQuestion
-	},
-	"policy.install": { summary: "Install a hashed policy release", input: PolicyInput, run: installPolicy },
-	"policy.activate": {
-		summary: "Select the active policy release",
-		input: ActivateInput,
-		run: activatePolicy
-	},
-	"policy.annual": {
-		summary: "Record one authority's published annual rules and sources",
-		input: AnnualPolicyInput,
-		run: recordAnnualPolicy
-	},
-	"policy.evidence": {
-		summary: "Record employer-specific annual evidence",
-		input: AnnualEvidenceInput,
-		run: recordAnnualEvidence
-	},
-	"policy.refresh": {
-		summary: "Approve an authority's annual policy for the active release",
-		input: RefreshInput,
-		run: refreshPolicy
-	},
-	"filings.ensure": {
-		summary: "Materialize applicable filings through a year",
-		input: FilingEnsureInput,
-		run: ensureFilings
-	},
-	"filings.expect-retirement": {
-		summary: "Record an externally prepared 1099-R filing expectation",
-		input: ExpectRetirementInput,
-		run: expectRetirementFiling
-	},
-	"filings.prepare": {
-		summary: "Freeze a filing's figures and documents as a version",
-		input: FilingPrepareInput,
-		run: prepareFiling
-	},
-	"filings.submit": {
-		summary: "Record an actual submission of a prepared version",
-		input: FilingSubmitInput,
-		run: submitFiling
-	},
-	"filings.reject": { summary: "Record an agency rejection", input: FilingRejectInput, run: rejectFiling },
-	"filings.deadline": {
-		summary: "Record an evidenced deadline change",
-		input: FilingDeadlineInput,
-		run: reviseDeadline
-	},
-	"filings.amend": {
-		summary: "Open a correction filing for a submitted return",
-		input: FilingAmendInput,
-		run: amendFiling
-	},
-	"mailing.record": {
-		summary: "Record a certified mailing with its tracking number",
-		input: MailingRecordInput,
-		run: recordMailing
-	},
-	"payment.record": {
-		summary: "Record a tax payment already sent",
-		input: PaymentRecordInput,
-		run: recordPayment
-	},
-	"payment.reconcile": {
-		summary: "Attribute tax payments to liability entries",
-		input: PaymentReconcileInput,
-		run: reconcilePayments
-	},
-	"payment.dispose": {
-		summary: "Record an evidenced disposition of a negative liability",
-		input: DispositionInput,
-		run: disposeLiability
-	},
-	"payroll.calculate": {
-		summary: "Price a new wage (NewWage), a zero-cash Roth wire (RothOnly), or a tax revision",
-		input: CalculateInput,
-		run: calculatePayroll,
-		readback: payrollReadback
-	},
-	"payroll.post": {
-		summary: "Post a calculated wage after its Mercury payment was sent",
-		input: PostInput,
-		run: postPayroll,
-		readback: payrollReadback
-	},
-	"payroll.revise-tax": {
-		summary: "Reassess a posted wage's taxes",
-		input: ReviseInput,
-		run: revisePayrollTax,
-		readback: payrollReadback
-	},
-	"recovery.record": {
-		summary: "Attribute an actual recovery deduction to the wages it collected",
-		input: RecoveryRecordInput,
-		run: recordRecovery
-	},
-	"artifact.record": {
-		summary: "Register a document's exact bytes",
-		input: ArtifactRecordInput,
-		run: recordArtifact
-	},
-	"artifact.locate": {
-		summary: "Record a non-Drive location",
-		input: ArtifactLocateInput,
-		run: locateArtifact
-	},
-	"artifact.verify": {
-		summary: "Re-verify a document's bytes",
-		input: ArtifactVerifyInput,
-		run: verifyArtifact
-	},
-	"artifact.archive": {
-		summary: "Adopt a verified Google Drive copy of a document",
-		input: ArchiveInput,
-		run: (payload) => archiveArtifact(payload)
-	},
-	"artifact.attach-bank": {
-		summary: "Attach a Mercury receipt to an existing bank movement",
-		input: AttachBankInput,
-		run: attachBankArtifact
-	},
-	"bank.movement": bookkeeping("BankMovement", "Record an actual Mercury movement by its transaction ID"),
-	"bank.distribution": bookkeeping("Distribution", "Allocate part of a movement to an owner distribution"),
-	"bank.distribution-return": bookkeeping(
-		"DistributionReturn",
-		"Link an inflow returning part of a distribution"
-	),
-	"bank.distribution-review": bookkeeping(
-		"DistributionReview",
-		"Freeze a year's distributions for the tax handoff"
-	),
-	"bank.payroll-cash": bookkeeping("PayrollCash", "Link an existing movement as a wage's cash"),
-	"retirement.plan": bookkeeping("Plan", "Record the owner's retirement plan"),
-	"retirement.account": bookkeeping("Account", "Record a plan account"),
-	"retirement.annual": bookkeeping("Annual", "Record a year's limits and owner attestations"),
-	"retirement.contribution": bookkeeping("Contribution", "Record an already completed contribution"),
-	"retirement.authorize-after-tax": bookkeeping(
-		"AuthorizeAfterTax",
-		"Reserve after-tax capacity; sends no money"
-	),
-	"retirement.cancel-authorization": bookkeeping("CancelAuthorization", "Release an unspent authorization"),
-	"retirement.fund": bookkeeping("FundContribution", "Link a Mercury movement that funded a contribution"),
-	"retirement.receipt": bookkeeping("ProviderReceipt", "Record the plan provider's confirmed receipt"),
-	"retirement.allocate-receipt": bookkeeping("AllocateReceipt", "Allocate a receipt to contributions"),
-	"retirement.conversion": bookkeeping("Conversion", "Record an after-tax to Roth conversion"),
-	"retirement.supplied-tax": bookkeeping("SuppliedTax", "Store externally supplied conversion tax amounts"),
-	"retirement.supplied-report": bookkeeping("SuppliedReport", "Link supplied provider report data"),
-	"retirement.confirm-reported-conversion": bookkeeping(
-		"ConfirmReportedConversion",
-		"Confirm a whole receipt's conversion from a supplied report"
-	),
-	"retirement.balance": bookkeeping("Balance", "Record a dated provider balance")
-} satisfies Record<WriteName, Write>
-
-type ReadContext = { readonly asOf: UnixEpochDay }
-type Read = {
-	readonly summary: string
-	readonly input: Schema.Top
-	readonly run: (input: never, context: ReadContext) => Effect.Effect<unknown, unknown, Env>
+const banded = (jurisdiction: S.JurisdictionHandle) =>
+	S.Tax.handles.filter((tax) => S.Tax.axioms[tax].banded && jurisdictionOf(tax) === jurisdiction)
+const BandInput = Schema.Struct({ rate: Rate, base: Schema.optional(PositiveMoney) })
+const Limits = Schema.Struct({
+	deferralLimit: Money,
+	additionsLimit: Money,
+	compensationLimit: Money,
+	wageCeiling: Money
+})
+const rates = (jurisdiction: S.JurisdictionHandle) =>
+	Schema.Struct(Object.fromEntries(banded(jurisdiction).map((tax) => [tax, BandInput])))
+/** One jurisdiction's policy for a year: the federal limits, and a rate and
+ * optional wage base for each banded tax the jurisdiction levies. */
+const PolicyInput = Schema.Union([
+	Schema.Struct({
+		jurisdiction: Schema.Literal("Federal"),
+		year: Year,
+		limits: Limits,
+		rates: rates("Federal")
+	}),
+	...states.map((state) =>
+		Schema.Struct({ jurisdiction: Schema.Literal(state), year: Year, rates: rates(state) })
+	)
+])
+type PolicyInput = {
+	readonly jurisdiction: S.JurisdictionHandle
+	readonly year: number
+	readonly limits?: typeof Limits.Type
+	readonly rates: { readonly [tax: string]: typeof BandInput.Type | undefined }
 }
-const business = { business: Id, asOf: Schema.optional(Day) }
-const read = <S extends Schema.Top>(
-	summary: string,
-	input: S,
-	run: (input: S["Type"], context: ReadContext) => Effect.Effect<unknown, unknown, Env>
-): Read => ({ summary, input, run: run as Read["run"] })
 
-/** Every read, by name. Reads never write. */
-export const reads = {
-	status: read(
-		"Open work, what blocks payroll, and readiness notes. Each item names its next op",
-		Schema.Struct(business),
-		(input, { asOf }) =>
-			Effect.gen(function* () {
-				const register = yield* workRegister(yield* latest, input.business, asOf)
-				return {
-					business: register.business,
-					asOf: register.asOf,
-					state: register.state,
-					blockers: register.blockers,
-					open: register.work.filter((item) => item.status !== "Complete"),
-					readiness: register.readiness
-				}
+/** The one invariant bumbledb can't state over two columns: the Roth and
+ * after-tax elections together stay within 415(c). */
+const within415 = (
+	election: { roth: bigint; afterTax: bigint } | undefined,
+	limits: { additionsLimit: bigint } | undefined
+) => {
+	if (election && limits && election.roth + election.afterTax > limits.additionsLimit)
+		refuse(
+			"Over415c",
+			`Roth plus after-tax elections exceed the ${formatDollars(limits.additionsLimit)} 415(c) limit`
+		)
+}
+
+/** A withheld tax's band never changes in a way that would withhold a posted
+ * paycheck differently. An employer's own rate, such as a Texas UI rate
+ * assigned late, may change; its returns follow. */
+const keepsWithholding = (
+	facts: Facts,
+	old: Fact<typeof S.TaxBand> | undefined,
+	band: Fact<typeof S.TaxBand>
+) => {
+	if (old === undefined || !S.Tax.axioms[band.tax].employee) return
+	const state = jurisdictionOf(band.tax)
+	const withheld = (under: Fact<typeof S.TaxBand>, ytd: bigint, gross: bigint) =>
+		assess([under], ytd, gross).get(band.tax) ?? 0n
+	const moved = paychecks(facts).find(
+		(check) =>
+			check.wage.year === band.year &&
+			(state === "Federal" || check.state === state) &&
+			withheld(band, check.ytd, check.gross) !== withheld(old, check.ytd, check.gross)
+	)
+	if (moved)
+		refuse(
+			"PolicyInUse",
+			`The ${formatDate(moved.wage.paidOn.start)} paycheck withheld ${band.tax} under the ${band.year} band in force; it can't change now`
+		)
+}
+
+/** Replace one jurisdiction's policy for a year whole; the laws judge it. */
+const setPolicy =
+	(request: PolicyInput) =>
+	(facts: Facts): Db.Plan<object> => {
+		const year = BigInt(request.year)
+		const limits = request.limits && { year, span: yearSpan(request.year), ...request.limits }
+		if (limits)
+			within415(
+				facts.Election.find((election) => election.year === year),
+				limits
+			)
+		return {
+			edits: [
+				...(limits
+					? replace(
+							"TaxYear",
+							facts.TaxYear.find((old) => old.year === year),
+							limits
+						)
+					: []),
+				...banded(request.jurisdiction).flatMap((tax) => {
+					const band = request.rates[tax] ?? refuse("RateMissing", `Give the ${tax} rate`)
+					const old = facts.TaxBand.find((row) => row.year === year && row.tax === tax)
+					const next = { year, tax, wages: { start: 0n, end: band.base ?? MAX_U64 }, rate: band.rate }
+					keepsWithholding(facts, old, next)
+					return replace("TaxBand", old, next)
+				})
+			],
+			result: request
+		}
+	}
+
+const PlanInput = Schema.Struct({ year: Year, salary: PositiveMoney, fitPerCheck: Money })
+const setPlan =
+	(request: typeof PlanInput.Type) =>
+	(facts: Facts): Db.Plan<object> => {
+		const row = { year: BigInt(request.year), salary: request.salary, fitPerCheck: request.fitPerCheck }
+		return {
+			edits: replace(
+				"PayPlan",
+				facts.PayPlan.find((old) => old.year === row.year),
+				row
+			),
+			result: request
+		}
+	}
+
+const ElectionInput = Schema.Struct({ year: Year, roth: Money, afterTax: Money, signedOn: Day })
+const setElection =
+	(request: typeof ElectionInput.Type) =>
+	(facts: Facts): Db.Plan<object> => {
+		const row = {
+			year: BigInt(request.year),
+			roth: request.roth,
+			afterTax: request.afterTax,
+			signedOn: request.signedOn
+		}
+		within415(
+			row,
+			facts.TaxYear.find((limits) => limits.year === row.year)
+		)
+		return {
+			edits: replace(
+				"Election",
+				facts.Election.find((old) => old.year === row.year),
+				row
+			),
+			result: request
+		}
+	}
+
+// ── changing setup ─────────────────────────────────────────────────────────
+
+const PartySet = Schema.Struct({ role: Schema.Literals(S.Role.handles), ...PartyInput.fields })
+/** Replace one party whole: a new address, name or TIN. */
+const setParty =
+	(request: typeof PartySet.Type) =>
+	(facts: Facts): Db.Plan<object> => ({
+		edits: replace(
+			"Party",
+			facts.Party.find((row) => row.role === request.role),
+			request
+		),
+		result: request
+	})
+const CustodySet = Schema.Struct({
+	account: Schema.Literals(S.PlanAccount.handles),
+	custodian: Text,
+	number: Text
+})
+/** Replace where one plan account is held, and its number there. */
+const setCustody =
+	(request: typeof CustodySet.Type) =>
+	(facts: Facts): Db.Plan<object> => ({
+		edits: replace(
+			"Custody",
+			facts.Custody.find((row) => row.account === request.account),
+			request
+		),
+		result: request
+	})
+const RegistrationSet = Schema.Struct({ state: Schema.Literals(states), number: Text })
+/** Add or replace the employer's account with a state. */
+const setRegistration =
+	(request: typeof RegistrationSet.Type) =>
+	(facts: Facts): Db.Plan<object> => ({
+		edits: replace(
+			"Registration",
+			facts.Registration.find((row) => row.state === request.state),
+			request
+		),
+		result: request
+	})
+const openEmployment = (facts: Facts) => facts.Employment.find((row) => row.span.end === MAX_I64)
+const EmploymentEnd = Schema.Struct({ lastDay: Day })
+/** The owner stops working for the business after `lastDay`: no paycheck may
+ * come later, and returns stop with the period that holds it. */
+const endEmployment =
+	(request: typeof EmploymentEnd.Type) =>
+	(facts: Facts): Db.Plan<object> => {
+		const end = request.lastDay + 1n
+		if (!openEmployment(facts) && facts.Employment.some((row) => row.span.end === end))
+			return { edits: [], result: request }
+		const current = openEmployment(facts) ?? refuse("NotEmployed", "No employment is open")
+		if (end <= current.span.start) refuse("BeforeStart", `Employment began ${formatDate(current.span.start)}`)
+		const later = facts.Wage.find((wage) => wage.paidOn.start >= end)
+		if (later) refuse("PaidAfter", `A paycheck is posted on ${formatDate(later.paidOn.start)}`)
+		return {
+			edits: replace("Employment", current, { ...current, span: { start: current.span.start, end } }),
+			result: request
+		}
+	}
+const EmploymentStart = Schema.Struct({ from: Day, state: Schema.Literals(states) })
+/** The owner works for the business again, or in another registered state,
+ * from a day after any earlier employment ended. */
+const startEmployment =
+	(request: typeof EmploymentStart.Type) =>
+	(facts: Facts): Db.Plan<object> => {
+		const span = { start: request.from, end: MAX_I64 }
+		const row = { span, state: request.state }
+		if (
+			facts.Employment.some(
+				(old) => old.span.start === span.start && old.state === row.state && old.span.end === MAX_I64
+			)
+		)
+			return { edits: [], result: request }
+		if (openEmployment(facts)) refuse("Employed", "End the current employment first: employment.end")
+		return { edits: Db.insert("Employment", row), result: request }
+	}
+
+// ── the table ──────────────────────────────────────────────────────────────
+
+type Run = (input: never, ledger: string) => Effect.Effect<unknown, unknown, NativeRuntime>
+export type Op = { readonly summary: string; readonly input: Schema.Top; readonly run: Run }
+const op = <I extends Schema.Top>(
+	summary: string,
+	input: I,
+	run: (input: I["Type"], ledger: string) => Effect.Effect<unknown, unknown, NativeRuntime>
+): Op => ({ summary, input, run: run as Run })
+
+const writing =
+	<A>(plan: (input: A) => (facts: Facts) => Db.Plan<object>) =>
+	(input: A, ledger: string) =>
+		Effect.scoped(Effect.flatMap(Db.open(ledger), (db) => Db.write(db, plan(input))))
+const reading =
+	<A>(read: (input: A, facts: Facts) => unknown) =>
+	(input: A, ledger: string) =>
+		Effect.scoped(
+			Effect.flatMap(Db.open(ledger), (db) => Effect.map(Db.readFacts(db), ({ facts }) => read(input, facts)))
+		)
+
+export const ops: { readonly [name: string]: Op } = {
+	setup: op(
+		"Create the ledger: the employer, its employee, the plan, where the owner works, and the plan's accounts",
+		SetupInput,
+		(input, ledger) =>
+			Db.build(ledger, {
+				edits: [
+					...Db.insert("Party", { role: "Employer", ...input.employer }),
+					...Db.insert("Party", { role: "Employee", ...input.employee }),
+					...Db.insert("Party", { role: "Plan", ...input.plan }),
+					...Db.insert("Registration", ...input.registrations),
+					...Db.insert("Employment", {
+						span: { start: input.employment.from, end: MAX_I64 },
+						state: input.employment.state
+					}),
+					...Db.insert(
+						"Custody",
+						...S.PlanAccount.handles.map((account) => ({ account, ...input.custody[account] }))
+					)
+				],
+				result: input
 			})
 	),
-	work: read("Every work item, complete ones included", Schema.Struct(business), (input, { asOf }) =>
-		Effect.gen(function* () {
-			return yield* workRegister(yield* latest, input.business, asOf)
-		})
+	"party.set": op("Replace one party: the employer, the employee or the plan", PartySet, writing(setParty)),
+	"registration.set": op(
+		"Add or replace the employer's account number with a state",
+		RegistrationSet,
+		writing(setRegistration)
 	),
-	report: read(
-		"Year or quarter figures, bookkeeping and the work register",
+	"custody.set": op("Replace where a plan account is held, and its number", CustodySet, writing(setCustody)),
+	"employment.end": op("Record the owner's last day of work", EmploymentEnd, writing(endEmployment)),
+	"employment.start": op(
+		"Record the owner working again, or in another registered state",
+		EmploymentStart,
+		writing(startEmployment)
+	),
+	"policy.set": op(
+		"Set one jurisdiction's policy for a year: federal limits, and each tax's rate and wage base",
+		PolicyInput,
+		writing((input: PolicyInput) => setPolicy(input))
+	),
+	"plan.set": op("Set a year's salary target and FIT per paycheck", PlanInput, writing(setPlan)),
+	"election.set": op("Record the year's signed Carry election", ElectionInput, writing(setElection)),
+	"payroll.quote": op(
+		"Price a paycheck without posting it; shows what would block it",
+		PayrollInput,
+		(input, ledger) =>
+			Effect.scoped(Effect.flatMap(Db.open(ledger), (db) => Db.judge(db, payroll(input, true))))
+	),
+	"payroll.post": op("Post a paycheck; prints the wires to send", PayrollInput, writing(payroll)),
+	"payroll.correct": op(
+		"Reprice a posted paycheck's fit, roth or (latest only) gross",
+		CorrectInput,
+		writing(correct)
+	),
+	"transfer.record": op("Record a Mercury transfer by its Tracking ID", TransferInput, writing(transfer)),
+	"tax.paid": op(
+		"Record an EFTPS or TWC payment once its Mercury debit posted",
+		TaxPaidInput,
+		writing(taxPaid)
+	),
+	"plan.rollover": op(
+		"Record a whole-account sweep of a plan account into the Roth IRA",
+		RolloverInput,
+		writing(rollover)
+	),
+	"filing.record": op("Record a filed return with every line as filed", FilingInput, writing(fileReturn)),
+	"filing.correct": op(
+		"Record a mailed correction: a 941-X, or corrected 1099-Rs with their 1096",
+		CorrectionInput,
+		writing(correctReturn)
+	),
+	status: op(
+		"What blocks payroll, what comes due next, and the year so far",
+		Schema.Struct({ asOf: Schema.optional(Day) }),
+		reading((input, facts) => status(facts, input.asOf ?? todayIn(TIME_ZONE)))
+	),
+	report: op(
+		"A year's or quarter's forms, paychecks, distributions and tax payments",
 		Schema.Struct({
-			...business,
-			year: YearNumber,
+			year: Year,
 			quarter: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 4 })))
 		}),
-		(input, { asOf }) =>
-			Effect.gen(function* () {
-				return yield* report(yield* latest, input.business, input.year, input.quarter, asOf)
-			})
+		reading((input, facts) => report(facts, input.year, input.quarter))
 	),
-	"business.inspect": read(
-		"Business, employees, elections, allowances, accounts and budgets",
-		Schema.Struct({ business: Id }),
-		(input) =>
-			Effect.gen(function* () {
-				return yield* inspectProfiles(yield* latest, input.business)
-			})
+	export: op(
+		"Write every fact as canonical JSON: the backup",
+		Schema.Struct({ out: Schema.optional(Text) }),
+		(input, ledger) =>
+			Effect.scoped(
+				Effect.gen(function* () {
+					const { facts } = yield* Db.readFacts(yield* Db.open(ledger))
+					const out = input.out ?? Db.backupOf(ledger)
+					yield* Db.writeText(out, Db.exportFacts(facts))
+					return { out, facts: BigInt(Object.values(facts).reduce((total, rows) => total + rows.length, 0)) }
+				})
+			)
 	),
-	questions: read("Every question and its answer", Schema.Struct({ business: Id }), (input) =>
-		Effect.gen(function* () {
-			return yield* questions(yield* latest, input.business)
+	import: op("Create the ledger from an export", Schema.Struct({ file: Text }), (input, ledger) =>
+		Effect.flatMap(Db.readText(input.file), (text) => {
+			const edits = Db.importEdits(text)
+			return Db.build(ledger, { edits, result: { file: input.file, facts: BigInt(edits.length) } })
 		})
-	),
-	"filings.inspect": read("Filings, versions and submissions", Schema.Struct(business), (input, { asOf }) =>
-		Effect.gen(function* () {
-			return yield* inspectFilings(yield* latest, input.business, asOf)
-		})
-	),
-	"policy.inspect": read(
-		"Active policy, annual rules and coverage",
-		Schema.Struct({ business: Id }),
-		(input) =>
-			Effect.gen(function* () {
-				return yield* inspectPolicy(yield* latest, input.business)
-			})
-	),
-	"payroll.inspect": read(
-		"One calculation's figures and paycheck",
-		Schema.Struct({ business: Id, calculation: Id }),
-		(input) =>
-			Effect.gen(function* () {
-				return yield* inspectCalculation(yield* latest, input.business, input.calculation as Uuid)
-			})
-	),
-	"compensation.suggest": read(
-		"Suggest a gross from the remaining annual budget",
-		Schema.Struct({ business: Id, employee: Id, paidOn: Day, work: DaySpan }),
-		(input, { asOf }) =>
-			Effect.gen(function* () {
-				return yield* suggestGross(
-					yield* latest,
-					input.business,
-					input.employee,
-					civilDaySpan(input.work.start, input.work.end),
-					input.paidOn,
-					asOf
-				)
-			})
-	),
-	"artifact.audit": read(
-		"Every document, its Drive copy and locations; verify re-reads each document's bytes",
-		Schema.Struct({ verify: Schema.optional(Schema.Boolean), remote: Schema.optional(Nonblank) }),
-		(input) =>
-			Effect.gen(function* () {
-				const snapshot = yield* latest
-				const documents = yield* inspectDocuments(snapshot)
-				const verified = input.verify
-					? (yield* collectDocuments(snapshot, input.remote ?? "gdrive:", undefined)).map(
-							({ bytes, ...document }) => ({ ...document, length: BigInt(bytes.length) })
-						)
-					: []
-				return {
-					state: snapshot.stateStamp,
-					total: BigInt(documents.length),
-					unarchived: documents.filter((d) => !d.archived).map((d) => d.id),
-					documents,
-					verified
-				}
-			})
-	),
-	"command.resolve": read("Resolve a retained request's outcome", Schema.Struct({ request: Id }), (input) =>
-		resolveRequest(input.request)
-	),
-	businesses: read("Every business and its employees: ids and names", Schema.Struct({}), () =>
-		Effect.gen(function* () {
-			const snapshot = yield* latest
-			const employees = yield* relationRows(snapshot, S.Employee)
-			return (yield* relationRows(snapshot, S.Business)).map((business) => ({
-				id: business.id,
-				name: business.name,
-				employees: employees
-					.filter((employee) => employee.business === business.id)
-					.map((employee) => ({ id: employee.id, name: `${employee.firstName} ${employee.lastName}` }))
-			}))
-		})
-	),
-	"db.audit": read(
-		"Every fact digest, count and report projection",
-		Schema.Struct({ asOf: Schema.optional(Day) }),
-		(_, { asOf }) =>
-			Effect.gen(function* () {
-				return yield* auditLedger(yield* latest, asOf)
-			})
-	)
-} satisfies Record<string, Read>
-
-/** Maintenance outside the domain command log. A backup reads the open
- * ledger; verifying and restoring an archive never open the live ledger. */
-/** `ledger` ops open the configured ledger; `archive` ops work on files alone. */
-type Maintenance<Scope extends Op["scope"]> = {
-	readonly summary: string
-	readonly scope: Scope
-	readonly input: Schema.Top
-	readonly run: (payload: unknown) => Effect.Effect<unknown, unknown, EnvOf<Scope>>
-}
-type EnvOf<Scope extends Op["scope"]> = Scope extends "ledger" ? Env : ArchiveEnv
-const maintenanceOf = <S extends Schema.Top, Scope extends Op["scope"]>(
-	summary: string,
-	scope: Scope,
-	input: S,
-	run: (input: S["Type"]) => Effect.Effect<unknown, unknown, EnvOf<Scope>>
-): Maintenance<Scope> => ({ summary, scope, input, run: (payload) => run(decodeInput(input, payload)) })
-const maintenance = {
-	"db.backup": maintenanceOf(
-		"Back up the ledger to one new .tar.xz file (database only; documents stay in Drive)",
-		"ledger",
-		Schema.Struct({ output: Nonblank }),
-		backupLedger
-	),
-	"db.verify-backup": maintenanceOf(
-		"Restore a backup into a throwaway directory and check every fact",
-		"archive",
-		Schema.Struct({ archive: Nonblank }),
-		(input) => verifyArchive(input.archive)
-	),
-	"db.restore": maintenanceOf(
-		"Restore a backup into a new, empty directory and write its binding",
-		"archive",
-		Schema.Struct({ archive: Nonblank, directory: Nonblank, bindingOutput: Nonblank }),
-		restoreArchive
 	)
 }
 
-/** What `wagie apply` performs: the output to print and whether the process
- * should exit nonzero (a committed `ReconciliationRequired` opened a question
- * instead of doing what was asked). */
-export type Performed = { readonly output: unknown; readonly exitCode: 0 | 1 }
-type ArchiveEnv = Exclude<Env, Ledger>
-export type Op = {
-	readonly summary: string
-	readonly input: Schema.Top
-} & (
-	| {
-			readonly scope: "ledger"
-			readonly perform: (payload: unknown) => Effect.Effect<Performed, unknown, Env>
-	  }
-	| {
-			readonly scope: "archive"
-			readonly perform: (payload: unknown) => Effect.Effect<Performed, unknown, ArchiveEnv>
-	  }
-)
-const writeOp = (write: Write): Op => ({
-	summary: write.summary,
-	scope: "ledger",
-	input: write.input,
-	perform: (payload) =>
-		Effect.gen(function* () {
-			const receipt = yield* write.run(payload)
-			const output = write.readback ? yield* write.readback(receipt) : receipt
-			const reconciliation =
-				(receipt.outcome.kind === "committed" || receipt.outcome.kind === "no-change") &&
-				receipt.outcome.result.kind === "ReconciliationRequired"
-			return { output, exitCode: reconciliation ? 1 : 0 }
-		})
-})
-const maintenanceOp = (entry: Maintenance<"ledger"> | Maintenance<"archive">): Op => ({
-	summary: entry.summary,
-	input: entry.input,
-	...(entry.scope === "ledger"
-		? {
-				scope: "ledger",
-				perform: (payload: unknown) => Effect.map(entry.run(payload), (output) => ({ output, exitCode: 0 }))
-			}
-		: {
-				scope: "archive",
-				perform: (payload: unknown) => Effect.map(entry.run(payload), (output) => ({ output, exitCode: 0 }))
-			})
-})
-/** Every `apply` op by name: the domain writes and ledger maintenance. */
-export const ops: Record<string, Op> = {
-	...Object.fromEntries(Object.entries(writes).map(([name, write]) => [name, writeOp(write)])),
-	...Object.fromEntries(Object.entries(maintenance).map(([name, entry]) => [name, maintenanceOp(entry)]))
-}
-
-export const readAsOf = (asOf: UnixEpochDay | undefined, timeZone: string) =>
-	asOf === undefined ? today(timeZone) : Effect.succeed(asOf)
-
-export const refuseUnknown = (kind: string, name: string, known: readonly string[]) =>
-	Effect.fail(
-		new Refusal({ code: "UnknownOperation", message: `No ${kind} "${name}". Known: ${known.join(", ")}` })
-	)
-
-export const decodeInput = <S extends Schema.Top>(schema: S, payload: unknown): S["Type"] =>
-	parseStrict(schema as never, payload) as S["Type"]
-
-/** `wagie schema`: every op and read with its JSON Schema. */
-export const catalog = {
-	...Object.fromEntries(
-		Object.entries(ops).map(([name, op]) => [
-			name,
-			{ name, kind: "write", summary: op.summary, input: op.input }
-		])
-	),
-	...Object.fromEntries(
-		Object.entries(reads).map(([name, entry]) => [
-			name,
-			{ name, kind: "read", summary: entry.summary, input: entry.input }
-		])
-	)
-} as Record<string, { name: string; kind: "write" | "read"; summary: string; input: Schema.Top }>
-
-export { BookkeepingInput }
+/** Parse the payload against the op's input, then run it. */
+export const run = (name: string, payload: unknown, ledger = Db.ledgerPath) =>
+	Effect.suspend(() => {
+		const entry = (Object.hasOwn(ops, name) ? ops[name] : undefined) ?? refuse("UnknownOp", `No op "${name}"`)
+		return entry.run(parseStrict(entry.input as never, payload) as never, ledger)
+	})

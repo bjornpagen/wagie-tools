@@ -1,58 +1,45 @@
+import { createHash } from "node:crypto"
 import type { Uuid } from "@bjornpagen/bumbledb"
-import { Data, Effect, Schema } from "effect"
-import { v7 } from "uuid"
+import { Data } from "effect"
 
 export const MAX_U64 = (1n << 64n) - 1n
 export const MAX_I64 = (1n << 63n) - 1n
-export const MIN_I64 = -(1n << 63n)
-const v7Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
-
-export const EntityId = Schema.String.check(Schema.isPattern(v7Pattern)).annotate({
-	description: "UUIDv7; mint one with `wagie id`"
-})
-/** Any stored UUID: entity ids are v7 (the clock); statement ids are v8 (content). */
-export const StoredId = Schema.String.check(
-	Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[78][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
-)
-export const Nonblank = Schema.String.check(Schema.isPattern(/\S/)).annotate({
-	description: "Non-blank text"
-})
-export const DayText = Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/)).annotate({
-	description: "Civil date YYYY-MM-DD"
-})
-
-export function entityId(value: string): Uuid {
-	const checked = Schema.decodeUnknownSync(EntityId)(value)
-	// The refinement establishes the native UUID text shape as well as v7 and variant.
-	return checked as Uuid
-}
-export const mintId = Effect.sync(() => entityId(v7()))
 
 export class Refusal extends Data.TaggedError("Refusal")<{
 	readonly code: string
 	readonly message: string
 }> {}
 
-export function unsigned(value: bigint): bigint {
-	if (value < 0n || value > MAX_U64)
-		throw new Refusal({ code: "AmountRange", message: "Unsigned cents overflow" })
-	return value
+export const refuse = (code: string, message: string): never => {
+	throw new Refusal({ code, message })
 }
-export function signed(value: bigint): bigint {
-	if (value < MIN_I64 || value > MAX_I64)
-		throw new Refusal({ code: "AmountRange", message: "Signed cents overflow" })
-	return value
-}
-export const json = (value: unknown) =>
-	JSON.stringify(value, (_, item: unknown) => (typeof item === "bigint" ? item.toString() : item), 2)
 
-/** JSON whose object keys are sorted, so two facts with the same columns
+/** A UUIDv8 carrying the SHA-256 of a natural key, so the same thing always
+ * gets the same id and an identical re-run is no change. */
+export const naturalId = (...parts: readonly (string | bigint)[]): Uuid => {
+	const hex = createHash("sha256").update(parts.join("\u0000"), "utf8").digest("hex")
+	const variant = ((Number.parseInt(hex.slice(16, 17), 16) & 0x3) | 0x8).toString(16)
+	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}` as Uuid
+}
+
+export const sum = (values: Iterable<bigint>): bigint => {
+	let total = 0n
+	for (const value of values) total += value
+	return total
+}
+export const max = (a: bigint, b: bigint) => (a > b ? a : b)
+export const min = (a: bigint, b: bigint) => (a < b ? a : b)
+
+/** JSON with bigints as decimal strings and object keys sorted, so equal facts
  * print identically however they were assembled. */
-export const canonicalJson = (value: unknown): string =>
-	JSON.stringify(value, (_, item: unknown) =>
-		typeof item === "bigint"
-			? item.toString()
-			: item !== null && typeof item === "object" && !Array.isArray(item)
-				? Object.fromEntries(Object.entries(item).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
-				: item
+export const canonicalJson = (value: unknown, indent?: number): string =>
+	JSON.stringify(
+		value,
+		(_, item: unknown) =>
+			typeof item === "bigint"
+				? item.toString()
+				: item !== null && typeof item === "object" && !Array.isArray(item)
+					? Object.fromEntries(Object.entries(item).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+					: item,
+		indent
 	)

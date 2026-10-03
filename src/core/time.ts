@@ -1,93 +1,107 @@
-import { DateTime, Effect, Schema } from "effect"
 import { Refusal } from "./values.ts"
 
-/**
- * Calendar-date coordinate in the proleptic Gregorian calendar:
- * 0 = 1970-01-01, 1 = 1970-01-02, -1 = 1969-12-31.
- * One unit advances one calendar date. It is neither a duration nor an instant.
- * It is NOT Julian Day Number (different epoch and noon boundary), Modified
- * Julian Date, or a day-of-year. Supported formatting range: years 0001–9999.
- *
- * UTC midnight is only the conversion coordinate for a date's year/month/day.
- * Choosing today's date from an instant requires the employer's named zone.
- * Never divide a local-midnight elapsed duration by 24h: DST days vary in length.
- */
-export const UnixEpochDay = Schema.BigInt.check(
-	Schema.isBetweenBigInt({ minimum: -719162n, maximum: 2932896n })
-).pipe(Schema.brand("UnixEpochDay"))
-export type UnixEpochDay = typeof UnixEpochDay.Type
+/** A civil date is an i64 Unix epoch day: 0 = 1970-01-01. Every period is the
+ * half-open interval [start, end) of such days. Dates are parsed and printed
+ * only at the boundary; inside, a day is a number on one axis. */
+export type Span = { readonly start: bigint; readonly end: bigint }
 
-/** Milliseconds since 1970-01-01T00:00:00Z, POSIX/JavaScript convention (no leap seconds). */
-export const UnixEpochMilliseconds = Schema.BigInt.check(
-	Schema.isBetweenBigInt({ minimum: -62135596800000n, maximum: 253402300799999n })
-).pipe(Schema.brand("UnixEpochMilliseconds"))
-export type UnixEpochMilliseconds = typeof UnixEpochMilliseconds.Type
-
-/** Number of whole calendar-date steps; this is a duration, not a date coordinate. */
-export const CalendarDays = Schema.BigInt.pipe(Schema.brand("CalendarDays"))
-export type CalendarDays = typeof CalendarDays.Type
-
-export const epochDay = Schema.decodeUnknownSync(UnixEpochDay)
-export const epochMilliseconds = Schema.decodeUnknownSync(UnixEpochMilliseconds)
-export const calendarDays = Schema.decodeUnknownSync(CalendarDays)
-const UTC_DAY_MILLISECONDS = 86400000n
-
-export const CivilDaySpan = Schema.Struct({ start: UnixEpochDay, end: UnixEpochDay }).check(
-	Schema.makeFilter((span) => span.start < span.end || "Civil-day span must be nonempty and end-exclusive")
-)
-export type CivilDaySpan = typeof CivilDaySpan.Type
-export const civilDaySpan = (start: UnixEpochDay, end: UnixEpochDay): CivilDaySpan =>
-	Schema.decodeUnknownSync(CivilDaySpan)({ start, end })
-
-/** A single date as [day, day + 1). Native fixed-width interval fields preserve
- * this point when proving membership in policy, election, and calendar spans.
- */
-export const civilDayPoint = (day: UnixEpochDay): CivilDaySpan => civilDaySpan(day, epochDay(day + 1n))
-
-export function fromCalendarDate(parts: { year: number; month: number; day: number }): UnixEpochDay {
-	const utc = DateTime.makeUnsafe({ year: parts.year, month: parts.month, day: parts.day })
-	const parsed = DateTime.toPartsUtc(utc)
-	if (parsed.year !== parts.year || parsed.month !== parts.month || parsed.day !== parts.day) {
-		throw new Refusal({ code: "InvalidDate", message: "The supplied Gregorian date does not exist" })
-	}
-	return epochDay(BigInt(DateTime.toEpochMillis(utc)) / UTC_DAY_MILLISECONDS)
+/** Howard Hinnant's days_from_civil / civil_from_days, proleptic Gregorian. */
+export const dayOf = (year: number, month: number, day: number): bigint => {
+	const y = month <= 2 ? year - 1 : year
+	const era = Math.floor(y / 400)
+	const yoe = y - era * 400
+	const doy = Math.floor((153 * (month + (month > 2 ? -3 : 9)) + 2) / 5) + day - 1
+	const doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy
+	return BigInt(era * 146097 + doe - 719468)
 }
 
-/** Human-readable dates are parsed/formatted only at I/O boundaries, never stored as strings. */
-export function parseCalendarDate(input: string): UnixEpochDay {
-	const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(input)
-	if (!match) throw new Refusal({ code: "InvalidDate", message: "Use YYYY-MM-DD" })
-	return fromCalendarDate({ year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) })
-}
-
-export const toCalendarDate = (day: UnixEpochDay) =>
-	DateTime.toPartsUtc(DateTime.makeUnsafe(Number(day * UTC_DAY_MILLISECONDS)))
-export const formatCalendarDate = (day: UnixEpochDay): string =>
-	DateTime.formatIsoDateUtc(DateTime.makeUnsafe(Number(day * UTC_DAY_MILLISECONDS)))
-export const addCalendarDays = (day: UnixEpochDay, amount: CalendarDays): UnixEpochDay =>
-	epochDay(day + amount)
-export const countCalendarDays = (span: CivilDaySpan): CalendarDays => calendarDays(span.end - span.start)
-
-export function localDayAt(instant: UnixEpochMilliseconds, timeZone: string): UnixEpochDay {
-	const zoned = DateTime.setZoneNamedUnsafe(DateTime.makeUnsafe(Number(instant)), timeZone)
-	return fromCalendarDate(DateTime.toParts(zoned))
-}
-
-export const nowUnixMilliseconds = DateTime.now.pipe(
-	Effect.map((value) => epochMilliseconds(BigInt(DateTime.toEpochMillis(value))))
-)
-export const today = (timeZone: string) =>
-	nowUnixMilliseconds.pipe(Effect.map((instant) => localDayAt(instant, timeZone)))
-
-export function periodSpan(year: number, kind: "Year" | "Quarter" | "Month", ordinal = 1): CivilDaySpan {
-	const months = { Year: 12, Quarter: 3, Month: 1 }[kind]
-	if (!Number.isInteger(ordinal) || ordinal < 1 || ordinal > 12 / months) {
-		throw new Refusal({ code: "InvalidPeriod", message: "Period ordinal is out of range" })
-	}
-	const start = DateTime.makeUnsafe({ year, month: (ordinal - 1) * months + 1, day: 1 })
-	const end = DateTime.add(start, { months })
-	return civilDaySpan(
-		fromCalendarDate(DateTime.toPartsUtc(start)),
-		fromCalendarDate(DateTime.toPartsUtc(end))
+export const civil = (day: bigint) => {
+	const z = Number(day) + 719468
+	const era = Math.floor(z / 146097)
+	const doe = z - era * 146097
+	const yoe = Math.floor(
+		(doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365
 	)
+	const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100))
+	const mp = Math.floor((5 * doy + 2) / 153)
+	const month = mp + (mp < 10 ? 3 : -9)
+	return {
+		year: yoe + era * 400 + (month <= 2 ? 1 : 0),
+		month,
+		day: doy - Math.floor((153 * mp + 2) / 5) + 1
+	}
 }
+
+const pad = (value: number, width: number) => String(value).padStart(width, "0")
+
+export const formatDate = (day: bigint): string => {
+	const { year, month, day: d } = civil(day)
+	return `${pad(year, 4)}-${pad(month, 2)}-${pad(d, 2)}`
+}
+
+export const parseDate = (text: string): bigint => {
+	const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text)
+	const day = match && dayOf(Number(match[1]), Number(match[2]), Number(match[3]))
+	if (day === null || formatDate(day) !== text)
+		throw new Refusal({ code: "InvalidDate", message: `Not a calendar date (YYYY-MM-DD): ${text}` })
+	return day
+}
+
+/** Sunday = 0 … Saturday = 6; 1970-01-01 was a Thursday. */
+export const weekday = (day: bigint): number => Number((((day + 4n) % 7n) + 7n) % 7n)
+
+export const yearSpan = (year: number): Span => ({ start: dayOf(year, 1, 1), end: dayOf(year + 1, 1, 1) })
+export const monthSpan = (year: number, month: number): Span => ({
+	start: dayOf(year, month, 1),
+	end: month === 12 ? dayOf(year + 1, 1, 1) : dayOf(year, month + 1, 1)
+})
+export const quarterSpan = (year: number, quarter: number): Span => ({
+	start: monthSpan(year, quarter * 3 - 2).start,
+	end: monthSpan(year, quarter * 3).end
+})
+export const yearOf = (day: bigint) => civil(day).year
+export const quarterOf = (day: bigint) => {
+	const { year, month } = civil(day)
+	return quarterSpan(year, Math.ceil(month / 3))
+}
+export const monthOf = (day: bigint) => {
+	const { year, month } = civil(day)
+	return monthSpan(year, month)
+}
+/** The months of a span, in order. */
+export const months = (span: Span): Span[] => {
+	const result: Span[] = []
+	for (let month = monthOf(span.start); month.start < span.end; month = monthOf(month.end)) result.push(month)
+	return result
+}
+export const covers = (span: Span, day: bigint) => span.start <= day && day < span.end
+export const sameSpan = (a: Span, b: Span) => a.start === b.start && a.end === b.end
+export const point = (day: bigint): Span => ({ start: day, end: day + 1n })
+
+/** "2026", "2026Q3" or "2026-10": a year, quarter or month. */
+export const parsePeriod = (text: string): Span => {
+	const year = /^(\d{4})$/.exec(text)
+	if (year) return yearSpan(Number(year[1]))
+	const quarter = /^(\d{4})Q([1-4])$/.exec(text)
+	if (quarter) return quarterSpan(Number(quarter[1]), Number(quarter[2]))
+	const month = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(text)
+	if (month) return monthSpan(Number(month[1]), Number(month[2]))
+	throw new Refusal({ code: "InvalidPeriod", message: `Use "2026", "2026Q3" or "2026-10": ${text}` })
+}
+
+export const formatPeriod = (span: Span): string => {
+	const { year, month } = civil(span.start)
+	if (sameSpan(span, yearSpan(year))) return pad(year, 4)
+	if (month % 3 === 1 && sameSpan(span, quarterSpan(year, (month + 2) / 3)))
+		return `${pad(year, 4)}Q${(month + 2) / 3}`
+	if (sameSpan(span, monthSpan(year, month))) return `${pad(year, 4)}-${pad(month, 2)}`
+	return `${formatDate(span.start)}/${formatDate(span.end)}`
+}
+
+/** Today's civil date in a named time zone. */
+export const todayIn = (timeZone: string, now = new Date()): bigint =>
+	parseDate(
+		new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(
+			now
+		)
+	)

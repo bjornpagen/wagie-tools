@@ -1,7 +1,6 @@
-import { Effect, Schema, SchemaGetter, SchemaIssue } from "effect"
 import { unitFor } from "../schema/units.ts"
-import { epochDay, formatCalendarDate } from "./time.ts"
-import { MAX_U64, Refusal } from "./values.ts"
+import { formatDate, formatPeriod } from "./time.ts"
+import { MAX_I64, Refusal } from "./values.ts"
 
 /** Dollars always carry exactly two decimals at the boundary: "8000.00". */
 const DOLLARS = /^(-?)(0|[1-9]\d*)\.(\d{2})$/
@@ -20,82 +19,71 @@ export const parseDollars = (text: string): bigint => {
 }
 
 export const formatDollars = (cents: bigint): string => {
-	const sign = cents < 0n ? "-" : ""
 	const magnitude = cents < 0n ? -cents : cents
-	return `${sign}${magnitude / 100n}.${(magnitude % 100n).toString().padStart(2, "0")}`
+	return `${cents < 0n ? "-" : ""}${magnitude / 100n}.${(magnitude % 100n).toString().padStart(2, "0")}`
 }
 
-/** String dollars decoding to integer cents. Range and sign are checked by the
- * native field codec that consumes the result. */
-export const Dollars = Schema.String.check(Schema.isPattern(DOLLARS))
-	.annotate({ description: 'Dollars with exactly two decimals, e.g. "8000.00"' })
-	.pipe(
-		Schema.decodeTo(Schema.BigInt, {
-			decode: SchemaGetter.transformOrFail((text: string) =>
-				Effect.try({
-					try: () => parseDollars(text),
-					catch: () =>
-						new SchemaIssue.InvalidValue({ message: `Use dollars with two decimals, e.g. "8000.00"` })
-				})
-			),
-			encode: SchemaGetter.transform(formatDollars)
+/** A rate is a percent at the boundary ("6.2", "1.45") and parts per million
+ * inside: a percent carries at most four decimals, so nothing is lost. */
+const PERCENT = /^(0|[1-9]\d{0,2})(?:\.(\d{1,4}))?$/
+export const PPM = 1_000_000n
+
+export const parsePercent = (text: string): bigint => {
+	const match = PERCENT.exec(text)
+	const ppm = match && BigInt(match[1] ?? "") * 10_000n + BigInt((match[2] ?? "").padEnd(4, "0"))
+	if (ppm === null || ppm > PPM)
+		throw new Refusal({
+			code: "InvalidRate",
+			message: `Use a percent of at most 100 with up to four decimals, e.g. "6.2": ${text}`
 		})
-	)
+	return ppm
+}
 
-const formatMoneyEnd = (cents: bigint) => (cents === MAX_U64 ? "Infinity" : formatDollars(cents))
-const day = (value: bigint) => formatCalendarDate(epochDay(value))
+export const formatPercent = (ppm: bigint): string => {
+	const fraction = (ppm % 10_000n).toString().padStart(4, "0").replace(/0+$/, "")
+	return fraction ? `${ppm / 10_000n}.${fraction}` : `${ppm / 10_000n}`
+}
 
-const isInterval = (value: unknown): value is { start: bigint; end: bigint } =>
+const isSpan = (value: unknown): value is { start: bigint; end: bigint } =>
 	typeof value === "object" &&
 	value !== null &&
 	Object.keys(value).length === 2 &&
 	typeof (value as { start?: unknown }).start === "bigint" &&
 	typeof (value as { end?: unknown }).end === "bigint"
 
-/** Encode one read model for JSON. Units come from field names; evidence
- * statement ids resolve to their text. An unclassified integer refuses. */
-export const encodeOutput = (value: unknown, statements: ReadonlyMap<string, string>): unknown => {
+/** Encode a read model for JSON. Units come from field names; an integer
+ * without a unit refuses rather than print an ambiguous number. */
+export const encodeOutput = (value: unknown): unknown => {
 	const walk = (item: unknown, name: string | undefined, path: string): unknown => {
 		if (typeof item === "bigint") {
-			const unit = name === undefined ? undefined : unitFor(name)
-			switch (unit) {
+			switch (name === undefined ? undefined : unitFor(name)) {
 				case "Money":
 					return formatDollars(item)
 				case "Day":
-				case "DayPoint":
-					return day(item)
+					return formatDate(item)
+				case "Rate":
+					return formatPercent(item)
 				case "Count":
-					if (item > BigInt(Number.MAX_SAFE_INTEGER) || item < BigInt(Number.MIN_SAFE_INTEGER))
-						throw new Refusal({ code: "CountRange", message: `Count ${path} exceeds a JSON integer` })
 					return Number(item)
 				default:
 					throw new Refusal({
 						code: "UnitUnclassified",
-						message: `No boundary unit for integer field ${path}; add it to src/schema/units.ts`
+						message: `No unit for ${path}; add it to src/schema/units.ts`
 					})
 			}
 		}
-		if (isInterval(item) && name !== undefined) {
-			const unit = unitFor(name)
-			if (unit === "MoneyRange") return { start: formatDollars(item.start), end: formatMoneyEnd(item.end) }
-			if (unit === "DayPoint" && item.end - item.start === 1n) return day(item.start)
-			if (unit === "DayPoint" || unit === "DayRange")
-				return { start: day(item.start), endExclusive: day(item.end) }
-			throw new Refusal({
-				code: "UnitUnclassified",
-				message: `No boundary unit for interval field ${path}; add it to src/schema/units.ts`
-			})
+		if (isSpan(item) && name !== undefined) {
+			if (unitFor(name) !== "Period")
+				throw new Refusal({
+					code: "UnitUnclassified",
+					message: `No unit for ${path}; add it to src/schema/units.ts`
+				})
+			return item.end === MAX_I64 ? `${formatDate(item.start)}/` : formatPeriod(item)
 		}
 		if (Array.isArray(item)) return item.map((entry, index) => walk(entry, name, `${path}[${index}]`))
-		if (item instanceof Uint8Array) return Buffer.from(item).toString("base64")
 		if (typeof item === "object" && item !== null)
 			return Object.fromEntries(
-				Object.entries(item).map(([key, entry]) => [
-					key,
-					key === "evidence" && typeof entry === "string" && statements.has(entry)
-						? statements.get(entry)
-						: walk(entry, key, `${path}.${key}`)
-				])
+				Object.entries(item).map(([key, entry]) => [key, walk(entry, key, `${path}.${key}`)])
 			)
 		return item
 	}
