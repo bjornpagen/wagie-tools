@@ -112,7 +112,8 @@ const tax941 = (period: Period) =>
 	withheld(period, "FIT") + ss941(period) + medicare941(period) + fractions941(period)
 /** Line 16: each month is its paychecks' FIT plus both halves of FICA as
  * withheld; the last month with a paycheck absorbs the quarter's rounding so
- * the months sum to line 12. */
+ * the months sum to line 12, or, if that would take it below zero, the last
+ * month that can. */
 const months941 = (period: Period): bigint[] => {
 	const spans = months(period.span)
 	const ofCheck = (check: Paycheck) =>
@@ -123,8 +124,11 @@ const months941 = (period: Period): bigint[] => {
 		)
 	const paidIn = (span: Span) => period.checks.filter((check) => covers(span, check.wage.paidOn.start))
 	const values = spans.map((span) => sum(paidIn(span).map(ofCheck)))
-	const last = spans.findLastIndex((span) => paidIn(span).length > 0)
-	if (last >= 0) values[last] = (values[last] ?? 0n) + tax941(period) - sum(values)
+	const rounding = tax941(period) - sum(values)
+	const paid = spans.map((span) => paidIn(span).length > 0)
+	const fits = values.findLastIndex((value, index) => paid[index] === true && value + rounding >= 0n)
+	const last = fits >= 0 ? fits : paid.lastIndexOf(true)
+	if (last >= 0) values[last] = (values[last] ?? 0n) + rounding
 	return values
 }
 

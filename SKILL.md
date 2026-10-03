@@ -52,7 +52,10 @@ node src/cli.ts plan.set '{"year":2027,"salary":"…","fitPerCheck":"0.01"}'
 ```
 
 A rate without a `base` taxes every dollar. The Roth and after-tax elections
-together stay within the year's 415(c) limit.
+together stay within the year's 415(c) limit. Once a paycheck has withheld social
+security or Medicare, neither band can change in a way that would withhold it
+differently; an employer's own rate (FUTA, Texas UI) can, and its returns
+follow.
 
 ## Payroll
 
@@ -66,6 +69,8 @@ together stay within the year's 415(c) limit.
    ```
 
 3. Post it with the same input: `payroll.post`. It prints the wires to send.
+   Roth comes out of pay only from the day the year's election was signed, and
+   no paycheck joins a period whose return is already filed.
 4. Send both wires from Mercury: net pay to the owner, the Roth deferral to the
    Carry Roth account the wire names.
 5. Once they show as Sent, export the Mercury CSV and record each with its
@@ -110,6 +115,9 @@ the year before.
 node src/cli.ts transfer.record '{"kind":"AfterTax","year":2026,"mercury":"20261015MMQFMP4S000200","sentOn":"2026-10-15","amount":"5000.00"}'
 ```
 
+A wire past `status`'s `afterTax.room` refuses: what the election leaves, and
+415(c), the year's pay with the salary target standing in for pay to come.
+
 ## Rollover
 
 Every rollover sweeps a whole account into the owner's Roth IRA. Record each
@@ -134,7 +142,8 @@ node src/cli.ts transfer.record '{"kind":"Distribution","mercury":"20261015MMQFM
    the 941 and the C-3, headed by who they name.
 2. Prepare both from it. Mail the 941 by certified mail; file the C-3 online.
 3. Record them. The figures stored are the report's; if the return differs,
-   fix the ledger first. A return is recorded only once its period is over.
+   fix the ledger first. A return is recorded only once its period is over;
+   recording it again is no change.
 
    ```sh
    node src/cli.ts filing.record '{"form":"F941","period":"2026Q4","method":"CertifiedMail","mailedOn":"2027-01-20","tracking":"9400100000000000000001"}'
@@ -189,8 +198,10 @@ certified mail, give the owner Copy B, and record it:
 node src/cli.ts filing.correct '{"form":"F1099R","period":"2025","mailedOn":"…","tracking":"…"}'
 ```
 
-A correction restates only the lines that changed; the rest stand as filed. A
-return takes one correction.
+A correction restates only the lines that changed; the rest stand as filed. It
+is mailed after the return it corrects, under a tracking number of its own. A
+return takes one correction. Once corrected 1099-Rs are recorded, the original
+1096 stands as filed and leaves `mismatches`.
 
 ## Backup
 
@@ -198,6 +209,7 @@ return takes one correction.
 node src/cli.ts export        # private/Wagie Tools - CURRENT.facts.json
 ```
 
-`import '{"file":"…"}'` restores an export into a fresh ledger. An import is
+`import '{"file":"…"}'` restores an export into a fresh ledger, and refuses
+anything `export` wouldn't write, leaving no ledger behind. An import is
 also how history enters: the span the ledger did not record, the filings
 attested inside it, and payments made outside Mercury.

@@ -1,8 +1,9 @@
 import type { Fact, NativeRuntime, Uuid } from "@bjornpagen/bumbledb"
 import { Effect, Schema } from "effect"
-import { bandsFor, type Check, jurisdictionOf, netOf, paychecks, stateOn } from "./check.ts"
+import { assess, bandsFor, type Check, jurisdictionOf, netOf, paychecks, stateOn } from "./check.ts"
 import { formatDollars } from "./core/boundary.ts"
 import {
+	covers,
 	formatDate,
 	formatPeriod,
 	monthOf,
@@ -14,11 +15,11 @@ import {
 	yearOf,
 	yearSpan
 } from "./core/time.ts"
-import { canonicalJson, MAX_I64, MAX_U64, min, naturalId, refuse, sum } from "./core/values.ts"
+import { canonicalJson, MAX_I64, MAX_U64, max, min, naturalId, refuse, sum } from "./core/values.ts"
 import * as Db from "./db.ts"
 import { correctionDue, figures, periodOf } from "./forms.ts"
 import { CheckInput, fitting, priceCheck } from "./gross-up.ts"
-import { type Obligation, obligations, status } from "./obligations.ts"
+import { afterTaxRoom, type Obligation, obligations, status } from "./obligations.ts"
 import { sweeps } from "./plan.ts"
 import { report } from "./reports.ts"
 import {
@@ -112,15 +113,28 @@ const paycheck = (facts: Facts, id: Uuid) => {
 		owedNet: check.owedNet,
 		sentNet: check.sentNet,
 		sentRoth: check.sentRoth,
-		recovered: facts.Recovery.filter((row) => row.recoveredBy === id).map((row) => ({
-			paidOn: paidOn.get(row.wage) ?? refuse("WageMissing", "A recovery names no paycheck"),
-			amount: row.amount
-		})),
+		recovered: facts.Recovery.filter((row) => row.recoveredBy === id)
+			.map((row) => ({
+				paidOn: paidOn.get(row.wage) ?? refuse("WageMissing", "A recovery names no paycheck"),
+				amount: row.amount
+			}))
+			.sort((a, b) => (a.paidOn < b.paidOn ? -1 : 1)),
 		wires: [
 			...(unsent > 0n ? [{ kind: "NetPay", to: "the owner", amount: unsent }] : []),
 			...(rothUnsent > 0n ? [{ kind: "RothDeferral", to: wiredTo(facts, "Roth"), amount: rothUnsent }] : [])
 		]
 	}
+}
+
+/** Roth comes out of pay only under a signed election: none from a paycheck
+ * paid before the year's election was signed. */
+const requireSigned = (facts: Facts, year: bigint, paidOn: bigint) => {
+	const election = facts.Election.find((row) => row.year === year)
+	if (election && paidOn < election.signedOn)
+		refuse(
+			"ElectionUnsigned",
+			`The ${year} election was signed ${formatDate(election.signedOn)}; no Roth comes out of pay before it`
+		)
 }
 
 /** Paychecks sent more net pay than they owe, oldest first. */
@@ -170,6 +184,12 @@ const payroll =
 		}
 		if (facts.Wage.some((wage) => wage.year === year && wage.paidOn.start > paidOn))
 			refuse("Backdated", "A later paycheck is posted this year; paychecks stay in date order")
+		const filed = facts.Filing.find(
+			(row) => S.Form.axioms[row.form].trigger !== "PlanActivity" && covers(row.period, paidOn)
+		)
+		if (filed)
+			refuse("PeriodFiled", `${filed.form} ${formatPeriod(filed.period)} is filed; no paycheck can join it`)
+		if ((request.input.roth ?? 0n) > 0n) requireSigned(facts, year, paidOn)
 		if (blockers.length > 0 && !quoting) refuse("PayrollBlocked", blockers.map(describe).join("; "))
 
 		const owed = overpaid(facts)
@@ -224,6 +244,7 @@ const correct =
 			refuse("GrossNotLatest", "Gross can change only on the year's latest paycheck")
 		const fit = request.fit ?? current.withheld.get("FIT") ?? 0n
 		const roth = request.roth ?? wage.roth
+		if (roth > wage.roth) requireSigned(facts, wage.year, request.paidOn)
 		const check =
 			gross === wage.gross
 				? fitting({ gross, roth, withheld: new Map([...current.withheld, ["FIT", fit]]) })
@@ -298,8 +319,16 @@ const transfer =
 						)
 					return Db.insert(request.kind, { transfer: mercury, wage: wage.id, amount })
 				}
-				case "AfterTax":
-					return Db.insert("AfterTax", { transfer: mercury, year: BigInt(request.year), amount })
+				case "AfterTax": {
+					const year = BigInt(request.year)
+					const room = afterTaxRoom(facts, year)
+					if (!recorded && room !== undefined && amount > room)
+						refuse(
+							"Over415c",
+							`At most ${formatDollars(max(0n, room))} more after-tax fits ${year}: the election and 415(c), the salary target standing in for pay to come`
+						)
+					return Db.insert("AfterTax", { transfer: mercury, year, amount })
+				}
 				case "Distribution":
 					return Db.insert("Distribution", { transfer: mercury, amount })
 			}
@@ -374,17 +403,51 @@ const FilingInput = Schema.Union([
 ])
 type FilingInput = typeof FilingInput.Type
 
+/** The day a return was filed, by its method; an attested one has none. */
+const filedOn = (facts: Facts, filing: Uuid) =>
+	facts.Electronic.find((row) => row.filing === filing)?.on ??
+	facts.CertifiedMail.find((row) => row.filing === filing)?.mailedOn ??
+	facts.Furnished.find((row) => row.filing === filing)?.on
+/** A USPS tracking number names one mailing: a return or a correction. */
+const mailedUnder = (facts: Facts, tracking: string) =>
+	facts.CertifiedMail.some((row) => row.tracking === tracking) ||
+	facts.Correction.some((row) => row.tracking === tracking)
+/** Whether a return is recorded exactly as this request records it. */
+const recordedAs = (facts: Facts, filing: Fact<typeof S.Filing>, request: FilingInput) => {
+	if (filing.method !== request.method) return false
+	switch (request.method) {
+		case "Electronic":
+			return facts.Electronic.some(
+				(row) =>
+					row.filing === filing.id && row.on === request.on && row.confirmation === request.confirmation
+			)
+		case "CertifiedMail":
+			return facts.CertifiedMail.some(
+				(row) =>
+					row.filing === filing.id && row.mailedOn === request.mailedOn && row.tracking === request.tracking
+			)
+		case "Furnished":
+			return facts.Furnished.some((row) => row.filing === filing.id && row.on === request.on)
+	}
+}
+
 /** A return as filed: how, and every line as the ledger computes it now.
  * What is filed must equal the ledger; fix the ledger first if it doesn't.
  * A return is filed once its period is over: filed early, it would freeze a
- * period's liability before its paychecks were all paid. */
+ * period's liability before its paychecks were all paid. Recording it again
+ * is no change, whatever has happened since. */
 const fileReturn =
 	(request: FilingInput) =>
 	(facts: Facts): Db.Plan<object> => {
 		const { form, period, method } = request
 		requirePeriod(period, S.Form.axioms[form].period)
+		const recorded = facts.Filing.find((row) => row.form === form && sameSpan(row.period, period))
+		if (recorded && recordedAs(facts, recorded, request)) return { edits: [], result: request }
+		if (recorded) refuse("Filed", `${form} ${formatPeriod(period)} is already recorded`)
 		if ((request.method === "CertifiedMail" ? request.mailedOn : request.on) < period.end)
 			refuse("PeriodOpen", `${form} ${formatPeriod(period)} can be filed once the period is over`)
+		if (request.method === "CertifiedMail" && mailedUnder(facts, request.tracking))
+			refuse("TrackingUsed", `Tracking ${request.tracking} already names another mailing`)
 		const id = filingId(form, period)
 		const lines = [...figures(form, periodOf(facts, period))].map(([line, value]) => ({
 			filing: id,
@@ -433,6 +496,11 @@ const correctReturn =
 		const mailed = facts.Correction.find((row) => row.filing === filing.id)
 		if (mailed?.mailedOn === mailedOn && mailed.tracking === tracking) return { edits: [], result: request }
 		if (mailed) refuse("Corrected", `${form} ${formatPeriod(period)} already has a correction`)
+		const after = max(period.end, filedOn(facts, filing.id) ?? period.end)
+		if (mailedOn < after)
+			refuse("BeforeFiling", `${form} ${formatPeriod(period)} can be corrected from ${formatDate(after)} on`)
+		if (mailedUnder(facts, tracking))
+			refuse("TrackingUsed", `Tracking ${tracking} already names another mailing`)
 		const due = correctionDue(facts, filing)
 		if (due.size === 0)
 			refuse("NothingToCorrect", `${form} ${formatPeriod(period)} as filed matches what it reports`)
@@ -509,6 +577,31 @@ const within415 = (
 		)
 }
 
+/** A withheld tax's band never changes in a way that would withhold a posted
+ * paycheck differently. An employer's own rate, such as a Texas UI rate
+ * assigned late, may change; its returns follow. */
+const keepsWithholding = (
+	facts: Facts,
+	old: Fact<typeof S.TaxBand> | undefined,
+	band: Fact<typeof S.TaxBand>
+) => {
+	if (old === undefined || !S.Tax.axioms[band.tax].employee) return
+	const state = jurisdictionOf(band.tax)
+	const withheld = (under: Fact<typeof S.TaxBand>, ytd: bigint, gross: bigint) =>
+		assess([under], ytd, gross).get(band.tax) ?? 0n
+	const moved = paychecks(facts).find(
+		(check) =>
+			check.wage.year === band.year &&
+			(state === "Federal" || check.state === state) &&
+			withheld(band, check.ytd, check.gross) !== withheld(old, check.ytd, check.gross)
+	)
+	if (moved)
+		refuse(
+			"PolicyInUse",
+			`The ${formatDate(moved.wage.paidOn.start)} paycheck withheld ${band.tax} under the ${band.year} band in force; it can't change now`
+		)
+}
+
 /** Replace one jurisdiction's policy for a year whole; the laws judge it. */
 const setPolicy =
 	(request: PolicyInput) =>
@@ -531,11 +624,10 @@ const setPolicy =
 					: []),
 				...banded(request.jurisdiction).flatMap((tax) => {
 					const band = request.rates[tax] ?? refuse("RateMissing", `Give the ${tax} rate`)
-					return replace(
-						"TaxBand",
-						facts.TaxBand.find((old) => old.year === year && old.tax === tax),
-						{ year, tax, wages: { start: 0n, end: band.base ?? MAX_U64 }, rate: band.rate }
-					)
+					const old = facts.TaxBand.find((row) => row.year === year && row.tax === tax)
+					const next = { year, tax, wages: { start: 0n, end: band.base ?? MAX_U64 }, rate: band.rate }
+					keepsWithholding(facts, old, next)
+					return replace("TaxBand", old, next)
 				})
 			],
 			result: request

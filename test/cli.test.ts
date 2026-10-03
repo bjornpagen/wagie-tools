@@ -117,6 +117,12 @@ test("each write round-trips and an identical re-run is no change", async () => 
 		code: "Corrected"
 	})
 	await assert.rejects(op(ledger, "filing.correct", { ...correction, form: "C3" }), { code: "InvalidInput" })
+	// Recording a return again is no change, whatever has happened since; any
+	// other record of it refuses.
+	assert.equal((await op(ledger, "filing.record", f941)).outcome, "no-change")
+	await assert.rejects(op(ledger, "filing.record", { ...f941, tracking: "9400100000000000000009" }), {
+		code: "Filed"
+	})
 
 	const facts = await read(ledger)
 	const filed = (form: string) => facts.Filing.find((row) => row.form === form)?.id
@@ -154,6 +160,23 @@ test("policy.set replaces one jurisdiction's year whole", async () => {
 	)
 })
 
+test("policy.set can't move a withheld tax under paychecks withheld at it", async () => {
+	const ledger = await ledger2026()
+	await paid(ledger, "2026-01-09", { by: "gross", gross: "2000.00" })
+	const rates = federal(2026).rates
+	const federalWith = (changed: object) => ({ ...federal(2026), rates: { ...rates, ...changed } })
+	const refused = (changed: object) =>
+		assert.rejects(op(ledger, "policy.set", federalWith(changed)), { code: "PolicyInUse" })
+	await refused({ SocialSecurity: { rate: "6.0", base: "184500.00" } })
+	await refused({ Medicare: { rate: "1.45", base: "1000.00" } })
+	// A base above every paycheck so far withholds the same; an employer's own
+	// rate may change.
+	const raised = federalWith({ SocialSecurity: { rate: "6.2", base: "190000.00" } })
+	assert.equal((await op(ledger, "policy.set", raised)).outcome, "committed")
+	const assigned = { ...texas(2026), rates: { TexasUnemployment: { rate: "1.5", base: "9000.00" } } }
+	assert.equal((await op(ledger, "policy.set", assigned)).outcome, "committed")
+})
+
 test("an export imports into an identical ledger", async () => {
 	const ledger = await ledger2026()
 	await paid(ledger, "2026-01-09", { by: "gross", gross: "2000.00", roth: "500.00" })
@@ -179,6 +202,29 @@ test("a refused import leaves no ledger behind", async () => {
 	const copy = freshLedger()
 	await assert.rejects(op(copy, "import", { file: broken }), { code: "LawRefused" })
 	assert.equal(existsSync(copy), false)
+})
+
+test("import refuses anything but an export, and leaves no ledger behind", async () => {
+	const ledger = await ledger2026()
+	const { out } = await op(ledger, "export", { out: scratchPath("whole.json") })
+	const facts = JSON.parse(readFileSync(out as string, "utf8"))
+	const [party, ...parties] = facts.Party
+	const cases = {
+		syntax: "{",
+		array: "[]",
+		empty: "{}",
+		notList: JSON.stringify({ ...facts, Party: party }),
+		notRow: JSON.stringify({ ...facts, Party: [...facts.Party, null] }),
+		unknownField: JSON.stringify({ ...facts, Party: [{ ...party, nickname: "Pat" }, ...parties] }),
+		twice: JSON.stringify({ ...facts, Party: [...facts.Party, party] })
+	}
+	for (const [name, text] of Object.entries(cases)) {
+		const file = scratchPath(`import-${name}.json`)
+		writeFileSync(file, text)
+		const copy = freshLedger()
+		await assert.rejects(op(copy, "import", { file }), { code: "InvalidExport" }, name)
+		assert.equal(existsSync(copy), false, name)
+	}
 })
 
 test("an import attests only filings inside its history", async () => {
@@ -244,6 +290,7 @@ test("the boundary refuses what the ledger can't hold", async () => {
 		"PeriodOpen"
 	)
 	await refuses("tax.paid", { ...depositInput, account: "Federal940", period: "2026Q1" }, "InvalidPeriod")
+	await refuses("tax.paid", { ...depositInput, amount: "92233720368547758.08" }, "InvalidInput")
 	await refuses(
 		"policy.set",
 		{ ...texas(2026), rates: { TexasUnemployment: { rate: "2.70001" } } },

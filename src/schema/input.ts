@@ -1,7 +1,7 @@
 import { Effect, Schema, SchemaGetter, SchemaIssue } from "effect"
 import { formatDollars, formatPercent, parseDollars, parsePercent } from "../core/boundary.ts"
 import { formatDate, formatPeriod, parseDate, parsePeriod, type Span } from "../core/time.ts"
-import { MAX_U64, Refusal } from "../core/values.ts"
+import { MAX_I64, Refusal } from "../core/values.ts"
 
 /** Inputs are parsed once, here, into the values the ledger stores. Nothing
  * past this boundary re-checks a date, an amount or a tracking id. */
@@ -27,9 +27,10 @@ const textCodec = <A>(
 		})
 	)
 
+/** Money never reaches 2^63 cents, so any amount fits a filed figure. */
 const cents = (text: string) => {
 	const value = parseDollars(text)
-	if (value < 0n || value > MAX_U64)
+	if (value < 0n || value > MAX_I64)
 		throw new Refusal({ code: "InvalidMoney", message: `Out of range: ${text}` })
 	return value
 }

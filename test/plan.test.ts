@@ -263,3 +263,47 @@ test("box 11 dates a Roth deferral by its paycheck, however late the wire", asyn
 		2026
 	)
 })
+
+test("after-tax stays within 415(c): the year's pay, the salary target standing in", async () => {
+	const own = await ledger2026()
+	await op(own, "plan.set", { year: 2026, salary: "10000.00", fitPerCheck: "0.01" })
+	const wire = (amount: string) =>
+		op(own, "transfer.record", {
+			kind: "AfterTax",
+			year: 2026,
+			mercury: sendMoney(),
+			sentOn: "2026-01-05",
+			amount
+		})
+	await assert.rejects(wire("10000.01"), { code: "Over415c" })
+	assert.equal((await wire("10000.00")).outcome, "committed")
+	assert.deepEqual((await op(own, "status", { asOf: "2026-01-05" })).afterTax, { room: "0.00" })
+})
+
+test("once the 1099-Rs are corrected, the original 1096 stands as filed", async () => {
+	const own = await ledger2026()
+	const afterTax = (sentOn: string, amount: string) =>
+		op(own, "transfer.record", { kind: "AfterTax", year: 2026, mercury: sendMoney(), sentOn, amount })
+	await afterTax("2026-03-02", "1000.00")
+	await op(own, "filing.record", { form: "F1099R", period: "2026", method: "Furnished", on: "2027-01-20" })
+	await op(own, "filing.record", {
+		form: "F1096",
+		period: "2026",
+		method: "CertifiedMail",
+		mailedOn: "2027-01-20",
+		tracking: "9400100000000000000011"
+	})
+	await afterTax("2026-12-30", "500.00") // a conversion the forms missed
+	const mismatched = async () =>
+		((await op(own, "status", { asOf: "2027-02-03" })).mismatches as { form: string; line: string }[])
+			.map(({ line }) => line)
+			.sort()
+	assert.deepEqual(await mismatched(), ["F1096_5", "F1099R_AfterTax_G_1", "F1099R_AfterTax_G_5"])
+	await op(own, "filing.correct", {
+		form: "F1099R",
+		period: "2026",
+		mailedOn: "2027-02-02",
+		tracking: "9400100000000000000012"
+	})
+	assert.deepEqual(await mismatched(), [])
+})

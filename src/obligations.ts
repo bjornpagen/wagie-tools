@@ -81,6 +81,10 @@ const filingOf = (facts: Facts, form: FormHandle, period: Span) =>
 	facts.Filing.find((row) => row.form === form && sameSpan(row.period, period))
 const filedValue = (facts: Facts, filing: Uuid, line: LineHandle) =>
 	facts.FiledFigures.find((row) => row.filing === filing && row.line === line)?.value ?? 0n
+const corrected = (facts: Facts, form: FormHandle, period: Span) => {
+	const filing = filingOf(facts, form, period)
+	return filing !== undefined && facts.Correction.some((row) => row.filing === filing.id)
+}
 
 /** The lines that state an account's liability by accrual period: its
  * return's liability line, or, accruing monthly, the 941's line 16. */
@@ -264,10 +268,11 @@ export const obligations = (facts: Facts, asOf: bigint) => {
 
 	// A filed 941 whose reported facts no longer match the ledger needs a 941-X.
 	for (const filing of facts.Filing.filter((row) => row.form === "F941")) {
-		const corrected = facts.Correction.some((row) => row.filing === filing.id)
 		if (correctionDue(facts, filing).size > 0)
 			open.push({
-				what: corrected ? "File a second 941-X (extend Correction's key first)" : "File a 941-X",
+				what: corrected(facts, filing.form, filing.period)
+					? "File a second 941-X (extend Correction's key first)"
+					: "File a 941-X",
 				next: "filing.correct",
 				period: filing.period,
 				opensOn: filing.period.end
@@ -280,9 +285,12 @@ export const obligations = (facts: Facts, asOf: bigint) => {
 
 /** Filed figures, as corrected, that no longer match the ledger, for forms
  * other than the 941, leaving out lines that payments move after filing. A
- * correctable line names the op that files its correction. */
+ * correctable line names the op that files its correction. Corrected 1099-Rs
+ * go with a 1096 of their own, so the original 1096 then stands as filed. */
 export const mismatches = (facts: Facts) =>
-	facts.Filing.filter((row) => row.form !== "F941").flatMap((filing) => {
+	facts.Filing.filter(
+		(row) => row.form !== "F941" && !(row.form === "F1096" && corrected(facts, "F1099R", row.period))
+	).flatMap((filing) => {
 		const current = figures(filing.form, periodOf(facts, filing.period))
 		return [...latest(facts, filing.id)]
 			.filter(([line, value]) => !paymentLine(line) && value !== (current.get(line) ?? 0n))
@@ -296,33 +304,43 @@ export const mismatches = (facts: Facts) =>
 			}))
 	})
 
+/** What more the year's after-tax contributions may take: the election left,
+ * and 415(c), annual additions within the limit and the year's pay, the
+ * salary target standing in for pay not yet earned. */
+export const afterTaxRoom = (facts: Facts, year: bigint) => {
+	const checks = paychecks(facts).filter((check) => check.wage.year === year)
+	const gross = sum(checks.map((check) => check.gross))
+	const roth = sum(checks.map((check) => check.roth))
+	const afterTax = sum(facts.AfterTax.filter((row) => row.year === year).map((row) => row.amount))
+	const plan = facts.PayPlan.find((row) => row.year === year)
+	const election = facts.Election.find((row) => row.year === year)
+	const limits = facts.TaxYear.find((row) => row.year === year)
+	return election && limits
+		? min(
+				election.afterTax - afterTax,
+				min(limits.additionsLimit, min(max(gross, plan?.salary ?? 0n), limits.compensationLimit)) -
+					roth -
+					afterTax
+			)
+		: undefined
+}
+
 /** Non-blocking lines for the year of asOf. */
 export const notes = (facts: Facts, asOf: bigint) => {
 	const year = yearOf(asOf)
 	const checks = paychecks(facts).filter((check) => check.wage.year === BigInt(year))
 	const gross = sum(checks.map((check) => check.gross))
 	const roth = sum(checks.map((check) => check.roth))
-	const afterTax = sum(facts.AfterTax.filter((row) => row.year === BigInt(year)).map((row) => row.amount))
 	const plan = facts.PayPlan.find((row) => row.year === BigInt(year))
 	const election = facts.Election.find((row) => row.year === BigInt(year))
-	const limits = facts.TaxYear.find((row) => row.year === BigInt(year))
+	const room = afterTaxRoom(facts, BigInt(year))
 	const sentIn = (mercury: string) =>
 		facts.Transfer.some((row) => row.mercury === mercury && covers(yearSpan(year), row.sentOn))
 	const planYears = asOf >= dayOf(year, 12, 1) ? [year, year + 1] : [year]
 	return {
 		salary: plan && { target: plan.salary, ytd: gross, remaining: plan.salary - gross },
 		roth: election && { room: election.roth - roth },
-		// 415(c): annual additions stay within the limit and the year's pay, the
-		// salary target standing in for pay not yet earned.
-		afterTax: election &&
-			limits && {
-				room: min(
-					election.afterTax - afterTax,
-					min(limits.additionsLimit, min(max(gross, plan?.salary ?? 0n), limits.compensationLimit)) -
-						roth -
-						afterTax
-				)
-			},
+		afterTax: room === undefined ? undefined : { room },
 		rothBasis: { awaiting: awaitingSweep(facts) },
 		distributions: {
 			ytd:

@@ -185,31 +185,55 @@ export const exportFacts = (facts: Facts) =>
 		1
 	)
 
+const invalid = (message: string): never => {
+	throw new Refusal({ code: "InvalidExport", message })
+}
+const isObject = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value)
+
+/** An export's facts as inserts. Anything but what `export` writes refuses:
+ * one object of relations, each a list of rows with exactly its fields, no
+ * row twice, and at least one fact. */
 export const importEdits = (text: string): Edit[] => {
-	const data = JSON.parse(text) as Record<string, readonly Record<string, unknown>[]>
+	let data: unknown
+	try {
+		data = JSON.parse(text)
+	} catch (error) {
+		return invalid(`Not JSON: ${error instanceof Error ? error.message : String(error)}`)
+	}
+	if (!isObject(data)) return invalid("An export is one JSON object of relations")
 	const unknown = Object.keys(data).filter((name) => !Object.hasOwn(stored, name))
 	if (unknown.length) throw new Refusal({ code: "UnknownRelation", message: unknown.join(", ") })
-	return (Object.keys(stored) as Name[]).flatMap((name) => {
+	const edits = (Object.keys(stored) as Name[]).flatMap((name) => {
 		const fields = (stored[name] as AnyRelation).fields as Record<
 			string,
 			Parameters<typeof decodeBoundaryField>[0]
 		>
-		return (data[name] ?? []).map((row) => ({
-			op: "insert" as const,
-			relation: name,
-			fact: Object.fromEntries(
-				Object.entries(fields).map(([field, descriptor]) => {
-					const decoded = decodeBoundaryField(descriptor, row[field])
-					if (Result.isFailure(decoded))
-						throw new Refusal({
-							code: "InvalidExport",
-							message: `${name}.${field}: ${JSON.stringify(row[field])}`
-						})
-					return [field, decoded.success]
-				})
-			)
-		}))
+		const rows = data[name] ?? []
+		if (!Array.isArray(rows)) return invalid(`${name} is not a list of rows`)
+		const seen = new Set<string>()
+		return rows.map((row: unknown) => {
+			if (!isObject(row)) return invalid(`${name}: a row is not an object: ${JSON.stringify(row)}`)
+			const extra = Object.keys(row).filter((field) => !Object.hasOwn(fields, field))
+			if (extra.length) invalid(`${name}: unknown fields ${extra.join(", ")}`)
+			const key = canonicalJson(row)
+			if (seen.has(key)) invalid(`${name}: the same row twice: ${key}`)
+			seen.add(key)
+			return {
+				op: "insert" as const,
+				relation: name,
+				fact: Object.fromEntries(
+					Object.entries(fields).map(([field, descriptor]) => {
+						const decoded = decodeBoundaryField(descriptor, row[field])
+						if (Result.isFailure(decoded)) invalid(`${name}.${field}: ${JSON.stringify(row[field])}`)
+						return [field, Result.getOrThrow(decoded)]
+					})
+				)
+			}
+		})
 	})
+	if (edits.length === 0) return invalid("The export has no facts")
+	return edits
 }
 
 export const readText = (file: string) =>

@@ -201,6 +201,33 @@ test("an overpaid paycheck is recovered by the next one", async () => {
 	assert.deepEqual((await status(ledger, "2026-01-16")).overpaid, [])
 })
 
+test("a paycheck recovers overpayments oldest first, and says so the same way again", async () => {
+	const ledger = await ledger2026()
+	await paid(ledger, "2026-01-02", check)
+	await paid(ledger, "2026-01-09", check)
+	await op(ledger, "payroll.correct", { paidOn: "2026-01-02", fit: "10.01" })
+	await op(ledger, "payroll.correct", { paidOn: "2026-01-09", fit: "20.01" })
+	const request = { paidOn: "2026-01-16", input: check }
+	const { outcome, ...posted } = await op(ledger, "payroll.post", request)
+	assert.equal(outcome, "committed")
+	assert.deepEqual(posted.recovered, [
+		{ paidOn: "2026-01-02", amount: "10.00" },
+		{ paidOn: "2026-01-09", amount: "20.00" }
+	])
+	assert.deepEqual(await op(ledger, "payroll.post", request), { ...posted, outcome: "no-change" })
+})
+
+test("no Roth comes out of a paycheck paid before the election was signed", async () => {
+	const ledger = await ledger2026("2026-01-01") // the election is signed 2026-01-02
+	await assert.rejects(op(ledger, "payroll.post", { paidOn: "2026-01-01", input: check }), {
+		code: "ElectionUnsigned"
+	})
+	await paid(ledger, "2026-01-01", { by: "gross", gross: "2000.00" })
+	await assert.rejects(op(ledger, "payroll.correct", { paidOn: "2026-01-01", roth: "500.00" }), {
+		code: "ElectionUnsigned"
+	})
+})
+
 const federal941 = (items: string[]) => items.filter((what) => /941/.test(what))
 const file941 = (ledger: string) =>
 	op(ledger, "filing.record", {
@@ -382,4 +409,43 @@ test("returns begin with employment, not before it", async () => {
 		items.map((item) => `${item.what} ${item.period}`),
 		["File F941 2026Q2", "File C3 2026Q2"]
 	)
+})
+
+test("no paycheck joins a period whose return is filed", async () => {
+	const ledger = await ledger2026()
+	await paid(ledger, "2026-01-09", check)
+	await file941(ledger)
+	await assert.rejects(op(ledger, "payroll.post", { paidOn: "2026-01-23", input: check }), {
+		code: "PeriodFiled"
+	})
+})
+
+test("a 941-X is mailed after its 941, under a tracking number of its own", async () => {
+	const ledger = await ledger2026()
+	await paid(ledger, "2026-01-09", check)
+	await op(ledger, "filing.record", {
+		form: "F941",
+		period: "2026Q1",
+		method: "CertifiedMail",
+		mailedOn: "2026-04-20",
+		tracking: "9400100000000000000001"
+	})
+	await op(ledger, "payroll.correct", { paidOn: "2026-01-09", fit: "10.01" })
+	const correction = {
+		form: "F941",
+		period: "2026Q1",
+		mailedOn: "2026-05-01",
+		tracking: "9400100000000000000002"
+	}
+	await assert.rejects(op(ledger, "filing.correct", { ...correction, mailedOn: "2026-04-10" }), {
+		code: "BeforeFiling"
+	})
+	await assert.rejects(op(ledger, "filing.correct", { ...correction, tracking: "9400100000000000000001" }), {
+		code: "TrackingUsed"
+	})
+	assert.equal((await op(ledger, "filing.correct", correction)).outcome, "committed")
+	const q2 = { form: "F941", period: "2026Q2", method: "CertifiedMail", mailedOn: "2026-07-02" }
+	await assert.rejects(op(ledger, "filing.record", { ...q2, tracking: correction.tracking }), {
+		code: "TrackingUsed"
+	})
 })

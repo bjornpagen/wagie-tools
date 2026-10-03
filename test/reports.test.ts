@@ -219,3 +219,22 @@ test("a year's tax payments are those toward its periods, whenever made", async 
 	assert.deepEqual(await periods(2026), ["2026Q4"])
 	assert.deepEqual(await periods(2027), ["2027Q1"])
 })
+
+test("line 16 takes the quarter's rounding where no month goes below zero", async () => {
+	const ledger = await ledger2026()
+	// Social security and Medicare both round up on each of these.
+	const january = {
+		"2026-01-02": "1001.05",
+		"2026-01-09": "1008.63",
+		"2026-01-16": "1013.47",
+		"2026-01-23": "1016.21"
+	}
+	for (const [paidOn, gross] of Object.entries(january)) await paid(ledger, paidOn, { by: "gross", gross })
+	const due = ((await op(ledger, "status", { asOf: "2026-02-02" })).blockers as { amount: string }[])[0]
+	await deposit(ledger, "2026Q1", due?.amount ?? "", "2026-02-02")
+	await paid(ledger, "2026-02-06", { by: "gross", gross: "0.01" })
+	const { F941 } = await forms(ledger, 2026, 1)
+	const months = ["F941_16_1", "F941_16_2", "F941_16_3"].map((line) => F941?.lines[line])
+	assert.deepEqual(months, ["618.10", "0.01", "0.00"])
+	assert.equal(F941?.lines.F941_12, "618.11")
+})
