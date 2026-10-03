@@ -141,6 +141,12 @@ const sutaTax = (period: Period) => nearest(weighted(period, "TexasUnemployment"
 const ssWithheld = (period: Period) =>
 	withheld(period, "SocialSecurity") - total(period, (check) => max(0n, -check.owedNet))
 const wagesPaid = (period: Period) => (period.checks.length > 0 ? 1n : 0n)
+/** Box 13, retirement plan: checked for an active participant, one with Roth
+ * deferrals or after-tax contributions for the year. */
+const participated = (period: Period) =>
+	roth(period) > 0n || period.facts.AfterTax.some((row) => row.year === BigInt(yearOf(period.span.start)))
+		? 1n
+		: 0n
 
 // ── 1099-R and 1096 ─────────────────────────────────────────────────────────
 
@@ -217,7 +223,7 @@ export const lines: { readonly [L in LineHandle]: Rule } = {
 	W2_5: money((period) => subject(period, "Medicare")),
 	W2_6: money((period) => withheld(period, "Medicare")),
 	W2_12AA: money(roth),
-	W2_13: count(wagesPaid),
+	W2_13: count(participated),
 	W3_c: count(wagesPaid),
 	W3_1: money(gross),
 	W3_2: money((period) => withheld(period, "FIT")),

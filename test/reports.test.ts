@@ -3,7 +3,7 @@ import { test } from "node:test"
 import { parseDollars as $ } from "../src/core/boundary.ts"
 import { parseDate, point } from "../src/core/time.ts"
 import { insert } from "../src/db.ts"
-import { commit, deposit, ledger2026, op, paid } from "./support.ts"
+import { commit, deposit, ledger2026, op, paid, sendMoney } from "./support.ts"
 
 type Form = {
 	names: { role: string; name: string }[]
@@ -193,4 +193,19 @@ test("the year shows its policy, and tax payments their tracker or outside Mercu
 		initiatedOn: "2026-04-20",
 		mercury: "outside Mercury"
 	})
+})
+
+test("W-2 box 13 is checked for a year with Roth deferrals or after-tax contributions", async () => {
+	const ledger = await ledger2026()
+	await paid(ledger, "2026-01-09", { by: "gross", gross: "1000.00" })
+	const box13 = async () => (await forms(ledger, 2026)).W2?.lines.W2_13
+	assert.equal(await box13(), 0)
+	await op(ledger, "transfer.record", {
+		kind: "AfterTax",
+		year: 2026,
+		mercury: sendMoney(),
+		sentOn: "2026-02-02",
+		amount: "100.00"
+	})
+	assert.equal(await box13(), 1)
 })
