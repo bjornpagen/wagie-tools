@@ -14,7 +14,17 @@ import {
 } from "./core/time.ts"
 import { max, min, sum } from "./core/values.ts"
 import type { Facts } from "./db.ts"
-import { correction, figures, formatLine, paidToward, paymentLine, periodOf, reported941 } from "./forms.ts"
+import {
+	column4,
+	correctionDue,
+	figures,
+	formatLine,
+	latest,
+	mailed,
+	paidToward,
+	paymentLine,
+	periodOf
+} from "./forms.ts"
 import { awaitingSweep } from "./plan.ts"
 import {
 	type AccountHandle,
@@ -119,7 +129,7 @@ const accruals = (facts: Facts, account: AccountHandle, period: Span): Accrual[]
 				{
 					what: "941-X balance",
 					period,
-					amount: correction(facts, filing.id).owed,
+					amount: column4(facts, filing, mailed(facts, filing.id)).owed,
 					opensOn: corrected.mailedOn,
 					dueOn: corrected.mailedOn
 				}
@@ -255,15 +265,7 @@ export const obligations = (facts: Facts, asOf: bigint) => {
 	// A filed 941 whose reported facts no longer match the ledger needs a 941-X.
 	for (const filing of facts.Filing.filter((row) => row.form === "F941")) {
 		const corrected = facts.Correction.some((row) => row.filing === filing.id)
-		const latest = (corrected ? facts.CorrectedFigures : facts.FiledFigures).filter(
-			(row) => row.filing === filing.id
-		)
-		const current = figures("F941", periodOf(facts, filing.period))
-		if (
-			reported941.some(
-				(line) => (latest.find((row) => row.line === line)?.value ?? 0n) !== (current.get(line) ?? 0n)
-			)
-		)
+		if (correctionDue(facts, filing).size > 0)
 			open.push({
 				what: corrected ? "File a second 941-X (extend Correction's key first)" : "File a 941-X",
 				next: "filing.correct",
@@ -276,21 +278,22 @@ export const obligations = (facts: Facts, asOf: bigint) => {
 	return { open, credits, blockers: open.filter((item) => item.opensOn <= asOf) }
 }
 
-/** Filed figures that no longer match the ledger, for forms other than the
- * 941, leaving out lines that payments move after filing. */
+/** Filed figures, as corrected, that no longer match the ledger, for forms
+ * other than the 941, leaving out lines that payments move after filing. A
+ * correctable line names the op that files its correction. */
 export const mismatches = (facts: Facts) =>
 	facts.Filing.filter((row) => row.form !== "F941").flatMap((filing) => {
 		const current = figures(filing.form, periodOf(facts, filing.period))
-		return facts.FiledFigures.filter(
-			(row) =>
-				row.filing === filing.id && !paymentLine(row.line) && row.value !== (current.get(row.line) ?? 0n)
-		).map((row) => ({
-			form: filing.form,
-			period: filing.period,
-			line: row.line,
-			filed: formatLine(row.line, row.value),
-			now: formatLine(row.line, current.get(row.line) ?? 0n)
-		}))
+		return [...latest(facts, filing.id)]
+			.filter(([line, value]) => !paymentLine(line) && value !== (current.get(line) ?? 0n))
+			.map(([line, value]) => ({
+				form: filing.form,
+				period: filing.period,
+				line,
+				filed: formatLine(line, value),
+				now: formatLine(line, current.get(line) ?? 0n),
+				...(Line.axioms[line].correctable ? { next: "filing.correct" } : {})
+			}))
 	})
 
 /** Non-blocking lines for the year of asOf. */

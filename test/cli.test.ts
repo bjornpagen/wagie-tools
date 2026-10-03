@@ -103,11 +103,19 @@ test("each write round-trips and an identical re-run is no change", async () => 
 		tracking: "9400100000000000000003"
 	}
 	await twice(ledger, "filing.record", f941)
-	const correction = { period: "2026Q1", mailedOn: "2026-05-01", tracking: "9400100000000000000004" }
+	const correction = {
+		form: "F941",
+		period: "2026Q1",
+		mailedOn: "2026-05-01",
+		tracking: "9400100000000000000004"
+	}
+	await assert.rejects(op(ledger, "filing.correct", correction), { code: "NothingToCorrect" })
+	await op(ledger, "payroll.correct", { paidOn: "2026-01-09", fit: "1.00" })
 	assert.deepEqual(await twice(ledger, "filing.correct", correction), correction)
 	await assert.rejects(op(ledger, "filing.correct", { ...correction, tracking: "9400100000000000000005" }), {
 		code: "Corrected"
 	})
+	await assert.rejects(op(ledger, "filing.correct", { ...correction, form: "C3" }), { code: "InvalidInput" })
 
 	const facts = await read(ledger)
 	const filed = (form: string) => facts.Filing.find((row) => row.form === form)?.id
@@ -115,13 +123,10 @@ test("each write round-trips and an identical re-run is no change", async () => 
 	assert.equal(figures.length, 18)
 	assert.equal(figures.find((row) => row.line === "F941_16_3")?.value, 0n)
 	assert.equal(facts.FiledFigures.filter((row) => row.filing === filed("C3")).length, 7)
-	assert.deepEqual(facts.CorrectedFigures.map((row) => row.line).sort(), [
-		"F941_2",
-		"F941_3",
-		"F941_5a1",
-		"F941_5c1",
-		"F941_7"
-	])
+	assert.deepEqual(
+		facts.CorrectedFigures.map(({ line, value }) => [line, value]),
+		[["F941_3", 100n]]
+	)
 	assert.equal((await op(ledger, "status", { asOf: "2026-01-09" })).asOf, "2026-01-09")
 	assert.equal((await op(ledger, "report", { year: 2026, quarter: 1 })).period, "2026Q1")
 })

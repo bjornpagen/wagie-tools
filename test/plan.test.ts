@@ -1,6 +1,10 @@
 import assert from "node:assert/strict"
 import { before, test } from "node:test"
-import { ledger2026, op, paid, sendMoney } from "./support.ts"
+import { parseDollars as $ } from "../src/core/boundary.ts"
+import { yearSpan } from "../src/core/time.ts"
+import { insert, remove } from "../src/db.ts"
+import { filingId } from "../src/ops.ts"
+import { commit, ledger2026, op, paid, read, sendMoney } from "./support.ts"
 
 /* The plan's books: Roth basis enters as wires and leaves in whole-account
  * sweeps. $500.00 of Roth deferral, then after-tax wires that Carry converts
@@ -48,13 +52,17 @@ test("the 1099-R reports each account's way out; the after-tax conversions are i
 	assert.deepEqual(forms.F1099R?.lines, {
 		F1099R_Pretax_G_1: "2000.00",
 		F1099R_Pretax_G_2a: "2000.00",
+		F1099R_Pretax_G_2b: 0,
 		F1099R_Pretax_G_5: "0.00",
 		F1099R_AfterTax_G_1: "2150.00",
 		F1099R_AfterTax_G_2a: "0.00",
+		F1099R_AfterTax_G_2b: 0,
 		F1099R_AfterTax_G_5: "2150.00",
 		F1099R_Roth_H_1: "2650.00",
 		F1099R_Roth_H_2a: "0.00",
-		F1099R_Roth_H_5: "2500.00"
+		F1099R_Roth_H_2b: 0,
+		F1099R_Roth_H_5: "2500.00",
+		F1099R_Roth_H_11: 2026
 	})
 	assert.deepEqual(forms.F1096?.lines, { F1096_3: 3, F1096_5: "6800.00" })
 	assert.deepEqual(
@@ -107,4 +115,81 @@ test("plan activity makes the 1099-R and 1096 due", async () => {
 			}
 		]
 	)
+})
+
+test("a 1099-R filed wrong is corrected box by box, with the 1096 that transmits it", async () => {
+	const own = await ledger2026()
+	await op(own, "transfer.record", {
+		kind: "AfterTax",
+		year: 2026,
+		mercury: sendMoney(),
+		sentOn: "2026-01-20",
+		amount: "1000.00"
+	})
+	await op(own, "plan.rollover", { account: "Roth", on: "2026-02-02", gross: "1100.00" })
+	await op(own, "filing.record", { form: "F1099R", period: "2026", method: "Furnished", on: "2027-01-20" })
+	// As filed: the Roth sweep's earnings reported as basis, both forms marked
+	// a total distribution, box 11 blank.
+	const id = filingId("F1099R", yearSpan(2026))
+	const wrong = {
+		F1099R_AfterTax_G_2b: 1n,
+		F1099R_Roth_H_2b: 1n,
+		F1099R_Roth_H_5: $("1100.00"),
+		F1099R_Roth_H_11: 0n
+	}
+	const filed = (await read(own)).FiledFigures.filter(
+		(row) => row.filing === id && Object.hasOwn(wrong, row.line)
+	)
+	await commit(own, [
+		...remove("FiledFigures", ...filed),
+		...insert(
+			"FiledFigures",
+			...filed.map((row) => ({ ...row, value: wrong[row.line as keyof typeof wrong] }))
+		)
+	])
+	const restated = [
+		{ line: "F1099R_AfterTax_G_2b", original: 1, corrected: 0, difference: -1 },
+		{ line: "F1099R_Roth_H_2b", original: 1, corrected: 0, difference: -1 },
+		{ line: "F1099R_Roth_H_5", original: "1100.00", corrected: "1000.00", difference: "-100.00" },
+		{ line: "F1099R_Roth_H_11", original: 0, corrected: 2026, difference: 2026 }
+	]
+	const transmittal = { count: 2, gross: "2100.00" }
+	const mismatched = async () =>
+		((await op(own, "status", { asOf: "2027-01-21" })).mismatches as { line: string; next?: string }[]).map(
+			({ line, next }) => [line, next]
+		)
+	assert.deepEqual(await mismatched(), [
+		["F1099R_AfterTax_G_2b", "filing.correct"],
+		["F1099R_Roth_H_2b", "filing.correct"],
+		["F1099R_Roth_H_5", "filing.correct"],
+		["F1099R_Roth_H_11", "filing.correct"]
+	])
+	const view = async () =>
+		(
+			(await op(own, "report", { year: 2026 })).forms as {
+				F1099R: { correction?: object; correctionDue?: object }
+			}
+		).F1099R
+	assert.deepEqual((await view()).correctionDue, { lines: restated, transmittal })
+
+	const mailed = {
+		form: "F1099R",
+		period: "2026",
+		mailedOn: "2027-02-10",
+		tracking: "9400100000000000000009"
+	}
+	assert.equal((await op(own, "filing.correct", mailed)).outcome, "committed")
+	assert.equal((await op(own, "filing.correct", mailed)).outcome, "no-change")
+	await assert.rejects(op(own, "filing.correct", { ...mailed, tracking: "9400100000000000000010" }), {
+		code: "Corrected"
+	})
+	assert.deepEqual(await mismatched(), [])
+	const { correction, correctionDue } = await view()
+	assert.deepEqual(correction, {
+		mailedOn: "2027-02-10",
+		tracking: mailed.tracking,
+		lines: restated,
+		transmittal
+	})
+	assert.equal(correctionDue, undefined)
 })

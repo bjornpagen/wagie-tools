@@ -56,7 +56,8 @@ const files = (electronic: boolean, certifiedMail: boolean, furnished: boolean) 
 /** Every return the ledger files. A return is due on the next business day
  * after day `dueDay` (clamped to the month) of the month `dueOffset` months
  * after the month holding the period's last day, and may be filed only the
- * ways its flags allow. A 941-X is a `Correction`, not a form. */
+ * ways its flags allow. A 941-X or a corrected 1099-R is a `Correction`, not
+ * a form. */
 export const Form = closed(
 	"Form",
 	["F941", "F940", "W2", "W3", "C3", "F1099R", "F1096"],
@@ -153,26 +154,33 @@ export const formLines = {
 	F1099R: [
 		"F1099R_Pretax_G_1",
 		"F1099R_Pretax_G_2a",
+		"F1099R_Pretax_G_2b",
 		"F1099R_Pretax_G_5",
 		"F1099R_AfterTax_G_1",
 		"F1099R_AfterTax_G_2a",
+		"F1099R_AfterTax_G_2b",
 		"F1099R_AfterTax_G_5",
 		"F1099R_Roth_H_1",
 		"F1099R_Roth_H_2a",
-		"F1099R_Roth_H_5"
+		"F1099R_Roth_H_2b",
+		"F1099R_Roth_H_5",
+		"F1099R_Roth_H_11"
 	],
 	F1096: ["F1096_3", "F1096_5"]
 } as const satisfies { readonly [F in FormHandle]: readonly string[] }
 export type LineHandle = (typeof formLines)[FormHandle][number]
 /** The 941 lines a 941-X restates: wages, FIT, the taxable wages and the
  * fractions of cents. Every other line follows from these. */
-export const correctable = [
+export const correctable941 = [
 	"F941_2",
 	"F941_3",
 	"F941_5a1",
 	"F941_5c1",
 	"F941_7"
 ] as const satisfies readonly LineHandle[]
+/** The lines a correction may restate: a 941-X's, and every box of a 1099-R,
+ * which is corrected by filing it again marked CORRECTED. */
+export const correctable = [...correctable941, ...formLines.F1099R] as const satisfies readonly LineHandle[]
 const lineHandles = [
 	...formLines.F941,
 	...formLines.F940,
@@ -396,9 +404,11 @@ export const Furnished = relation("Furnished", { filing: uuid, on: i64 })
 /** Every line of a return exactly as filed. Once filed, a return's liability
  * line is what its period owes. */
 export const FiledFigures = relation("FiledFigures", { filing: uuid, line: closedId(Line), value: i64 })
-/** A 941-X: the correction of a filed 941, mailed certified. */
+/** The correction of a filed return, mailed certified: a 941-X for a 941, or
+ * corrected 1099-Rs with the 1096 that transmits them. */
 export const Correction = relation("Correction", { filing: uuid, mailedOn: i64, tracking: str })
-/** The correctable lines as corrected. The originals are the 941's figures. */
+/** The lines a correction restates, as corrected. Every other line stands as
+ * filed. */
 export const CorrectedFigures = relation("CorrectedFigures", {
 	filing: uuid,
 	line: closedId(Line),
@@ -650,14 +660,18 @@ export const ledger = schema("WagieTools", relations, [
 		)
 	),
 
-	// A 941-X corrects a 941 and restates every correctable line.
-	contained(on(Correction, "filing"), on(select(Filing, { form: "F941" }), "id")),
+	// A correction restates at least one correctable line of the return it
+	// corrects; a return without correctable lines can't be corrected.
+	contained(on(Correction, "filing"), on(Filing, "id")),
 	contained(on(CorrectedFigures, "filing"), on(Correction, "filing")),
 	contained(on(CorrectedFigures, "line"), on(select(Line, { correctable: true }), "id")),
-	capacity(on(Correction, "filing"), {
-		from: on(CorrectedFigures, "filing"),
-		within: within(BigInt(correctable.length))
-	}),
+	...correctable.map((line) =>
+		contained(
+			on(select(CorrectedFigures, { line }), "filing"),
+			on(select(Filing, { form: formOfLine[line] }), "id")
+		)
+	),
+	capacity(on(Correction, "filing"), { from: on(CorrectedFigures, "filing"), within: within(1n, "*") }),
 
 	// The plan's books: only hand-swept accounts are swept, never for nothing.
 	contained(on(Rollover, "account"), on(select(PlanAccount, { implied: false }), "id")),

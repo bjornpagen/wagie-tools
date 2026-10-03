@@ -1,11 +1,31 @@
+import type { Fact } from "@bjornpagen/bumbledb"
 import { paychecks } from "./check.ts"
 import { formatDollars } from "./core/boundary.ts"
-import { covers, quarterSpan, type Span, sameSpan, yearOf, yearSpan } from "./core/time.ts"
+import { covers, quarterSpan, sameSpan, yearOf, yearSpan } from "./core/time.ts"
 import { MAX_U64, sum } from "./core/values.ts"
 import type { Facts } from "./db.ts"
-import { correction, figures, formatLine, periodOf } from "./forms.ts"
+import {
+	column4,
+	correctionDue,
+	figures,
+	formatLine,
+	latest,
+	mailed,
+	periodOf,
+	type Restatement,
+	restated,
+	transmittal
+} from "./forms.ts"
 import { sweeps } from "./plan.ts"
-import { Form, type FormHandle, Jurisdiction, type LineHandle, type Role } from "./schema.ts"
+import {
+	type Filing,
+	Form,
+	type FormHandle,
+	Jurisdiction,
+	type LineHandle,
+	PlanAccount,
+	type Role
+} from "./schema.ts"
 
 /* A period's returns as the ledger computes them, headed by who they name,
  * with the sums and rows behind them. */
@@ -24,24 +44,41 @@ const named: { readonly [F in FormHandle]: readonly (typeof Role.handles)[number
 const lineValues = (values: ReadonlyMap<LineHandle, bigint>) =>
 	Object.fromEntries([...values].map(([line, value]) => [line, formatLine(line, value)]))
 
-/** A 941-X: each correctable line as filed and as corrected, and the tax each
- * difference carries; line 27 is their sum. */
-const corrected = (facts: Facts, span: Span) => {
-	const filing = facts.Filing.find((row) => row.form === "F941" && sameSpan(row.period, span))
-	const mailed = filing && facts.Correction.find((row) => row.filing === filing.id)
-	if (!filing || !mailed) return undefined
-	const { rows, owed } = correction(facts, filing.id)
-	return {
-		mailedOn: mailed.mailedOn,
-		tracking: mailed.tracking,
-		lines: rows.map((row) => ({
+/** A filed return's corrections: the one mailed, each line it restates as
+ * filed and as corrected; and the one the ledger now calls for, each line as
+ * the return stands and as it should. A 941-X adds the tax each difference
+ * carries and line 27; corrected 1099-Rs add the 1096 that transmits them. */
+const correctionsOf = (facts: Facts, filing: Fact<typeof Filing>) => {
+	const view = (corrected: ReadonlyMap<LineHandle, bigint>, rows: readonly Restatement[]) => {
+		const shown = (row: Restatement) => ({
 			line: row.line,
 			original: formatLine(row.line, row.original),
 			corrected: formatLine(row.line, row.corrected),
-			difference: formatLine(row.line, row.difference),
-			tax: formatDollars(row.tax)
-		})),
-		line27: formatDollars(owed)
+			difference: formatLine(row.line, row.difference)
+		})
+		if (filing.form !== "F941")
+			return {
+				lines: rows.map(shown),
+				...(filing.form === "F1099R" ? { transmittal: transmittal(corrected, rows) } : {})
+			}
+		const x = column4(facts, filing, rows)
+		return {
+			lines: x.rows.map((row) => ({ ...shown(row), tax: formatDollars(row.tax) })),
+			line27: formatDollars(x.owed)
+		}
+	}
+	const sent = facts.Correction.find((row) => row.filing === filing.id)
+	const stands = latest(facts, filing.id)
+	const due = correctionDue(facts, filing)
+	return {
+		...(sent && {
+			correction: {
+				mailedOn: sent.mailedOn,
+				tracking: sent.tracking,
+				...view(stands, mailed(facts, filing.id))
+			}
+		}),
+		...(due.size > 0 && { correctionDue: view(new Map([...stands, ...due]), restated(stands, due)) })
 	}
 }
 
@@ -104,6 +141,7 @@ export const report = (facts: Facts, year: number, quarter?: number) => {
 				const account = Jurisdiction.axioms[state].state
 					? facts.Registration.find((row) => row.state === state)?.number
 					: undefined
+				const filed = facts.Filing.find((row) => row.form === form && sameSpan(row.period, span))
 				return [
 					form,
 					{
@@ -112,7 +150,17 @@ export const report = (facts: Facts, year: number, quarter?: number) => {
 							return found ? [{ role, name: found.name, tin: found.tin, address: found.address }] : []
 						}),
 						...(account === undefined ? {} : { account }),
-						lines: lineValues(figures(form, period))
+						...(form === "F1099R"
+							? {
+									accounts: PlanAccount.handles.map((plan) => ({
+										account: plan,
+										code: PlanAccount.axioms[plan].code,
+										number: facts.Custody.find((row) => row.account === plan)?.number ?? "none"
+									}))
+								}
+							: {}),
+						lines: lineValues(figures(form, period)),
+						...(filed === undefined ? {} : correctionsOf(facts, filed))
 					}
 				]
 			})
@@ -123,7 +171,7 @@ export const report = (facts: Facts, year: number, quarter?: number) => {
 						.filter((sweep) => yearOf(sweep.on) === year)
 						.map(({ account, on, gross, taxable, basis }) => ({ account, on, gross, taxable, basis }))
 				}
-			: { correction: corrected(facts, span) }),
+			: {}),
 		paychecks: paychecks(facts)
 			.filter((check) => covers(span, check.wage.paidOn.start))
 			.map((check) => ({

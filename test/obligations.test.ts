@@ -218,6 +218,7 @@ test("a changed paycheck in a filed quarter opens a 941-X; its line 27 is owed u
 	await op(ledger, "payroll.correct", { paidOn: "2026-01-09", fit: "50.01" })
 	assert.deepEqual(federal941(await blockers(ledger, "2026-04-02")), ["File a 941-X"])
 	await op(ledger, "filing.correct", {
+		form: "F941",
 		period: "2026Q1",
 		mailedOn: "2026-04-03",
 		tracking: "9400100000000000000002"
@@ -252,6 +253,7 @@ test("payments clear what a quarter owes in the order it arose", async () => {
 	await file941(ledger)
 	await op(ledger, "payroll.correct", { paidOn: "2026-03-06", fit: "10.01" })
 	await op(ledger, "filing.correct", {
+		form: "F941",
 		period: "2026Q1",
 		mailedOn: "2026-04-03",
 		tracking: "9400100000000000000002"
@@ -319,13 +321,15 @@ test("a 941-X owes its column 4, even a cent away from a recompute", async () =>
 		amount: "0.04"
 	})
 	await op(ledger, "filing.correct", {
+		form: "F941",
 		period: "2026Q1",
 		mailedOn: "2026-05-01",
 		tracking: "9400100000000000000002"
 	})
 	const report = await op(ledger, "report", { year: 2026, quarter: 1 })
 	assert.equal((report.forms as { F941: { lines: { F941_12: string } } }).F941.lines.F941_12, "153.02")
-	assert.equal((report.correction as { line27: string }).line27, "0.00")
+	const forms = report.forms as { F941: { correction: { line27: string } } }
+	assert.equal(forms.F941.correction.line27, "0.00")
 	assert.deepEqual(federal941(await blockers(ledger, "2026-05-01")), [])
 	assert.deepEqual((await status(ledger, "2026-05-01")).credits, [])
 })

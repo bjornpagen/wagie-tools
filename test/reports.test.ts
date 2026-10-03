@@ -120,7 +120,7 @@ test("the W-2 reports Roth in box 12 AA and wages including it, naming both part
 	)
 })
 
-test("a 941-X shows each line as filed and corrected, its tax, and line 27", async () => {
+test("a 941-X shows each line it restates, as filed and corrected, its tax, and line 27", async () => {
 	const ledger = await ledger2026()
 	await paid(ledger, "2026-01-09", { by: "gross", gross: "1000.00" })
 	await deposit(ledger, "2026Q1", "153.01", "2026-02-10")
@@ -132,21 +132,25 @@ test("a 941-X shows each line as filed and corrected, its tax, and line 27", asy
 		tracking: "9400100000000000000001"
 	})
 	await op(ledger, "payroll.correct", { paidOn: "2026-01-09", fit: "10.01" })
+	const f941 = async () =>
+		((await op(ledger, "report", { year: 2026, quarter: 1 })).forms as { F941: { [key: string]: unknown } })
+			.F941
+	const lines = [{ line: "F941_3", original: "0.01", corrected: "10.01", difference: "10.00", tax: "10.00" }]
+	assert.deepEqual((await f941()).correctionDue, { lines, line27: "10.00" })
 	await op(ledger, "filing.correct", {
+		form: "F941",
 		period: "2026Q1",
 		mailedOn: "2026-05-01",
 		tracking: "9400100000000000000002"
 	})
-	const { correction } = await op(ledger, "report", { year: 2026, quarter: 1 })
-	const { lines, ...mailed } = correction as { lines: { line: string }[] }
-	assert.deepEqual(mailed, { mailedOn: "2026-05-01", tracking: "9400100000000000000002", line27: "10.00" })
-	assert.deepEqual(lines, [
-		{ line: "F941_2", original: "1000.00", corrected: "1000.00", difference: "0.00", tax: "0.00" },
-		{ line: "F941_3", original: "0.01", corrected: "10.01", difference: "10.00", tax: "10.00" },
-		{ line: "F941_5a1", original: "1000.00", corrected: "1000.00", difference: "0.00", tax: "0.00" },
-		{ line: "F941_5c1", original: "1000.00", corrected: "1000.00", difference: "0.00", tax: "0.00" },
-		{ line: "F941_7", original: "0.00", corrected: "0.00", difference: "0.00", tax: "0.00" }
-	])
+	const { correction, correctionDue } = await f941()
+	assert.deepEqual(correction, {
+		mailedOn: "2026-05-01",
+		tracking: "9400100000000000000002",
+		lines,
+		line27: "10.00"
+	})
+	assert.equal(correctionDue, undefined)
 })
 
 test("the year shows its policy, and tax payments their tracker or outside Mercury", async () => {

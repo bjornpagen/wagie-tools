@@ -38,8 +38,9 @@ never stored.
   clears money owed; only payments do, and a penalty never pays tax.
 - **A filing** records how it was filed (certified mail, e-file, or furnished)
   and every line as filed. Once filed, its liability line is what the period
-  owes. A 941-X restates the 941's correctable lines, and its line 27 is owed
-  when mailed.
+  owes. A correction restates only the lines that changed: a 941-X, whose
+  line 27 is owed when mailed, or corrected 1099-Rs, sent with their own 1096.
+  `report` shows a correction before it is mailed.
 - **The 941 is computed the IRS way**: FICA priced on the quarter's totals,
   line 7 carrying the rounding of the employee share, and each month of line 16
   its paychecks' tax, the last month absorbing the quarter's cent.

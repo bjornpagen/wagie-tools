@@ -299,16 +299,26 @@ test("one filing per form and period", () =>
 		"functionality"
 	))
 
-test("a 941-X corrects a 941 and restates exactly its correctable lines", async () => {
+test("a correction restates at least one correctable line of the return it corrects", async () => {
 	const correction = (filing: Uuid) =>
 		insert("Correction", { filing, mailedOn: parseDate("2026-05-01"), tracking: "9400" })
 	const restated = (filing: Uuid, lines: readonly LineHandle[]) =>
 		insert("CorrectedFigures", ...lines.map((line) => ({ filing, line, value: 1n })))
-	const five: LineHandle[] = ["F941_2", "F941_3", "F941_5a1", "F941_5c1", "F941_7"]
-	await refuses([...correction(c3), ...restated(c3, five)], "containment")
-	await refuses([...correction(f941), ...restated(f941, [...five.slice(1), "F941_12"])], "containment")
-	await refuses([...correction(f941), ...restated(f941, five.slice(1))], "capacity")
-	assert.equal(await judge(ledger, [...correction(f941), ...restated(f941, five)]), "admitted")
+	await refuses([...correction(c3), ...restated(c3, ["C3_tax"])], "containment")
+	await refuses([...correction(f941), ...restated(f941, ["F941_12"])], "containment")
+	await refuses([...correction(f941), ...restated(f941, ["F1099R_Roth_H_5"])], "containment")
+	await refuses(correction(f941), "capacity")
+	assert.equal(await judge(ledger, [...correction(f941), ...restated(f941, ["F941_3"])]), "admitted")
+	const r = filingId("F1099R", yearSpan(2025))
+	assert.equal(
+		await judge(ledger, [
+			...insert("Filing", { id: r, form: "F1099R", period: yearSpan(2025), method: "Attested" }),
+			...figuresOf(r, formLines.F1099R),
+			...correction(r),
+			...restated(r, ["F1099R_Roth_H_5", "F1099R_Roth_H_11"])
+		]),
+		"admitted"
+	)
 })
 
 test("a sweep empties a hand-swept account and moves something", async () => {

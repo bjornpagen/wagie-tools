@@ -26,7 +26,8 @@ The transaction UUID on a wire receipt is not a Tracking ID and is refused.
 the op that clears it; `upcoming` is what opens later; the rest is the year so
 far (salary against target, Roth and after-tax room, Roth basis awaiting a
 sweep, distributions, payments, credits, overpaid paychecks, filed figures that
-no longer match). Payroll is blocked until every blocker is gone.
+no longer match, each naming `filing.correct` when a correction fixes it).
+Payroll is blocked until every blocker is gone.
 
 ## Setup
 
@@ -164,9 +165,29 @@ gross. Then follow the blockers:
 - underpaid: wire the difference and `transfer.record` it as `NetPay`;
 - overpaid: nothing to do; the next `payroll.post` recovers it;
 - a deposit short: pay it;
-- a filed quarter's wages or FIT changed: mail a 941-X and record it with
-  `filing.correct '{"period":"2026Q3","mailedOn":"…","tracking":"…"}'`; then
-  pay its line 27 as a `Balance`.
+- a filed quarter's wages or FIT changed: the quarter's `report` shows the
+  941-X under `forms.F941.correctionDue`, each line as filed and as it should
+  be, with column 4 and line 27. Mail it by certified mail, record it, then pay
+  its line 27 as a `Balance`:
+
+  ```sh
+  node src/cli.ts filing.correct '{"form":"F941","period":"2026Q3","mailedOn":"…","tracking":"…"}'
+  ```
+
+A filed 1099-R that no longer matches the plan's books shows in `status` under
+`mismatches`; it doesn't block payroll. The year's `report` shows the
+correction under `forms.F1099R.correctionDue`: each box that changes, and the
+1096 that transmits the corrected forms (`count`, and `gross`, their box 1
+total). Prepare each form with a changed box again, marked CORRECTED, with
+every box as `forms.F1099R.lines` shows it. Mail Copy A with the new 1096 by
+certified mail, give the owner Copy B, and record it:
+
+```sh
+node src/cli.ts filing.correct '{"form":"F1099R","period":"2025","mailedOn":"…","tracking":"…"}'
+```
+
+A correction restates only the lines that changed; the rest stand as filed. A
+return takes one correction.
 
 ## Backup
 

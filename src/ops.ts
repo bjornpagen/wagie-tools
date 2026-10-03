@@ -16,7 +16,7 @@ import {
 } from "./core/time.ts"
 import { canonicalJson, MAX_I64, MAX_U64, min, naturalId, refuse, sum } from "./core/values.ts"
 import * as Db from "./db.ts"
-import { figures, periodOf } from "./forms.ts"
+import { correctionDue, figures, periodOf } from "./forms.ts"
 import { CheckInput, fitting, priceCheck } from "./gross-up.ts"
 import { type Obligation, obligations, status } from "./obligations.ts"
 import { sweeps } from "./plan.ts"
@@ -53,12 +53,6 @@ const wageOn = (facts: Facts, paidOn: bigint) => facts.Wage.find((wage) => wage.
 /** The year's gross paid before a day: where a paycheck that day starts. */
 const ytdBefore = (facts: Facts, year: bigint, paidOn: bigint) =>
 	sum(facts.Wage.filter((wage) => wage.year === year && wage.paidOn.start < paidOn).map((wage) => wage.gross))
-const present = (facts: Facts, edits: readonly Edit[]) =>
-	edits.every(
-		(edit) =>
-			edit.op === "insert" &&
-			facts[edit.relation].some((fact) => canonicalJson(fact) === canonicalJson(edit.fact))
-	)
 const describe = (item: Obligation) => {
 	const when = item.paidOn !== undefined ? formatDate(item.paidOn) : item.period && formatPeriod(item.period)
 	return `${item.what}${when ? ` ${when}` : ""}${item.amount === undefined ? "" : `: ${formatDollars(item.amount)}`}`
@@ -411,31 +405,43 @@ const fileReturn =
 		}
 	}
 
-const CorrectionInput = Schema.Struct({ period: Period, mailedOn: Day, tracking: Text })
-/** A 941-X mailed for a quarter: the correctable lines as the ledger computes
- * them now. The originals are the 941's own figures. */
+/** The returns a correction can be filed for: those with correctable lines. */
+const correctableForms = S.Form.handles.filter((form) =>
+	S.correctable.some((line) => S.Line.axioms[line].form === form)
+)
+const CorrectionInput = Schema.Struct({
+	form: Schema.Literals(correctableForms),
+	period: Period,
+	mailedOn: Day,
+	tracking: Text
+})
+/** A correction mailed for a filed return: a 941-X, or corrected 1099-Rs with
+ * their own 1096. It restates each correctable line the ledger now computes
+ * differently; every other line stands as filed. */
 const correctReturn =
 	(request: typeof CorrectionInput.Type) =>
 	(facts: Facts): Db.Plan<object> => {
-		requirePeriod(request.period, S.Form.axioms.F941.period)
+		const { form, period, mailedOn, tracking } = request
+		requirePeriod(period, S.Form.axioms[form].period)
 		const filing =
-			facts.Filing.find((row) => row.form === "F941" && sameSpan(row.period, request.period)) ??
-			refuse("F941Missing", `No 941 is recorded for ${formatPeriod(request.period)}`)
-		const current = figures("F941", periodOf(facts, request.period))
-		const edits = [
-			...Db.insert("Correction", {
-				filing: filing.id,
-				mailedOn: request.mailedOn,
-				tracking: request.tracking
-			}),
-			...Db.insert(
-				"CorrectedFigures",
-				...S.correctable.map((line) => ({ filing: filing.id, line, value: current.get(line) ?? 0n }))
-			)
-		]
-		if (!present(facts, edits) && facts.Correction.some((row) => row.filing === filing.id))
-			refuse("Corrected", `${formatPeriod(request.period)} already has a 941-X`)
-		return { edits, result: request }
+			facts.Filing.find((row) => row.form === form && sameSpan(row.period, period)) ??
+			refuse("FilingMissing", `No ${form} is recorded for ${formatPeriod(period)}`)
+		const mailed = facts.Correction.find((row) => row.filing === filing.id)
+		if (mailed?.mailedOn === mailedOn && mailed.tracking === tracking) return { edits: [], result: request }
+		if (mailed) refuse("Corrected", `${form} ${formatPeriod(period)} already has a correction`)
+		const due = correctionDue(facts, filing)
+		if (due.size === 0)
+			refuse("NothingToCorrect", `${form} ${formatPeriod(period)} as filed matches what it reports`)
+		return {
+			edits: [
+				...Db.insert("Correction", { filing: filing.id, mailedOn, tracking }),
+				...Db.insert(
+					"CorrectedFigures",
+					...[...due].map(([line, value]) => ({ filing: filing.id, line, value }))
+				)
+			],
+			result: request
+		}
 	}
 
 // ── setup and policy ───────────────────────────────────────────────────────
@@ -646,7 +652,11 @@ export const ops: { readonly [name: string]: Op } = {
 		writing(rollover)
 	),
 	"filing.record": op("Record a filed return with every line as filed", FilingInput, writing(fileReturn)),
-	"filing.correct": op("Record a 941-X mailed for a quarter", CorrectionInput, writing(correctReturn)),
+	"filing.correct": op(
+		"Record a mailed correction: a 941-X, or corrected 1099-Rs with their 1096",
+		CorrectionInput,
+		writing(correctReturn)
+	),
 	status: op(
 		"What blocks payroll, what comes due next, and the year so far",
 		Schema.Struct({ asOf: Schema.optional(Day) }),

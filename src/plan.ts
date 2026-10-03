@@ -51,6 +51,16 @@ export const awaitingSweep = (facts: Facts) => {
 	)
 }
 
+/** The first year Roth basis entered the plan, which starts the designated
+ * Roth account's 5-taxable-year period (1099-R box 11). */
+export const firstRothYear = (facts: Facts): bigint | undefined =>
+	contributions(facts)
+		.map((row) => BigInt(yearOf(row.sentOn)))
+		.reduce<bigint | undefined>(
+			(first, year) => (first === undefined || year < first ? year : first),
+			undefined
+		)
+
 /** A year's 1099-R, one form per account money left: an implied account's
  * conversions follow from its wires; every other account reports its sweeps. */
 export const distributions = (facts: Facts, year: bigint) => {
