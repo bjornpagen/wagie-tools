@@ -1,5 +1,5 @@
 import { Effect, Schema, SchemaGetter, SchemaIssue } from "effect"
-import { formatDollars, parseDollars } from "../core/boundary.ts"
+import { formatDollars, formatPercent, parseDollars, parsePercent } from "../core/boundary.ts"
 import { formatDate, formatPeriod, parseDate, parsePeriod, type Span } from "../core/time.ts"
 import { MAX_U64, Refusal } from "../core/values.ts"
 
@@ -55,13 +55,8 @@ export const Period = textCodec(
 	(span: Span) => formatPeriod(span)
 )
 export const Year = Schema.Int.check(Schema.isBetween({ minimum: 1970, maximum: 9998 }))
-/** Basis points over 10,000: 620 is 6.2%. */
-export const Rate = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 10_000 })).pipe(
-	Schema.decodeTo(Schema.BigInt, {
-		decode: SchemaGetter.transform((value: number) => BigInt(value)),
-		encode: SchemaGetter.transform((value: bigint) => Number(value))
-	})
-)
+/** A percent "6.2" as parts per million. */
+export const Rate = textCodec('A percent, e.g. "6.2"', Schema.BigInt, parsePercent, formatPercent)
 export const Text = Schema.String.check(Schema.isPattern(/\S/)).annotate({ description: "Non-blank text" })
 
 /** Mercury's "Tracking ID", exactly as the mercury.csv column of that name: a

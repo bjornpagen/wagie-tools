@@ -23,6 +23,27 @@ export const formatDollars = (cents: bigint): string => {
 	return `${cents < 0n ? "-" : ""}${magnitude / 100n}.${(magnitude % 100n).toString().padStart(2, "0")}`
 }
 
+/** A rate is a percent at the boundary ("6.2", "1.45") and parts per million
+ * inside: a percent carries at most four decimals, so nothing is lost. */
+const PERCENT = /^(0|[1-9]\d{0,2})(?:\.(\d{1,4}))?$/
+export const PPM = 1_000_000n
+
+export const parsePercent = (text: string): bigint => {
+	const match = PERCENT.exec(text)
+	const ppm = match && BigInt(match[1] ?? "") * 10_000n + BigInt((match[2] ?? "").padEnd(4, "0"))
+	if (ppm === null || ppm > PPM)
+		throw new Refusal({
+			code: "InvalidRate",
+			message: `Use a percent of at most 100 with up to four decimals, e.g. "6.2": ${text}`
+		})
+	return ppm
+}
+
+export const formatPercent = (ppm: bigint): string => {
+	const fraction = (ppm % 10_000n).toString().padStart(4, "0").replace(/0+$/, "")
+	return fraction ? `${ppm / 10_000n}.${fraction}` : `${ppm / 10_000n}`
+}
+
 const isSpan = (value: unknown): value is { start: bigint; end: bigint } =>
 	typeof value === "object" &&
 	value !== null &&
@@ -41,6 +62,7 @@ export const encodeOutput = (value: unknown): unknown => {
 				case "Day":
 					return formatDate(item)
 				case "Rate":
+					return formatPercent(item)
 				case "Count":
 					return Number(item)
 				default:
@@ -51,17 +73,12 @@ export const encodeOutput = (value: unknown): unknown => {
 			}
 		}
 		if (isSpan(item) && name !== undefined) {
-			switch (unitFor(name)) {
-				case "MoneyRange":
-					return { start: formatDollars(item.start), end: formatDollars(item.end) }
-				case "Period":
-					return item.end === MAX_I64 ? `${formatDate(item.start)}/` : formatPeriod(item)
-				default:
-					throw new Refusal({
-						code: "UnitUnclassified",
-						message: `No unit for ${path}; add it to src/schema/units.ts`
-					})
-			}
+			if (unitFor(name) !== "Period")
+				throw new Refusal({
+					code: "UnitUnclassified",
+					message: `No unit for ${path}; add it to src/schema/units.ts`
+				})
+			return item.end === MAX_I64 ? `${formatDate(item.start)}/` : formatPeriod(item)
 		}
 		if (Array.isArray(item)) return item.map((entry, index) => walk(entry, name, `${path}[${index}]`))
 		if (typeof item === "object" && item !== null)

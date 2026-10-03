@@ -1,6 +1,6 @@
 ---
 name: wagie-tools
-description: Run payroll, wires, tax payments, filings, distributions and the mega backdoor Roth for Emu Farm LLC through the wagie-tools ledger's JSON ops.
+description: Run payroll, wires, tax payments, filings, distributions, the mega backdoor Roth and the plan's rollovers for Emu Farm LLC through the wagie-tools ledger's JSON ops.
 ---
 
 # Wagie Tools
@@ -11,6 +11,7 @@ node src/cli.ts                  # every op with a one-line summary
 ```
 
 - Money is dollars with two decimals, as a string: `"8000.00"`, `"0.01"`.
+- Rates are percents, as a string: `"6.2"`, `"1.45"`.
 - Days are `"YYYY-MM-DD"`. Periods are `"2026"`, `"2026Q3"` or `"2026-10"`.
 - Unknown keys refuse. A refusal prints `{code, message}` and exits 1.
 - Every write prints `"outcome": "committed"`, or `"no-change"` when the same
@@ -23,8 +24,34 @@ The transaction UUID on a wire receipt is not a Tracking ID and is refused.
 
 **Start with `status`.** Its `blockers` are what stops payroll today, each with
 the op that clears it; `upcoming` is what opens later; the rest is the year so
-far (salary against target, Roth and after-tax room, distributions, payments,
-credits, overpaid paychecks). Payroll is blocked until every blocker is gone.
+far (salary against target, Roth and after-tax room, Roth basis awaiting a
+sweep, distributions, payments, credits, overpaid paychecks, filed figures that
+no longer match). Payroll is blocked until every blocker is gone.
+
+## Setup
+
+`setup` creates the ledger once: the employer, the employee and the plan (each
+with name, TIN and address), the state registrations, where and since when the
+owner works, and the Carry account holding each plan account.
+
+```sh
+node src/cli.ts setup '{"employer":{"name":"…","tin":"…","address":"…"},"employee":{…},"plan":{…},"registrations":[{"state":"TX","number":"…"}],"employment":{"from":"2026-01-02","state":"TX"},"custody":{"Pretax":{"custodian":"Carry","number":"…"},"AfterTax":{…},"Roth":{…}}}'
+```
+
+## Each year's policy
+
+From December 1, `status` shows next year's policy as upcoming; from January 1
+it blocks. Set it per jurisdiction, each time whole:
+
+```sh
+node src/cli.ts policy.set '{"jurisdiction":"Federal","year":2027,"limits":{"deferralLimit":"…","additionsLimit":"…","compensationLimit":"…","wageCeiling":"200000.00"},"rates":{"SocialSecurity":{"rate":"6.2","base":"…"},"Medicare":{"rate":"1.45"},"FederalUnemployment":{"rate":"0.6","base":"7000.00"}}}'
+node src/cli.ts policy.set '{"jurisdiction":"TX","year":2027,"rates":{"TexasUnemployment":{"rate":"…","base":"9000.00"}}}'
+node src/cli.ts election.set '{"year":2027,"roth":"…","afterTax":"…","signedOn":"…"}'
+node src/cli.ts plan.set '{"year":2027,"salary":"…","fitPerCheck":"0.01"}'
+```
+
+A rate without a `base` taxes every dollar. The Roth and after-tax elections
+together stay within the year's 415(c) limit.
 
 ## Payroll
 
@@ -38,8 +65,8 @@ credits, overpaid paychecks). Payroll is blocked until every blocker is gone.
    ```
 
 3. Post it with the same input: `payroll.post`. It prints the wires to send.
-4. Send both wires from Mercury: net pay to the owner, the Roth deferral to
-   Carry Roth (QCRH000004).
+4. Send both wires from Mercury: net pay to the owner, the Roth deferral to the
+   Carry Roth account the wire names.
 5. Once they show as Sent, export the Mercury CSV and record each with its
    Tracking ID:
 
@@ -55,12 +82,15 @@ in EFTPS, and once the debit has posted in Mercury, export the Mercury CSV and
 record the payment with its EFT number and the debit's Tracking ID:
 
 ```sh
-node src/cli.ts tax.paid '{"tracker":"270667581302337","account":"Federal941","kind":"Deposit","period":"2026Q4","amount":"649.12","initiatedOn":"2026-11-12","mercury":"061036010012345","sentOn":"2026-11-13"}'
+node src/cli.ts tax.paid '{"tracker":"270000000000001","account":"Federal941","kind":"Deposit","period":"2026Q4","amount":"612.34","initiatedOn":"2026-11-12","mercury":"061036010000001","sentOn":"2026-11-13"}'
 ```
 
 `period` is the quarter the deposit pays (the year for `Federal940`). `kind` is
-`Deposit`, `Balance` (a balance due with a return or notice) or `Penalty` (a
-notice's penalty or interest, which never counts toward tax).
+`Deposit`, `Balance` (a balance due with a return, a 941-X or a notice) or
+`Penalty` (a notice's penalty or interest, which never counts toward tax).
+
+Once a quarter's 941 is filed, the months on its line 16 are what the quarter
+owes, whatever a later recompute says.
 
 ## Texas UI (TWC)
 
@@ -69,12 +99,23 @@ as `tracker`.
 
 ## Mega backdoor Roth
 
-Wire the after-tax contribution from Mercury to Carry's Mega Backdoor Roth
-account (QCEP000007), then record it with the Carry contribution year. It is an
-S-corp distribution, and Carry converts it in-plan.
+Wire the after-tax contribution from Mercury to the Carry after-tax account,
+then record it with the plan's contribution year. It is an S-corp
+distribution, and Carry converts it to Roth as it settles.
 
 ```sh
 node src/cli.ts transfer.record '{"kind":"AfterTax","year":2026,"mercury":"20261015MMQFMP4S000200","sentOn":"2026-10-15","amount":"5000.00"}'
+```
+
+## Rollover
+
+Every rollover sweeps a whole account into the owner's Roth IRA. Record each
+with the day and the amount that left; the basis it carries (the Roth deferral
+and after-tax wires since the last sweep) and its 1099-R lines follow. The
+after-tax account is never swept by hand: Carry converts it.
+
+```sh
+node src/cli.ts plan.rollover '{"account":"Roth","on":"2026-11-02","gross":"25000.00"}'
 ```
 
 ## Distribution
@@ -86,23 +127,22 @@ node src/cli.ts transfer.record '{"kind":"Distribution","mercury":"20261015MMQFM
 ## Quarter end
 
 1. `node src/cli.ts report '{"year":2026,"quarter":4}'` prints every line of
-   the 941 and the C-3.
+   the 941 and the C-3, headed by who they name.
 2. Prepare both from it. Mail the 941 by certified mail; file the C-3 online.
-   Keep the PDFs and the USPS receipt in Drive.
 3. Record them. The figures stored are the report's; if the return differs,
    fix the ledger first.
 
    ```sh
-   node src/cli.ts filing.record '{"form":"F941","period":"2026Q4","method":"CertifiedMail","mailedOn":"2027-01-20","tracking":"70201810000002650241"}'
-   node src/cli.ts filing.record '{"form":"C3","period":"2026Q4","method":"Electronic","on":"2027-01-15","confirmation":"40679135"}'
+   node src/cli.ts filing.record '{"form":"F941","period":"2026Q4","method":"CertifiedMail","mailedOn":"2027-01-20","tracking":"9400100000000000000001"}'
+   node src/cli.ts filing.record '{"form":"C3","period":"2026Q4","method":"Electronic","on":"2027-01-15","confirmation":"12345678"}'
    ```
 
 ## Year end
 
 `report '{"year":2026}'` prints the 940, W-2, W-3 and, when there was plan
-activity (after-tax contributions or a `plan.distribution`), the 1099-R and
-1096. Pay any FUTA balance (`tax.paid`, `Federal940`). Each form takes the
-methods it allows:
+activity (after-tax contributions or a rollover), the 1099-R and 1096, with the
+policy in force and the year's sweeps. Pay any FUTA balance (`tax.paid`,
+`Federal940`). Each form takes the methods it allows:
 
 | Form | Method |
 |---|---|
@@ -115,31 +155,18 @@ methods it allows:
 node src/cli.ts filing.record '{"form":"W2","period":"2026","method":"Furnished","on":"2027-01-20"}'
 ```
 
-A Carry rollover (H) or conversion (G) other than the after-tax conversions
-needs its 1099-R figures recorded:
-
-```sh
-node src/cli.ts plan.distribution '{"year":2026,"account":"Roth","code":"H","gross":"1000.00","taxable":"0.00"}'
-```
-
-From December 1, `status` lists next year's setup: `year.set` (rates, wage
-bases and limits), `plan.set` (salary target and FIT per paycheck) and
-`election.set` (the signed Carry election).
-
 ## Correction
 
-`payroll.correct` reprices a posted paycheck over the same earnings start:
-`fit` or `roth` on any paycheck, `gross` only on the year's latest. Then follow
-the blockers:
+`payroll.correct` reprices a posted paycheck: `fit` or `roth` on any paycheck,
+`gross` only on the year's latest. Social security and Medicare move only with
+gross. Then follow the blockers:
 
 - underpaid: wire the difference and `transfer.record` it as `NetPay`;
 - overpaid: nothing to do; the next `payroll.post` recovers it;
 - a deposit short: pay it;
-- a filed quarter changed: mail a 941-X and record it with
-  `filing.amend '{"period":"2026Q3","mailedOn":"…","tracking":"…"}'`.
-
-A grandfathered filing whose real details turn up takes them with
-`filing.upgrade`, with the same input as `filing.record`.
+- a filed quarter's wages or FIT changed: mail a 941-X and record it with
+  `filing.correct '{"period":"2026Q3","mailedOn":"…","tracking":"…"}'`; then
+  pay its line 27 as a `Balance`.
 
 ## Backup
 
@@ -147,4 +174,6 @@ A grandfathered filing whose real details turn up takes them with
 node src/cli.ts export        # private/Wagie Tools - CURRENT.facts.json
 ```
 
-`import '{"file":"…"}'` restores an export into a fresh ledger.
+`import '{"file":"…"}'` restores an export into a fresh ledger. An import is
+also how history enters: the span the ledger did not record, the filings
+attested inside it, and payments made outside Mercury.

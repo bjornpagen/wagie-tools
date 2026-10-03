@@ -40,6 +40,7 @@ export const Jurisdiction = closed(
 	{ state: bool },
 	{ Federal: { state: false }, TX: { state: true } }
 )
+export type JurisdictionHandle = (typeof Jurisdiction.handles)[number]
 export const Periodicity = closed("Periodicity", ["Month", "Quarter", "Year"])
 /** What makes a return due for a period: being employed in its jurisdiction,
  * paying wages in it, or plan activity in it. */
@@ -123,10 +124,6 @@ export const Form = closed(
 )
 export type FormHandle = (typeof Form.handles)[number]
 
-/** The 1099-R reports these moves: G is a direct rollover or an in-plan Roth
- * conversion, H a designated Roth rollover to a Roth IRA. The after-tax
- * conversion is implied by AfterTax transfers; the rest are recorded. */
-export const reportedMoves = ["Pretax_G", "AfterTax_G", "Roth_G", "Roth_H"] as const
 /** Every line of every form, in the form's order. `src/forms.ts` computes each. */
 export const formLines = {
 	F941: [
@@ -160,9 +157,6 @@ export const formLines = {
 		"F1099R_AfterTax_G_1",
 		"F1099R_AfterTax_G_2a",
 		"F1099R_AfterTax_G_5",
-		"F1099R_Roth_G_1",
-		"F1099R_Roth_G_2a",
-		"F1099R_Roth_G_5",
 		"F1099R_Roth_H_1",
 		"F1099R_Roth_H_2a",
 		"F1099R_Roth_H_5"
@@ -288,20 +282,24 @@ export const PaymentKind = closed("PaymentKind", ["Deposit", "Balance", "Penalty
 export const Funding = closed("Funding", ["Mercury", "OutsideMercury"])
 /** How a return was filed. Attested is history's: filed, but how is unknown. */
 export const Method = closed("Method", ["Electronic", "CertifiedMail", "Furnished", "Attested"])
-export const PlanAccount = closed("PlanAccount", ["Pretax", "AfterTax", "Roth"])
-/** Form 1099-R box 7: G direct rollover or conversion, H Roth to Roth IRA. */
+/** Form 1099-R box 7: G a direct rollover or in-plan Roth conversion, H a
+ * designated Roth rollover to a Roth IRA. */
 export const DistributionCode = closed("DistributionCode", ["G", "H"])
-/** The plan moves recorded for the 1099-R. */
-export const PlanMove = closed(
-	"PlanMove",
-	["Pretax_G", "Roth_G", "Roth_H"],
-	{ account: closedId(PlanAccount), code: closedId(DistributionCode) },
+/** The plan's accounts and the one way money leaves each: its 1099-R code;
+ * `taxed` when the move into a Roth is income (pretax money); `implied` when
+ * Carry converts every deposit as it settles, so its 1099-R follows from the
+ * AfterTax transfers and it is never swept by hand. */
+export const PlanAccount = closed(
+	"PlanAccount",
+	["Pretax", "AfterTax", "Roth"],
+	{ code: closedId(DistributionCode), taxed: bool, implied: bool },
 	{
-		Pretax_G: { account: "Pretax", code: "G" },
-		Roth_G: { account: "Roth", code: "G" },
-		Roth_H: { account: "Roth", code: "H" }
+		Pretax: { code: "G", taxed: true, implied: false },
+		AfterTax: { code: "G", taxed: false, implied: true },
+		Roth: { code: "H", taxed: false, implied: false }
 	}
 )
+export type PlanAccountHandle = (typeof PlanAccount.handles)[number]
 
 // ── Who and where ───────────────────────────────────────────────────────────
 
@@ -343,7 +341,13 @@ export const Election = relation("Election", { year: i64, roth: u64, afterTax: u
 
 /** One paycheck per day. Its place on the year's wage axis, [ytd, ytd + gross),
  * follows from the gross paid on earlier days, so it is never stored. */
-export const Wage = relation("Wage", { id: uuid, paidOn: interval(i64, 1n), year: i64, gross: u64, roth: u64 })
+export const Wage = relation("Wage", {
+	id: uuid,
+	paidOn: interval(i64, 1n),
+	year: i64,
+	gross: u64,
+	roth: u64
+})
 /** What each employee tax took from a paycheck, as assessed. FICA on a
  * paycheck that could not cover it was advanced and is recovered later. */
 export const Withholding = relation("Withholding", { wage: uuid, tax: closedId(Tax), amount: u64 })
@@ -400,15 +404,14 @@ export const CorrectedFigures = relation("CorrectedFigures", {
 	line: closedId(Line),
 	value: i64
 })
-/** A plan move that needs a 1099-R, as the plan reports it: gross (box 1),
- * taxable (box 2a) and the basis it carries (box 5). */
-export const PlanDistribution = relation("PlanDistribution", {
-	year: i64,
-	move: closedId(PlanMove),
-	gross: u64,
-	taxable: u64,
-	basis: u64
-})
+
+// ── The plan's books ────────────────────────────────────────────────────────
+
+/** A whole-account sweep of a plan account into the owner's Roth IRA. Roth
+ * basis enters the plan only as RothDeferral and AfterTax wires, so the basis a
+ * sweep carries is derived from the wires sent since the previous sweep and is
+ * never stored; a partial sweep cannot be written down. */
+export const Rollover = relation("Rollover", { account: closedId(PlanAccount), on: i64, gross: u64 })
 
 export const relations = {
 	Role,
@@ -426,7 +429,6 @@ export const relations = {
 	Method,
 	PlanAccount,
 	DistributionCode,
-	PlanMove,
 	Party,
 	Registration,
 	Employment,
@@ -453,7 +455,7 @@ export const relations = {
 	FiledFigures,
 	Correction,
 	CorrectedFigures,
-	PlanDistribution
+	Rollover
 }
 
 // ── Laws ───────────────────────────────────────────────────────────────────
@@ -505,7 +507,7 @@ export const ledger = schema("WagieTools", relations, [
 	key(Correction, ["filing"]),
 	key(Correction, ["tracking"]),
 	key(CorrectedFigures, ["filing", "line"]),
-	key(PlanDistribution, ["year", "move"]),
+	key(Rollover, ["account", "on"]),
 
 	// The rosters' columns name rosters.
 	contained(on(Form, "jurisdiction"), on(Jurisdiction, "id")),
@@ -518,8 +520,7 @@ export const ledger = schema("WagieTools", relations, [
 	contained(on(TaxAccount, "accrues"), on(Periodicity, "id")),
 	contained(on(TaxAccount, "liability"), on(Line, "id")),
 	contained(on(Tax, "account"), on(TaxAccount, "id")),
-	contained(on(PlanMove, "account"), on(PlanAccount, "id")),
-	contained(on(PlanMove, "code"), on(DistributionCode, "id")),
+	contained(on(PlanAccount, "code"), on(DistributionCode, "id")),
 
 	// Who and where: one of each party; registered wherever the owner works.
 	contained(on(Party, "role"), on(Role, "id")),
@@ -548,7 +549,11 @@ export const ledger = schema("WagieTools", relations, [
 	contained(on(Wage, "year"), on(Election, "year")),
 	capacity(on(Wage, "id"), { from: on(Wage, "id"), weight: weigh("gross"), within: within(1n, "*") }),
 	capacity(on(Wage, "id"), { from: on(Wage, "id"), weight: weigh("roth"), within: within(0n, ref("gross")) }),
-	capacity(on(Election, "year"), { from: on(Wage, "year"), weight: weigh("roth"), within: within(0n, ref("roth")) }),
+	capacity(on(Election, "year"), {
+		from: on(Wage, "year"),
+		weight: weigh("roth"),
+		within: within(0n, ref("roth"))
+	}),
 	capacity(on(TaxYear, "year"), {
 		from: on(Wage, "year"),
 		weight: weigh("gross"),
@@ -583,7 +588,11 @@ export const ledger = schema("WagieTools", relations, [
 		weight: weigh("amount"),
 		within: within(0n, ref("afterTax"))
 	}),
-	capacity(on(NetPay, "transfer"), { from: on(NetPay, "transfer"), weight: weigh("amount"), within: within(1n, "*") }),
+	capacity(on(NetPay, "transfer"), {
+		from: on(NetPay, "transfer"),
+		weight: weigh("amount"),
+		within: within(1n, "*")
+	}),
 	capacity(on(RothDeferral, "transfer"), {
 		from: on(RothDeferral, "transfer"),
 		weight: weigh("amount"),
@@ -635,7 +644,10 @@ export const ledger = schema("WagieTools", relations, [
 		})
 	),
 	...lineHandles.map((line) =>
-		contained(on(select(FiledFigures, { line }), "filing"), on(select(Filing, { form: formOfLine[line] }), "id"))
+		contained(
+			on(select(FiledFigures, { line }), "filing"),
+			on(select(Filing, { form: formOfLine[line] }), "id")
+		)
 	),
 
 	// A 941-X corrects a 941 and restates every correctable line.
@@ -647,22 +659,12 @@ export const ledger = schema("WagieTools", relations, [
 		within: within(BigInt(correctable.length))
 	}),
 
-	// Plan moves: what the plan reports, never more taxable or basis than gross.
-	contained(on(PlanDistribution, "move"), on(PlanMove, "id")),
-	capacity(on(PlanDistribution, ["year", "move"]), {
-		from: on(PlanDistribution, ["year", "move"]),
+	// The plan's books: only hand-swept accounts are swept, never for nothing.
+	contained(on(Rollover, "account"), on(select(PlanAccount, { implied: false }), "id")),
+	capacity(on(Rollover, ["account", "on"]), {
+		from: on(Rollover, ["account", "on"]),
 		weight: weigh("gross"),
 		within: within(1n, "*")
-	}),
-	capacity(on(PlanDistribution, ["year", "move"]), {
-		from: on(PlanDistribution, ["year", "move"]),
-		weight: weigh("taxable"),
-		within: within(0n, ref("gross"))
-	}),
-	capacity(on(PlanDistribution, ["year", "move"]), {
-		from: on(PlanDistribution, ["year", "move"]),
-		weight: weigh("basis"),
-		within: within(0n, ref("gross"))
 	})
 ])
 export default ledger

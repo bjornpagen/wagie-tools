@@ -1,10 +1,11 @@
 import type { Fact, NativeRuntime, Uuid } from "@bjornpagen/bumbledb"
 import { Effect, Schema } from "effect"
-import { type Check, grossOf, netOf, paychecks } from "./check.ts"
+import { bandsFor, type Check, jurisdictionOf, netOf, paychecks, stateOn } from "./check.ts"
 import { formatDollars } from "./core/boundary.ts"
 import {
 	formatDate,
 	formatPeriod,
+	monthOf,
 	point,
 	quarterOf,
 	type Span,
@@ -13,11 +14,12 @@ import {
 	yearOf,
 	yearSpan
 } from "./core/time.ts"
-import { canonicalJson, MAX_I64, min, naturalId, refuse, sum } from "./core/values.ts"
+import { canonicalJson, MAX_I64, MAX_U64, min, naturalId, refuse, sum } from "./core/values.ts"
 import * as Db from "./db.ts"
-import { correctable, figures, periodOf } from "./forms.ts"
-import { CheckInput, priceCheck } from "./gross-up.ts"
+import { figures, periodOf } from "./forms.ts"
+import { CheckInput, fitting, priceCheck } from "./gross-up.ts"
 import { type Obligation, obligations, status } from "./obligations.ts"
+import { sweeps } from "./plan.ts"
 import { report } from "./reports.ts"
 import {
 	Day,
@@ -44,22 +46,13 @@ export const wageId = (paidOn: bigint) => naturalId("wage", paidOn)
 export const filingId = (form: S.FormHandle, period: Span) =>
 	naturalId("filing", form, period.start, period.end)
 
-const rulesFor = (facts: Facts, year: number) =>
-	facts.TaxYear.find((row) => row.year === BigInt(year)) ??
-	refuse("TaxYearMissing", `Set ${year} first: year.set`)
+const limitsFor = (facts: Facts, year: bigint) =>
+	facts.TaxYear.find((row) => row.year === year) ??
+	refuse("PolicyMissing", `Set the ${year} federal policy first: policy.set`)
 const wageOn = (facts: Facts, paidOn: bigint) => facts.Wage.find((wage) => wage.paidOn.start === paidOn)
-/** Where the year's next paycheck starts on the wage axis. */
-const ytdOf = (facts: Facts, year: number) =>
-	facts.Wage.filter((wage) => wage.year === BigInt(year)).reduce(
-		(end, wage) => (wage.earnings.end > end ? wage.earnings.end : end),
-		0n
-	)
-const same = (wage: Fact<typeof S.Wage>, check: Check) =>
-	sameSpan(wage.earnings, check.earnings) &&
-	wage.fit === check.fit &&
-	wage.ss === check.ss &&
-	wage.medicare === check.medicare &&
-	wage.roth === check.roth
+/** The year's gross paid before a day: where a paycheck that day starts. */
+const ytdBefore = (facts: Facts, year: bigint, paidOn: bigint) =>
+	sum(facts.Wage.filter((wage) => wage.year === year && wage.paidOn.start < paidOn).map((wage) => wage.gross))
 const present = (facts: Facts, edits: readonly Edit[]) =>
 	edits.every(
 		(edit) =>
@@ -70,26 +63,57 @@ const describe = (item: Obligation) => {
 	const when = item.paidOn !== undefined ? formatDate(item.paidOn) : item.period && formatPeriod(item.period)
 	return `${item.what}${when ? ` ${when}` : ""}${item.amount === undefined ? "" : `: ${formatDollars(item.amount)}`}`
 }
+type Every = (typeof S.Periodicity.handles)[number]
+const shapes: { readonly [P in Every]: { readonly of: (day: bigint) => Span; readonly example: string } } = {
+	Month: { of: monthOf, example: '"2026-10"' },
+	Quarter: { of: quarterOf, example: '"2026Q3"' },
+	Year: { of: (day) => yearSpan(yearOf(day)), example: '"2026"' }
+}
+const requirePeriod = (span: Span, periodicity: Every) => {
+	if (!sameSpan(span, shapes[periodicity].of(span.start)))
+		refuse("InvalidPeriod", `Use a ${periodicity.toLowerCase()}, e.g. ${shapes[periodicity].example}`)
+}
+/** A row replaced whole; an identical one is no change. */
+const replace = <N extends Db.Name>(
+	name: N,
+	old: Fact<Db.Stored[N]> | undefined,
+	next: Fact<Db.Stored[N]>
+): Edit[] =>
+	old && canonicalJson(old) === canonicalJson(next)
+		? []
+		: [...(old ? Db.remove(name, old) : []), ...Db.insert(name, next)]
 
 // ── payroll ────────────────────────────────────────────────────────────────
+
+const withholding = (wage: Uuid, check: Check) =>
+	[...check.withheld].map(([tax, amount]) => ({ wage, tax, amount }))
+const same = (facts: Facts, wage: Fact<typeof S.Wage>, check: Check) =>
+	wage.gross === check.gross &&
+	wage.roth === check.roth &&
+	[...check.withheld].every(([tax, amount]) =>
+		facts.Withholding.some((row) => row.wage === wage.id && row.tax === tax && row.amount === amount)
+	)
+const wiredTo = (facts: Facts, account: S.PlanAccountHandle) => {
+	const held = facts.Custody.find((row) => row.account === account)
+	return held ? `${held.custodian} ${account} ${held.number}` : `the plan's ${account} account`
+}
 
 /** A posted paycheck: its amounts, what it recovered from earlier ones, and
  * the wires still to send for it. */
 const paycheck = (facts: Facts, id: Uuid) => {
 	const check =
 		paychecks(facts).find((row) => row.wage.id === id) ?? refuse("WageMissing", "No such paycheck")
-	const { wage } = check
 	const paidOn = new Map(facts.Wage.map((row) => [row.id, row.paidOn.start]))
 	const unsent = check.owedNet - check.sentNet
-	const rothUnsent = wage.roth - check.sentRoth
+	const rothUnsent = check.roth - check.sentRoth
 	return {
-		paidOn: wage.paidOn.start,
-		gross: grossOf(wage),
-		earnings: wage.earnings,
-		fit: wage.fit,
-		ss: wage.ss,
-		medicare: wage.medicare,
-		roth: wage.roth,
+		paidOn: check.wage.paidOn.start,
+		gross: check.gross,
+		ytd: check.ytd,
+		fit: check.withheld.get("FIT") ?? 0n,
+		ss: check.withheld.get("SocialSecurity") ?? 0n,
+		medicare: check.withheld.get("Medicare") ?? 0n,
+		roth: check.roth,
 		net: check.net,
 		owedNet: check.owedNet,
 		sentNet: check.sentNet,
@@ -100,7 +124,7 @@ const paycheck = (facts: Facts, id: Uuid) => {
 		})),
 		wires: [
 			...(unsent > 0n ? [{ kind: "NetPay", to: "the owner", amount: unsent }] : []),
-			...(rothUnsent > 0n ? [{ kind: "RothDeferral", to: "Carry Roth QCRH000004", amount: rothUnsent }] : [])
+			...(rothUnsent > 0n ? [{ kind: "RothDeferral", to: wiredTo(facts, "Roth"), amount: rothUnsent }] : [])
 		]
 	}
 }
@@ -109,7 +133,6 @@ const paycheck = (facts: Facts, id: Uuid) => {
 const overpaid = (facts: Facts) =>
 	paychecks(facts)
 		.filter((check) => check.sentNet > check.owedNet)
-		.sort((a, b) => (a.wage.paidOn.start < b.wage.paidOn.start ? -1 : 1))
 		.map((check) => ({ wage: check.wage, excess: check.sentNet - check.owedNet }))
 
 const PayrollInput = Schema.Struct({ paidOn: Day, input: CheckInput, fit: Schema.optional(Money) })
@@ -121,18 +144,20 @@ const payroll =
 	(request: typeof PayrollInput.Type, quoting = false) =>
 	(facts: Facts): Db.Plan<object> => {
 		const { paidOn } = request
-		const year = yearOf(paidOn)
-		const rules = rulesFor(facts, year)
-		const plan = facts.PayPlan.find((row) => row.year === BigInt(year))
+		const year = BigInt(yearOf(paidOn))
+		const limits = limitsFor(facts, year)
+		const plan = facts.PayPlan.find((row) => row.year === year)
 		const fit =
 			request.fit ?? plan?.fitPerCheck ?? refuse("FitMissing", `Give fit, or set the ${year} pay plan`)
+		const bands = bandsFor(facts, year, stateOn(facts, paidOn))
 		const { blockers } = obligations(facts, paidOn)
 		const shown = (after: Facts, id: Uuid) => ({ ...paycheck(after, id), ...(quoting ? { blockers } : {}) })
-		const price = (ytd: bigint, recovering: bigint) =>
+		const priced = (recovering: bigint) =>
 			priceCheck(
-				rules,
+				limits,
+				bands,
 				plan,
-				ytd,
+				ytdBefore(facts, year, paidOn),
 				paidOn,
 				request.input.by === "net"
 					? { ...request.input, net: request.input.net + recovering }
@@ -145,27 +170,38 @@ const payroll =
 			const took = sum(
 				facts.Recovery.filter((row) => row.recoveredBy === existing.id).map((row) => row.amount)
 			)
-			if (!same(existing, price(existing.earnings.start, took)))
+			if (!same(facts, existing, priced(took)))
 				refuse("WageExists", `A different paycheck is posted on ${formatDate(paidOn)}; use payroll.correct`)
 			return { edits: [], result: shown(facts, existing.id) }
 		}
-		if (facts.Wage.some((wage) => wage.year === BigInt(year) && wage.paidOn.start > paidOn))
-			refuse("Backdated", "A later paycheck is posted this year; earnings stay in date order")
+		if (facts.Wage.some((wage) => wage.year === year && wage.paidOn.start > paidOn))
+			refuse("Backdated", "A later paycheck is posted this year; paychecks stay in date order")
 		if (blockers.length > 0 && !quoting) refuse("PayrollBlocked", blockers.map(describe).join("; "))
 
 		const owed = overpaid(facts)
-		const check = price(ytdOf(facts, year), sum(owed.map((row) => row.excess)))
-		const wage = { id: wageId(paidOn), paidOn: point(paidOn), year: BigInt(year), ...check }
+		const check = priced(sum(owed.map((row) => row.excess)))
+		const id = wageId(paidOn)
+		const wage = { id, paidOn: point(paidOn), year, gross: check.gross, roth: check.roth }
 		let left = netOf(check)
 		const taken = owed.flatMap(({ wage: earlier, excess }) => {
 			const amount = min(excess, left)
 			left -= amount
-			return amount > 0n ? [{ wage: earlier.id, recoveredBy: wage.id, amount }] : []
+			return amount > 0n ? [{ wage: earlier.id, recoveredBy: id, amount }] : []
 		})
-		const after = { ...facts, Wage: [...facts.Wage, wage], Recovery: [...facts.Recovery, ...taken] }
+		const rows = withholding(id, check)
+		const after = {
+			...facts,
+			Wage: [...facts.Wage, wage],
+			Withholding: [...facts.Withholding, ...rows],
+			Recovery: [...facts.Recovery, ...taken]
+		}
 		return {
-			edits: [...Db.insert("Wage", wage), ...Db.insert("Recovery", ...taken)],
-			result: shown(after, wage.id)
+			edits: [
+				...Db.insert("Wage", wage),
+				...Db.insert("Withholding", ...rows),
+				...Db.insert("Recovery", ...taken)
+			],
+			result: shown(after, id)
 		}
 	}
 
@@ -175,37 +211,59 @@ const CorrectInput = Schema.Struct({
 	fit: Schema.optional(Money),
 	roth: Schema.optional(Money)
 })
-/** Reprice a posted paycheck over the same earnings start. Differences surface
- * as obligations: a wire to top up, an overpayment to recover, a 941-X. */
+/** Reprice a posted paycheck. FICA moves only with gross, which only the
+ * year's latest paycheck may change, so later paychecks never shift.
+ * Differences surface as obligations: a wire to top up, an overpayment to
+ * recover, a 941-X. */
 const correct =
 	(request: typeof CorrectInput.Type) =>
 	(facts: Facts): Db.Plan<object> => {
 		const wage =
 			wageOn(facts, request.paidOn) ?? refuse("WageMissing", `No paycheck on ${formatDate(request.paidOn)}`)
-		const gross = request.gross ?? grossOf(wage)
+		const current =
+			paychecks(facts).find((row) => row.wage.id === wage.id) ?? refuse("WageMissing", "No such paycheck")
+		const gross = request.gross ?? wage.gross
 		if (
-			gross !== grossOf(wage) &&
+			gross !== wage.gross &&
 			facts.Wage.some((row) => row.year === wage.year && row.paidOn.start > request.paidOn)
 		)
-			refuse(
-				"GrossNotLatest",
-				"Gross can change only on the year's latest paycheck, so later earnings never shift"
-			)
-		const check = priceCheck(
-			rulesFor(facts, Number(wage.year)),
-			undefined,
-			wage.earnings.start,
-			request.paidOn,
-			{ by: "gross", gross, roth: request.roth ?? wage.roth },
-			request.fit ?? wage.fit
-		)
-		if (same(wage, check)) return { edits: [], result: paycheck(facts, wage.id) }
-		const corrected = { ...wage, ...check }
-		const after = { ...facts, Wage: facts.Wage.map((row) => (row.id === wage.id ? corrected : row)) }
+			refuse("GrossNotLatest", "Gross can change only on the year's latest paycheck")
+		const fit = request.fit ?? current.withheld.get("FIT") ?? 0n
+		const roth = request.roth ?? wage.roth
+		const check =
+			gross === wage.gross
+				? fitting({ gross, roth, withheld: new Map([...current.withheld, ["FIT", fit]]) })
+				: priceCheck(
+						limitsFor(facts, wage.year),
+						current.bands,
+						undefined,
+						current.ytd,
+						request.paidOn,
+						{ by: "gross", gross, roth },
+						fit
+					)
+		if (same(facts, wage, check)) return { edits: [], result: paycheck(facts, wage.id) }
+		const corrected = { ...wage, gross, roth }
+		const old = facts.Withholding.filter((row) => row.wage === wage.id)
+		const rows = withholding(wage.id, check)
+		const after = {
+			...facts,
+			Wage: facts.Wage.map((row) => (row.id === wage.id ? corrected : row)),
+			Withholding: [...facts.Withholding.filter((row) => row.wage !== wage.id), ...rows]
+		}
 		if (paychecks(after).some((row) => row.wage.id === wage.id && row.net < 0n))
 			refuse("NetNegative", "The corrected paycheck can't cover what it already recovered from earlier ones")
 		return {
-			edits: [...Db.remove("Wage", wage), ...Db.insert("Wage", corrected)],
+			edits: [
+				...replace("Wage", wage, corrected),
+				...rows.flatMap((row) =>
+					replace(
+						"Withholding",
+						old.find((each) => each.tax === row.tax),
+						row
+					)
+				)
+			],
 			result: paycheck(after, wage.id)
 		}
 	}
@@ -238,7 +296,7 @@ const transfer =
 						paychecks(facts).find((row) => row.wage.id === wage.id) ??
 						refuse("WageMissing", "No such paycheck")
 					const [sent, owed] =
-						request.kind === "NetPay" ? [check.sentNet, check.owedNet] : [check.sentRoth, wage.roth]
+						request.kind === "NetPay" ? [check.sentNet, check.owedNet] : [check.sentRoth, check.roth]
 					if (!recorded && sent + amount > owed)
 						refuse(
 							"Overpaid",
@@ -255,13 +313,6 @@ const transfer =
 		return { edits: [...Db.insert("Transfer", { mercury, sentOn, kind }), ...arm()], result: request }
 	}
 
-const quarterly = (span: Span) => sameSpan(span, quarterOf(span.start))
-const yearly = (span: Span) => sameSpan(span, yearSpan(yearOf(span.start)))
-const requirePeriod = (span: Span, shape: "quarter" | "year") => {
-	if (!(shape === "year" ? yearly(span) : quarterly(span)))
-		refuse("InvalidPeriod", shape === "year" ? 'Use a year, e.g. "2026"' : 'Use a quarter, e.g. "2026Q3"')
-}
-
 const TaxPaidInput = Schema.Struct({
 	tracker: Text,
 	account: Schema.Literals(S.TaxAccount.handles),
@@ -275,10 +326,18 @@ const TaxPaidInput = Schema.Struct({
 /** An EFTPS or TWC payment, recorded once its Mercury debit has posted. */
 const taxPaid = (request: typeof TaxPaidInput.Type) => (): Db.Plan<object> => {
 	const { tracker, account, kind, period, amount, initiatedOn, mercury, sentOn } = request
-	requirePeriod(period, account === "Federal940" ? "year" : "quarter")
+	requirePeriod(period, S.TaxAccount.axioms[account].period)
 	return {
 		edits: [
-			...Db.insert("TaxPayment", { tracker, account, kind, period, amount, initiatedOn, funding: "Mercury" }),
+			...Db.insert("TaxPayment", {
+				tracker,
+				account,
+				kind,
+				period,
+				amount,
+				initiatedOn: point(initiatedOn),
+				funding: "Mercury"
+			}),
 			...Db.insert("Transfer", { mercury, sentOn, kind: "Tax" }),
 			...Db.insert("TaxDebit", { transfer: mercury, payment: tracker })
 		],
@@ -286,9 +345,33 @@ const taxPaid = (request: typeof TaxPaidInput.Type) => (): Db.Plan<object> => {
 	}
 }
 
+// ── the plan's books ───────────────────────────────────────────────────────
+
+const RolloverInput = Schema.Struct({
+	account: Schema.Literals(S.PlanAccount.handles),
+	on: Day,
+	gross: PositiveMoney
+})
+/** A whole-account sweep into the owner's Roth IRA. What it carries, and what
+ * the 1099-R reports for it, follow from the wires since the last sweep. */
+const rollover =
+	(request: typeof RolloverInput.Type) =>
+	(facts: Facts): Db.Plan<object> => {
+		if (S.PlanAccount.axioms[request.account].implied)
+			refuse(
+				"ImpliedConversion",
+				`Carry converts the ${request.account} account as deposits settle; its 1099-R follows from its transfers`
+			)
+		const row = { account: request.account, on: request.on, gross: request.gross }
+		const others = facts.Rollover.filter((old) => old.account !== row.account || old.on !== row.on)
+		const swept = sweeps({ ...facts, Rollover: [...others, row] }).find(
+			(sweep) => sweep.account === row.account && sweep.on === row.on
+		)
+		return { edits: Db.insert("Rollover", row), result: { ...request, ...swept } }
+	}
+
 // ── filings ────────────────────────────────────────────────────────────────
 
-const quarterlyForms: readonly S.FormHandle[] = ["F941", "C3"]
 const filed = { form: Schema.Literals(S.Form.handles), period: Period }
 const FilingInput = Schema.Union([
 	Schema.Struct({ ...filed, method: Schema.Literal("Electronic"), on: Day, confirmation: Text }),
@@ -299,176 +382,157 @@ type FilingInput = typeof FilingInput.Type
 
 /** A return as filed: how, and every line as the ledger computes it now.
  * What is filed must equal the ledger; fix the ledger first if it doesn't. */
-const filingEdits = (facts: Facts, id: Uuid, request: FilingInput): Edit[] => {
-	const { form, period, method } = request
-	requirePeriod(period, quarterlyForms.includes(form) ? "quarter" : "year")
-	const lines = [...figures(form, periodOf(facts, period))].map(([line, value]) => ({
-		filing: id,
-		line,
-		value
-	}))
-	return [
-		...Db.insert("Filing", { id, form, period, method }),
-		...(request.method === "Electronic"
-			? Db.insert("Electronic", { filing: id, on: request.on, confirmation: request.confirmation })
-			: request.method === "CertifiedMail"
-				? Db.insert("CertifiedMail", { filing: id, mailedOn: request.mailedOn, tracking: request.tracking })
-				: Db.insert("Furnished", { filing: id, on: request.on })),
-		...Db.insert("FiledFigures", ...lines)
-	]
-}
 const fileReturn =
 	(request: FilingInput) =>
-	(facts: Facts): Db.Plan<object> => ({
-		edits: filingEdits(facts, filingId(request.form, request.period), request),
-		result: request
-	})
-
-/** A grandfathered filing gets its real method and its figures as the ledger
- * computes them, once those details turn up. */
-const upgrade =
-	(request: FilingInput) =>
 	(facts: Facts): Db.Plan<object> => {
-		const filing = facts.Filing.find(
-			(row) => row.form === request.form && sameSpan(row.period, request.period)
-		)
-		const prior = filing && facts.Prior.find((row) => row.filing === filing.id)
-		if (filing && !prior && present(facts, filingEdits(facts, filing.id, request)))
-			return { edits: [], result: request }
-		if (!filing || !prior)
-			return refuse(
-				"NotPrior",
-				`${request.form} ${formatPeriod(request.period)} is not a grandfathered filing`
-			)
-		if (facts.Correction.some((row) => row.filing === filing.id))
-			refuse("Corrected", "This 941 has a 941-X, so its original figures can't be reproduced")
+		const { form, period, method } = request
+		requirePeriod(period, S.Form.axioms[form].period)
+		const id = filingId(form, period)
+		const lines = [...figures(form, periodOf(facts, period))].map(([line, value]) => ({
+			filing: id,
+			line,
+			value
+		}))
 		return {
 			edits: [
-				...Db.remove("Prior", prior),
-				...Db.remove("Filing", filing),
-				...filingEdits(facts, filing.id, request)
+				...Db.insert("Filing", { id, form, period, method }),
+				...(request.method === "Electronic"
+					? Db.insert("Electronic", { filing: id, on: request.on, confirmation: request.confirmation })
+					: request.method === "CertifiedMail"
+						? Db.insert("CertifiedMail", {
+								filing: id,
+								mailedOn: request.mailedOn,
+								tracking: request.tracking
+							})
+						: Db.insert("Furnished", { filing: id, on: request.on })),
+				...Db.insert("FiledFigures", ...lines)
 			],
 			result: request
 		}
 	}
 
-const AmendInput = Schema.Struct({ period: Period, mailedOn: Day, tracking: Text })
-/** A 941-X mailed for a quarter: the corrected lines as the ledger computes
+const CorrectionInput = Schema.Struct({ period: Period, mailedOn: Day, tracking: Text })
+/** A 941-X mailed for a quarter: the correctable lines as the ledger computes
  * them now. The originals are the 941's own figures. */
-const amend =
-	(request: typeof AmendInput.Type) =>
+const correctReturn =
+	(request: typeof CorrectionInput.Type) =>
 	(facts: Facts): Db.Plan<object> => {
-		requirePeriod(request.period, "quarter")
+		requirePeriod(request.period, S.Form.axioms.F941.period)
 		const filing =
 			facts.Filing.find((row) => row.form === "F941" && sameSpan(row.period, request.period)) ??
 			refuse("F941Missing", `No 941 is recorded for ${formatPeriod(request.period)}`)
 		const current = figures("F941", periodOf(facts, request.period))
-		return {
-			edits: [
-				...Db.insert("Correction", {
-					filing: filing.id,
-					mailedOn: request.mailedOn,
-					tracking: request.tracking
-				}),
-				...Db.insert(
-					"CorrectedFigures",
-					...correctable.map((line) => ({ filing: filing.id, line, value: current.get(line) ?? 0n }))
-				)
-			],
-			result: request
-		}
+		const edits = [
+			...Db.insert("Correction", {
+				filing: filing.id,
+				mailedOn: request.mailedOn,
+				tracking: request.tracking
+			}),
+			...Db.insert(
+				"CorrectedFigures",
+				...S.correctable.map((line) => ({ filing: filing.id, line, value: current.get(line) ?? 0n }))
+			)
+		]
+		if (!present(facts, edits) && facts.Correction.some((row) => row.filing === filing.id))
+			refuse("Corrected", `${formatPeriod(request.period)} already has a 941-X`)
+		return { edits, result: request }
 	}
 
-const DistributionInput = Schema.Struct({
-	year: Year,
-	account: Schema.Literals(S.PlanAccount.handles),
-	code: Schema.Literals(S.DistributionCode.handles),
-	gross: PositiveMoney,
-	taxable: Money
-})
-/** A Carry rollover (H) or conversion (G) that needs a 1099-R. */
-const planDistribution = (request: typeof DistributionInput.Type) => (): Db.Plan<object> => {
-	const move = S.PlanMove.handles.find((handle) => handle === `${request.account}_${request.code}`)
-	if (move === undefined)
-		return refuse(
-			"ImpliedConversion",
-			"After-tax conversions (AfterTax, G) are implied by AfterTax transfers"
-		)
-	return {
-		edits: Db.insert("PlanDistribution", {
-			year: BigInt(request.year),
-			move,
-			gross: request.gross,
-			taxable: request.taxable
-		}),
-		result: request
-	}
-}
+// ── setup and policy ───────────────────────────────────────────────────────
 
-// ── setup ──────────────────────────────────────────────────────────────────
-
+const states = S.Jurisdiction.handles.filter((handle) => S.Jurisdiction.axioms[handle].state)
+const PartyInput = Schema.Struct({ name: Text, tin: Text, address: Text })
 const SetupInput = Schema.Struct({
-	business: Schema.Struct({ ein: Text, name: Text, twcAccount: Text }),
-	employee: Schema.Struct({ ssn: Text, firstName: Text, lastName: Text, address: Text }),
-	employedFrom: Day
+	employer: PartyInput,
+	employee: PartyInput,
+	plan: PartyInput,
+	registrations: Schema.Array(Schema.Struct({ state: Schema.Literals(states), number: Text })),
+	employment: Schema.Struct({ from: Day, state: Schema.Literals(states) }),
+	custody: Schema.Struct({
+		Pretax: Schema.Struct({ custodian: Text, number: Text }),
+		AfterTax: Schema.Struct({ custodian: Text, number: Text }),
+		Roth: Schema.Struct({ custodian: Text, number: Text })
+	})
 })
-const YearInput = Schema.Struct({
-	year: Year,
-	ssRate: Rate,
-	ssBase: Money,
-	medicareRate: Rate,
-	futaRate: Rate,
-	futaBase: Money,
-	sutaRate: Rate,
-	sutaBase: Money,
+
+const banded = (jurisdiction: S.JurisdictionHandle) =>
+	S.Tax.handles.filter((tax) => S.Tax.axioms[tax].banded && jurisdictionOf(tax) === jurisdiction)
+const BandInput = Schema.Struct({ rate: Rate, base: Schema.optional(PositiveMoney) })
+const Limits = Schema.Struct({
 	deferralLimit: Money,
 	additionsLimit: Money,
 	compensationLimit: Money,
 	wageCeiling: Money
 })
-const PlanInput = Schema.Struct({ year: Year, salary: PositiveMoney, fitPerCheck: Money })
-const ElectionInput = Schema.Struct({ year: Year, roth: Money, afterTax: Money, signedOn: Day })
+const rates = (jurisdiction: S.JurisdictionHandle) =>
+	Schema.Struct(Object.fromEntries(banded(jurisdiction).map((tax) => [tax, BandInput])))
+/** One jurisdiction's policy for a year: the federal limits, and a rate and
+ * optional wage base for each banded tax the jurisdiction levies. */
+const PolicyInput = Schema.Union([
+	Schema.Struct({
+		jurisdiction: Schema.Literal("Federal"),
+		year: Year,
+		limits: Limits,
+		rates: rates("Federal")
+	}),
+	...states.map((state) =>
+		Schema.Struct({ jurisdiction: Schema.Literal(state), year: Year, rates: rates(state) })
+	)
+])
+type PolicyInput = {
+	readonly jurisdiction: S.JurisdictionHandle
+	readonly year: number
+	readonly limits?: typeof Limits.Type
+	readonly rates: { readonly [tax: string]: typeof BandInput.Type | undefined }
+}
 
 /** The one invariant bumbledb can't state over two columns: the Roth and
  * after-tax elections together stay within 415(c). */
 const within415 = (
 	election: { roth: bigint; afterTax: bigint } | undefined,
-	rules: { additionsLimit: bigint } | undefined
+	limits: { additionsLimit: bigint } | undefined
 ) => {
-	if (election && rules && election.roth + election.afterTax > rules.additionsLimit)
+	if (election && limits && election.roth + election.afterTax > limits.additionsLimit)
 		refuse(
 			"Over415c",
-			`Roth plus after-tax elections exceed the ${formatDollars(rules.additionsLimit)} 415(c) limit`
+			`Roth plus after-tax elections exceed the ${formatDollars(limits.additionsLimit)} 415(c) limit`
 		)
 }
-/** A year's row, replaced whole; the laws judge the new one. */
-const replace = <N extends Db.Name>(
-	name: N,
-	old: Fact<Db.Stored[N]> | undefined,
-	next: Fact<Db.Stored[N]>
-): Edit[] =>
-	old && canonicalJson(old) === canonicalJson(next)
-		? []
-		: [...(old ? Db.remove(name, old) : []), ...Db.insert(name, next)]
 
-const setYear =
-	(request: typeof YearInput.Type) =>
+/** Replace one jurisdiction's policy for a year whole; the laws judge it. */
+const setPolicy =
+	(request: PolicyInput) =>
 	(facts: Facts): Db.Plan<object> => {
-		const { year, ...rules } = request
-		const row = { year: BigInt(year), span: yearSpan(year), ...rules }
-		within415(
-			facts.Election.find((election) => election.year === row.year),
-			row
-		)
+		const year = BigInt(request.year)
+		const limits = request.limits && { year, span: yearSpan(request.year), ...request.limits }
+		if (limits)
+			within415(
+				facts.Election.find((election) => election.year === year),
+				limits
+			)
 		return {
-			edits: replace(
-				"TaxYear",
-				facts.TaxYear.find((old) => old.year === row.year),
-				row
-			),
+			edits: [
+				...(limits
+					? replace(
+							"TaxYear",
+							facts.TaxYear.find((old) => old.year === year),
+							limits
+						)
+					: []),
+				...banded(request.jurisdiction).flatMap((tax) => {
+					const band = request.rates[tax] ?? refuse("RateMissing", `Give the ${tax} rate`)
+					return replace(
+						"TaxBand",
+						facts.TaxBand.find((old) => old.year === year && old.tax === tax),
+						{ year, tax, wages: { start: 0n, end: band.base ?? MAX_U64 }, rate: band.rate }
+					)
+				})
+			],
 			result: request
 		}
 	}
+
+const PlanInput = Schema.Struct({ year: Year, salary: PositiveMoney, fitPerCheck: Money })
 const setPlan =
 	(request: typeof PlanInput.Type) =>
 	(facts: Facts): Db.Plan<object> => {
@@ -482,6 +546,8 @@ const setPlan =
 			result: request
 		}
 	}
+
+const ElectionInput = Schema.Struct({ year: Year, roth: Money, afterTax: Money, signedOn: Day })
 const setElection =
 	(request: typeof ElectionInput.Type) =>
 	(facts: Facts): Db.Plan<object> => {
@@ -493,7 +559,7 @@ const setElection =
 		}
 		within415(
 			row,
-			facts.TaxYear.find((rules) => rules.year === row.year)
+			facts.TaxYear.find((limits) => limits.year === row.year)
 		)
 		return {
 			edits: replace(
@@ -527,17 +593,33 @@ const reading =
 		)
 
 export const ops: { readonly [name: string]: Op } = {
-	setup: op("Create the ledger: the business, its employee and the employment", SetupInput, (input, ledger) =>
-		Db.build(ledger, {
-			edits: [
-				...Db.insert("Business", input.business),
-				...Db.insert("Employee", input.employee),
-				...Db.insert("Employment", { span: { start: input.employedFrom, end: MAX_I64 } })
-			],
-			result: input
-		})
+	setup: op(
+		"Create the ledger: the employer, its employee, the plan, where the owner works, and the plan's accounts",
+		SetupInput,
+		(input, ledger) =>
+			Db.build(ledger, {
+				edits: [
+					...Db.insert("Party", { role: "Employer", ...input.employer }),
+					...Db.insert("Party", { role: "Employee", ...input.employee }),
+					...Db.insert("Party", { role: "Plan", ...input.plan }),
+					...Db.insert("Registration", ...input.registrations),
+					...Db.insert("Employment", {
+						span: { start: input.employment.from, end: MAX_I64 },
+						state: input.employment.state
+					}),
+					...Db.insert(
+						"Custody",
+						...S.PlanAccount.handles.map((account) => ({ account, ...input.custody[account] }))
+					)
+				],
+				result: input
+			})
 	),
-	"year.set": op("Set a tax year's rates, wage bases and limits", YearInput, writing(setYear)),
+	"policy.set": op(
+		"Set one jurisdiction's policy for a year: federal limits, and each tax's rate and wage base",
+		PolicyInput,
+		writing((input: PolicyInput) => setPolicy(input))
+	),
 	"plan.set": op("Set a year's salary target and FIT per paycheck", PlanInput, writing(setPlan)),
 	"election.set": op("Record the year's signed Carry election", ElectionInput, writing(setElection)),
 	"payroll.quote": op(
@@ -558,18 +640,13 @@ export const ops: { readonly [name: string]: Op } = {
 		TaxPaidInput,
 		writing(taxPaid)
 	),
+	"plan.rollover": op(
+		"Record a whole-account sweep of a plan account into the Roth IRA",
+		RolloverInput,
+		writing(rollover)
+	),
 	"filing.record": op("Record a filed return with every line as filed", FilingInput, writing(fileReturn)),
-	"filing.amend": op("Record a 941-X mailed for a quarter", AmendInput, writing(amend)),
-	"filing.upgrade": op(
-		"Give a grandfathered filing its real method and figures",
-		FilingInput,
-		writing(upgrade)
-	),
-	"plan.distribution": op(
-		"Record a Carry rollover or conversion for the 1099-R",
-		DistributionInput,
-		writing(planDistribution)
-	),
+	"filing.correct": op("Record a 941-X mailed for a quarter", CorrectionInput, writing(correctReturn)),
 	status: op(
 		"What blocks payroll, what comes due next, and the year so far",
 		Schema.Struct({ asOf: Schema.optional(Day) }),

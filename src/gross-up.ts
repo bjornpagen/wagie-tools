@@ -1,10 +1,10 @@
 import type { Fact } from "@bjornpagen/bumbledb"
 import { Schema } from "effect"
-import { type Check, computeCheck, nearest, netOf, type Rules } from "./check.ts"
+import { type Band, type Check, nearest, netOf, price } from "./check.ts"
 import { formatDollars } from "./core/boundary.ts"
 import { max, min, Refusal, refuse } from "./core/values.ts"
 import { Money, PositiveMoney } from "./schema/input.ts"
-import type { PayPlan } from "./schema.ts"
+import type { PayPlan, TaxYear } from "./schema.ts"
 
 /** How a paycheck is sized, parsed once at the boundary. */
 export const CheckInput = Schema.Union([
@@ -18,8 +18,14 @@ export type CheckInput = typeof CheckInput.Type
  * gross moves net by +1, 0 or −1 (when both FICA roundings tick), so every
  * target is reached: binary-search the boundary, then take the first exact
  * hit just below it. */
-export const grossForNet = (rules: Rules, ytd: bigint, fit: bigint, roth: bigint, net: bigint): bigint => {
-	const netAt = (gross: bigint) => netOf(computeCheck(rules, ytd, gross, fit, roth))
+export const grossForNet = (
+	bands: readonly Band[],
+	ytd: bigint,
+	fit: bigint,
+	roth: bigint,
+	net: bigint
+): bigint => {
+	const netAt = (gross: bigint) => netOf(price(bands, ytd, gross, fit, roth))
 	let high = max(1n, net + fit + roth)
 	while (netAt(high) < net) high *= 2n
 	let low = 0n
@@ -34,15 +40,32 @@ export const grossForNet = (rules: Rules, ytd: bigint, fit: bigint, roth: bigint
 
 /** The gross that keeps the year on its salary target, paying weekly: the
  * remaining salary spread over the days left, so the last check lands on it. */
-export const planGross = (plan: Fact<typeof PayPlan>, rules: Rules, ytd: bigint, paidOn: bigint): bigint => {
+export const planGross = (
+	plan: Fact<typeof PayPlan>,
+	year: Fact<typeof TaxYear>,
+	ytd: bigint,
+	paidOn: bigint
+): bigint => {
 	const remaining = plan.salary - ytd
 	if (remaining <= 0n) return refuse("SalaryReached", `The ${plan.year} salary target is already paid`)
-	return min(remaining, max(1n, nearest(remaining * 7n, rules.span.end - paidOn)))
+	return min(remaining, max(1n, nearest(remaining * 7n, year.span.end - paidOn)))
 }
 
-/** Size and price one paycheck. Refuses a Roth the paycheck can't hold. */
+/** Refuses a paycheck whose withholding exceeds its gross, or whose Roth
+ * doesn't fit in what is left. */
+export const fitting = (check: Check): Check => {
+	const room = netOf(check) + check.roth
+	if (room < 0n)
+		throw new Refusal({ code: "WithholdingExceedsGross", message: "FIT and FICA exceed the gross" })
+	if (check.roth > room)
+		throw new Refusal({ code: "RothTooLarge", message: `At most ${formatDollars(room)} of Roth fits` })
+	return check
+}
+
+/** Size and price one paycheck. */
 export const priceCheck = (
-	rules: Rules,
+	year: Fact<typeof TaxYear>,
+	bands: readonly Band[],
 	plan: Fact<typeof PayPlan> | undefined,
 	ytd: bigint,
 	paidOn: bigint,
@@ -54,18 +77,12 @@ export const priceCheck = (
 		input.by === "gross"
 			? input.gross
 			: input.by === "net"
-				? grossForNet(rules, ytd, fit, roth, input.net)
+				? grossForNet(bands, ytd, fit, roth, input.net)
 				: planGross(
-						plan ?? refuse("PayPlanMissing", `Set the ${rules.year} pay plan: plan.set`),
-						rules,
+						plan ?? refuse("PayPlanMissing", `Set the ${year.year} pay plan: plan.set`),
+						year,
 						ytd,
 						paidOn
 					)
-	const check = computeCheck(rules, ytd, gross, fit, roth)
-	const room = netOf(check) + roth
-	if (room < 0n)
-		throw new Refusal({ code: "WithholdingExceedsGross", message: "FIT and FICA exceed the gross" })
-	if (roth > room)
-		throw new Refusal({ code: "RothTooLarge", message: `At most ${formatDollars(room)} of Roth fits` })
-	return check
+	return fitting(price(bands, ytd, gross, fit, roth))
 }

@@ -1,4 +1,4 @@
-import { civil, dayOf, weekday } from "./core/time.ts"
+import { civil, dayOf, monthSpan, weekday } from "./core/time.ts"
 
 /* Deadlines roll past weekends and the legal holidays in the District of
  * Columbia (IRC §7503): the federal holidays plus DC Emancipation Day and, every
@@ -53,4 +53,16 @@ export const nextBusinessDay = (day: bigint): bigint => {
 	let candidate = day
 	while (!isBusinessDay(candidate)) candidate += 1n
 	return candidate
+}
+
+/** The rosters' one due rule: the next business day on or after day `dueDay`
+ * (clamped to the month's length) of the month `dueOffset` months after the
+ * month holding the last day of a period ending (exclusive) at `end`. */
+export const dueOn = (end: bigint, dueDay: bigint, dueOffset: bigint): bigint => {
+	const last = civil(end - 1n)
+	const index = last.year * 12 + last.month - 1 + Number(dueOffset)
+	const month = monthSpan(Math.floor(index / 12), (index % 12) + 1)
+	return nextBusinessDay(
+		month.start + (dueDay < month.end - month.start ? dueDay : month.end - month.start) - 1n
+	)
 }

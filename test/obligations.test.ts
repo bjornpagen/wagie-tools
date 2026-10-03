@@ -1,6 +1,11 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { deposit, ledger2026, op, paid, sendMoney, whats } from "./support.ts"
+import { parseDollars as $ } from "../src/core/boundary.ts"
+import { parseDate, quarterSpan } from "../src/core/time.ts"
+import { insert, remove } from "../src/db.ts"
+import { filingId } from "../src/ops.ts"
+import type { LineHandle } from "../src/schema.ts"
+import { commit, deposit, federal, ledger2026, op, paid, read, sendMoney, texas, whats } from "./support.ts"
 
 /* Payroll is blocked by whatever is open as of its day: wires, deposits,
  * balances, filings and corrections. Synthetic 2026 ledgers throughout; a
@@ -195,25 +200,134 @@ test("an overpaid paycheck is recovered by the next one", async () => {
 	assert.deepEqual((await status(ledger, "2026-01-16")).overpaid, [])
 })
 
-test("a changed paycheck in a filed quarter opens a 941-X", async () => {
-	const ledger = await ledger2026()
-	await paid(ledger, "2026-01-09", check)
-	await deposit(ledger, "2026Q1", "306.01", "2026-02-10")
-	await op(ledger, "filing.record", {
+const federal941 = (items: string[]) => items.filter((what) => /941/.test(what))
+const file941 = (ledger: string) =>
+	op(ledger, "filing.record", {
 		form: "F941",
 		period: "2026Q1",
 		...certified,
 		tracking: "9400100000000000000001"
 	})
-	assert.ok(!(await blockers(ledger, "2026-04-02")).includes("File a 941-X"))
+
+test("a changed paycheck in a filed quarter opens a 941-X; its line 27 is owed until paid", async () => {
+	const ledger = await ledger2026()
+	await paid(ledger, "2026-01-09", check)
+	await deposit(ledger, "2026Q1", "306.01", "2026-02-10")
+	await file941(ledger)
+	assert.deepEqual(federal941(await blockers(ledger, "2026-04-02")), [])
 	await op(ledger, "payroll.correct", { paidOn: "2026-01-09", fit: "50.01" })
-	assert.ok((await blockers(ledger, "2026-04-02")).includes("File a 941-X"))
-	await op(ledger, "filing.amend", {
+	assert.deepEqual(federal941(await blockers(ledger, "2026-04-02")), ["File a 941-X"])
+	await op(ledger, "filing.correct", {
 		period: "2026Q1",
 		mailedOn: "2026-04-03",
 		tracking: "9400100000000000000002"
 	})
-	assert.ok(!(await blockers(ledger, "2026-04-03")).includes("File a 941-X"))
+	const owed = (await status(ledger, "2026-04-03")).blockers as {
+		what: string
+		amount?: string
+		dueOn?: string
+	}[]
+	assert.deepEqual(
+		owed.filter((item) => /941/.test(item.what)).map(({ what, amount, dueOn }) => ({ what, amount, dueOn })),
+		[{ what: "941-X balance", amount: "50.00", dueOn: "2026-04-03" }]
+	)
+	await op(ledger, "tax.paid", {
+		tracker: "270000000000009",
+		account: "Federal941",
+		kind: "Balance",
+		period: "2026Q1",
+		amount: "50.00",
+		initiatedOn: "2026-04-03",
+		mercury: "061036010000009",
+		sentOn: "2026-04-03"
+	})
+	assert.deepEqual(federal941(await blockers(ledger, "2026-04-03")), [])
+	assert.deepEqual((await status(ledger, "2026-04-03")).credits, [])
+})
+
+test("payments clear what a quarter owes in the order it arose", async () => {
+	const ledger = await ledger2026()
+	await paid(ledger, "2026-03-06", check)
+	await deposit(ledger, "2026Q1", "306.01", "2026-04-01")
+	await file941(ledger)
+	await op(ledger, "payroll.correct", { paidOn: "2026-03-06", fit: "10.01" })
+	await op(ledger, "filing.correct", {
+		period: "2026Q1",
+		mailedOn: "2026-04-03",
+		tracking: "9400100000000000000002"
+	})
+	const owed = (await status(ledger, "2026-04-03")).blockers as { what: string; amount?: string }[]
+	assert.deepEqual(
+		owed.filter((item) => /941/.test(item.what)).map(({ what, amount }) => [what, amount]),
+		[["941-X balance", "10.00"]]
+	)
+})
+
+test("only the 941's reported facts make it stale, not line 7's rounding", async () => {
+	const ledger = await ledger2026()
+	await paid(ledger, "2026-01-09", check)
+	await deposit(ledger, "2026Q1", "306.01", "2026-02-10")
+	await file941(ledger)
+	const ss = (await read(ledger)).Withholding.find((row) => row.tax === "SocialSecurity")
+	const old = ss ?? assert.fail("no social security withheld")
+	await commit(ledger, [
+		...remove("Withholding", old),
+		...insert("Withholding", { ...old, amount: old.amount + 1n })
+	])
+	assert.deepEqual(federal941(await blockers(ledger, "2026-04-02")), [])
+})
+
+test("a filed 941 is what its quarter owes, whatever a recompute says", async () => {
+	const ledger = await ledger2026()
+	await paid(ledger, "2026-01-09", check)
+	const lines = (
+		(await op(ledger, "report", { year: 2026, quarter: 1 })).forms as {
+			F941: { lines: { [line: string]: string | number } }
+		}
+	).F941.lines
+	const id = filingId("F941", quarterSpan(2026, 1))
+	const asFiled = { F941_10: "306.04", F941_12: "306.04", F941_16_1: "306.04" } as { [line: string]: string }
+	await commit(ledger, [
+		...insert("Filing", { id, form: "F941", period: quarterSpan(2026, 1), method: "CertifiedMail" }),
+		...insert("CertifiedMail", { filing: id, mailedOn: parseDate("2026-04-02"), tracking: "9400" }),
+		...insert(
+			"FiledFigures",
+			...Object.entries(lines).map(([line, value]) => ({
+				filing: id,
+				line: line as LineHandle,
+				value: typeof value === "number" ? BigInt(value) : $(asFiled[line] ?? value)
+			}))
+		)
+	])
+	assert.deepEqual(federal941(await blockers(ledger, "2026-04-02")), ["941 deposit"])
+	await deposit(ledger, "2026Q1", "306.04", "2026-04-02")
+	assert.deepEqual(federal941(await blockers(ledger, "2026-04-02")), [])
+	assert.deepEqual((await status(ledger, "2026-04-02")).credits, [])
+})
+
+test("a 941-X owes its column 4, even a cent away from a recompute", async () => {
+	const ledger = await ledger2026()
+	await paid(ledger, "2026-01-09", { by: "gross", gross: "1000.01" })
+	await deposit(ledger, "2026Q1", "153.01", "2026-02-10")
+	await file941(ledger)
+	await op(ledger, "payroll.correct", { paidOn: "2026-01-09", gross: "1000.05" })
+	await op(ledger, "transfer.record", {
+		kind: "NetPay",
+		paidOn: "2026-01-09",
+		mercury: sendMoney(),
+		sentOn: "2026-04-02",
+		amount: "0.04"
+	})
+	await op(ledger, "filing.correct", {
+		period: "2026Q1",
+		mailedOn: "2026-05-01",
+		tracking: "9400100000000000000002"
+	})
+	const report = await op(ledger, "report", { year: 2026, quarter: 1 })
+	assert.equal((report.forms as { F941: { lines: { F941_12: string } } }).F941.lines.F941_12, "153.02")
+	assert.equal((report.correction as { line27: string }).line27, "0.00")
+	assert.deepEqual(federal941(await blockers(ledger, "2026-05-01")), [])
+	assert.deepEqual((await status(ledger, "2026-05-01")).credits, [])
 })
 
 test("1099-R obligations come only with plan activity", async () => {
@@ -222,12 +336,45 @@ test("1099-R obligations come only with plan activity", async () => {
 	const forms = async () =>
 		(await blockers(ledger, "2027-01-02")).filter((what) => what === "File F1099R" || what === "File F1096")
 	assert.deepEqual(await forms(), [])
-	await op(ledger, "transfer.record", {
-		kind: "AfterTax",
-		year: 2026,
-		mercury: sendMoney(),
-		sentOn: "2026-02-01",
-		amount: "1000.00"
-	})
+	await op(ledger, "plan.rollover", { account: "Roth", on: "2026-02-01", gross: "400.00" })
 	assert.deepEqual(await forms(), ["File F1099R", "File F1096"])
+})
+
+test("each year's policy and election block from January 1 and show from December 1", async () => {
+	const ledger = await ledger2026()
+	const policy = ["Set the federal policy", "Record the signed election", "Set the TX policy"]
+	const upcoming = async (asOf: string) => whats((await status(ledger, asOf)).upcoming)
+	assert.deepEqual(
+		(await upcoming("2026-11-30")).filter((what) => policy.includes(what)),
+		[]
+	)
+	assert.deepEqual(
+		(await upcoming("2026-12-01")).filter((what) => policy.includes(what)),
+		policy
+	)
+	assert.deepEqual((await status(ledger, "2026-12-01")).setup, ["plan.set 2027"])
+	assert.deepEqual(
+		(await blockers(ledger, "2027-01-01")).filter((what) => policy.includes(what)),
+		policy
+	)
+	await op(ledger, "policy.set", federal(2027))
+	await op(ledger, "election.set", { year: 2027, roth: "24500.00", afterTax: "0.00", signedOn: "2026-12-15" })
+	assert.deepEqual(
+		(await blockers(ledger, "2027-01-01")).filter((what) => policy.includes(what)),
+		["Set the TX policy"]
+	)
+	await op(ledger, "policy.set", texas(2027))
+	assert.deepEqual(
+		(await blockers(ledger, "2027-01-01")).filter((what) => policy.includes(what)),
+		[]
+	)
+})
+
+test("returns begin with employment, not before it", async () => {
+	const ledger = await ledger2026("2026-04-01")
+	const items = (await status(ledger, "2026-07-01")).blockers as { what: string; period: string }[]
+	assert.deepEqual(
+		items.map((item) => `${item.what} ${item.period}`),
+		["File F941 2026Q2", "File C3 2026Q2"]
+	)
 })

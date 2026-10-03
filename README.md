@@ -4,8 +4,9 @@ Payroll for the wagie who signs their own checks.
 
 A local payroll and bookkeeping ledger for a single-owner Texas S corporation:
 weekly paychecks against a salary target, Roth deferrals, owner distributions,
-the mega backdoor Roth, federal and Texas payroll taxes, and the returns that
-report them. TypeScript and Effect over [BumbleDB](https://www.npmjs.com/package/@bjornpagen/bumbledb).
+the mega backdoor Roth, federal and Texas payroll taxes, the plan's rollovers,
+and the returns that report them. TypeScript and Effect over
+[BumbleDB](https://www.npmjs.com/package/@bjornpagen/bumbledb).
 
 [Operating skill](SKILL.md) · [Data model](src/schema.ts)
 
@@ -13,26 +14,47 @@ report them. TypeScript and Effect over [BumbleDB](https://www.npmjs.com/package
 
 Every fact is stored once, and every invariant the data can state is a law the
 database judges on each write: keys, containment, capacity, closed rosters,
-sum types and half-open intervals.
+sum types and half-open intervals. What follows from the facts is computed,
+never stored.
 
-- **A paycheck is one row a day**, its earnings a slice of the year's wage axis
-  `[ytd, ytd + gross)`. Social security, FUTA and SUTA tax the part of that
-  slice under their wage bases, so crossing a base is not a special case.
+- **Rosters carry the rules.** Each return, tax account, tax and plan account
+  is a closed roster entry with typed columns: its jurisdiction, period, due
+  rule, the ways it may be filed, the line that states what a period owes.
+  Laws are generated from the rosters, and obligations interpret them.
+- **Policy is data, per year.** A year's limits and wage ceiling, and each
+  banded tax's slice of the year's wage axis at a rate in parts per million:
+  social security to its base, Medicare without one, FUTA and Texas UI to
+  theirs. Every year must price each federal tax exactly once.
+- **A paycheck is one row a day** storing its gross. Its place on the year's
+  wage axis, `[ytd, ytd + gross)`, follows from the paychecks before it, and
+  each tax applies to the part of it inside the tax's band, so crossing a wage
+  base is not a special case. What each employee tax withheld is stored as
+  assessed.
 - **Money out is a Mercury transfer**, keyed by Mercury's Tracking ID, with one
   arm saying what it paid: net pay, a Roth deferral, an after-tax contribution,
   a distribution, or a tax debit.
 - **A tax payment** is one row for EFTPS and TWC alike, keyed by its EFT or
   confirmation number and funded by its Mercury debit. Filing a return never
-  clears money owed; only payments do.
+  clears money owed; only payments do, and a penalty never pays tax.
 - **A filing** records how it was filed (certified mail, e-file, or furnished)
-  and every line as filed. A 941-X is a correction of its 941.
-- **History that predates these rules** is held by import-only legacy rows,
-  capped by closed rosters no operation can grow.
+  and every line as filed. Once filed, its liability line is what the period
+  owes. A 941-X restates the 941's correctable lines, and its line 27 is owed
+  when mailed.
+- **The 941 is computed the IRS way**: FICA priced on the quarter's totals,
+  line 7 carrying the rounding of the employee share, and each month of line 16
+  its paychecks' tax, the last month absorbing the quarter's cent.
+- **The plan's books.** Roth basis enters only as Roth deferral and after-tax
+  wires; Carry converts after-tax deposits to Roth as they settle. A rollover
+  is a whole-account sweep into the owner's Roth IRA, and the basis it carries
+  is the wires since the last sweep. The 1099-R follows.
+- **History** is the span the ledger did not record. Only an import writes it,
+  and only inside it may a filing be attested or a payment have been made
+  outside Mercury.
 
 Payroll is a system of checks and balances. `status` lists what is owed, when
 it opens and falls due, and the op that clears it: a wire to send, a deposit, a
-balance, a return, a correction. `payroll.post` refuses while anything due by
-its day is open.
+balance, a return, a correction, next year's policy. `payroll.post` refuses
+while anything open by its day remains.
 
 ## Use
 
@@ -46,22 +68,22 @@ node src/cli.ts payroll.quote '{"paidOn":"2026-10-09","input":{"by":"plan"}}'
 ```
 
 One op, one JSON object in, one JSON object out. Money is dollars with two
-decimals (`"8000.00"`), days are `"2026-10-02"`, periods `"2026"`, `"2026Q3"`
-or `"2026-10"`. Input is strict and parsed once at the boundary. A refusal
-prints `{code, message}` and exits 1.
+decimals (`"8000.00"`), rates are percents (`"6.2"`), days are `"2026-10-02"`,
+periods `"2026"`, `"2026Q3"` or `"2026-10"`. Input is strict and parsed once at
+the boundary. A refusal prints `{code, message}` and exits 1.
 
 The ledger lives in the ignored `private/ledger/`. `export` writes every fact as
 canonical JSON to `private/Wagie Tools - CURRENT.facts.json`: that file is the
-backup, and `import` restores it into a fresh ledger. A schema change is the
-same path: export, transform, import.
+backup, and `import` restores it into a fresh ledger.
 
 ## Layout
 
 - `src/schema.ts`: rosters, relations and laws.
 - `src/check.ts`, `src/gross-up.ts`: a paycheck's arithmetic and how it is sized.
 - `src/forms.ts`: every line of every return, computed from the facts.
+- `src/plan.ts`: the plan's books: sweeps, the basis they carry, the 1099-R.
 - `src/obligations.ts`: what is owed and what blocks payroll.
-- `src/reports.ts`, `src/calendar.ts`: reports, and deadlines rolled past
+- `src/reports.ts`, `src/calendar.ts`: reports, and the due rule, rolled past
   weekends and DC holidays.
 - `src/ops.ts`, `src/cli.ts`, `src/db.ts`: the op table, the command line and
   the store.

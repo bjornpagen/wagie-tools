@@ -1,6 +1,6 @@
 {
 	"name": "wagie-tools",
-	"version": "3.0.0",
+	"version": "1.0.0",
 	"private": true,
 	"type": "module",
 	"packageManager": "pnpm@11.15.1",
@@ -11,8 +11,8 @@
 		"cli": "node src/cli.ts",
 		"typecheck": "tsc --noEmit",
 		"test": "node --test test/*.test.ts",
-		"lint": "biome check src test scripts package.json tsconfig.json biome.json",
-		"format": "biome check --write src test scripts package.json tsconfig.json biome.json",
+		"lint": "biome check src test package.json tsconfig.json biome.json",
+		"format": "biome check --write src test package.json tsconfig.json biome.json",
 		"check": "pnpm typecheck && pnpm lint && pnpm test"
 	},
 	"dependencies": {

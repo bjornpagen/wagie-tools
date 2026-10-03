@@ -3,21 +3,20 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { test } from "node:test"
 import { Exit } from "effect"
 import { cli, describeCause } from "../src/cli.ts"
-import { quarterSpan } from "../src/core/time.ts"
-import { insert } from "../src/db.ts"
-import { filingId } from "../src/ops.ts"
 import {
 	achTrace,
-	commit,
 	deposit,
+	federal,
 	freshLedger,
 	ledger2026,
 	op,
 	paid,
-	rules2026,
+	read,
 	runtime,
 	scratchPath,
-	sendMoney
+	sendMoney,
+	setup,
+	texas
 } from "./support.ts"
 
 /* Every write echoes its input in boundary units, and running it again is no
@@ -33,14 +32,10 @@ const twice = async (ledger: string, name: string, payload: object) => {
 
 test("each write round-trips and an identical re-run is no change", async () => {
 	const ledger = freshLedger()
-	const setup = {
-		business: { ein: "00-0000000", name: "Example Farm LLC", twcAccount: "00-000000-0" },
-		employee: { ssn: "000-00-0000", firstName: "Pat", lastName: "Owner", address: "1 Main St" },
-		employedFrom: "2026-01-02"
-	}
-	assert.deepEqual(await op(ledger, "setup", setup), { outcome: "committed", ...setup })
-	await assert.rejects(op(ledger, "setup", setup), { code: "LedgerExists" })
-	assert.deepEqual(await twice(ledger, "year.set", rules2026), rules2026)
+	assert.deepEqual(await op(ledger, "setup", setup()), { outcome: "committed", ...setup() })
+	await assert.rejects(op(ledger, "setup", setup()), { code: "LedgerExists" })
+	assert.deepEqual(await twice(ledger, "policy.set", federal(2026)), federal(2026))
+	assert.deepEqual(await twice(ledger, "policy.set", texas(2026)), texas(2026))
 	const plan = { year: 2026, salary: "120000.00", fitPerCheck: "0.01" }
 	assert.deepEqual(await twice(ledger, "plan.set", plan), plan)
 	const election = { year: 2026, roth: "24500.00", afterTax: "47500.00", signedOn: "2026-01-02" }
@@ -55,11 +50,10 @@ test("each write round-trips and an identical re-run is no change", async () => 
 	assert.deepEqual(blockers, [])
 	await assert.rejects(
 		op(ledger, "payroll.post", { paidOn: "2026-01-09", input: { by: "gross", gross: "100.00" } }),
-		{
-			code: "WageExists"
-		}
+		{ code: "WageExists" }
 	)
-	assert.equal((await twice(ledger, "payroll.correct", { paidOn: "2026-01-09", fit: "1.00" })).fit, "1.00")
+	const fixed = await twice(ledger, "payroll.correct", { paidOn: "2026-01-09", fit: "1.00" })
+	assert.deepEqual([fixed.fit, fixed.ss, fixed.medicare], ["1.00", check.ss, check.medicare])
 	await op(ledger, "payroll.correct", { paidOn: "2026-01-09", fit: "0.01" })
 
 	const wires = [
@@ -86,34 +80,72 @@ test("each write round-trips and an identical re-run is no change", async () => 
 		sentOn: "2026-02-11"
 	}
 	assert.deepEqual(await twice(ledger, "tax.paid", payment), payment)
-	const filing = {
+	const sweep = { account: "Roth", on: "2026-02-02", gross: "1150.00" }
+	assert.deepEqual(await twice(ledger, "plan.rollover", sweep), {
+		...sweep,
+		taxable: "0.00",
+		basis: "1100.00"
+	})
+
+	const c3 = {
 		form: "C3",
 		period: "2026Q1",
 		method: "Electronic",
 		on: "2026-04-02",
-		confirmation: "40679134"
+		confirmation: "12345678"
 	}
-	assert.deepEqual(await twice(ledger, "filing.record", filing), filing)
+	assert.deepEqual(await twice(ledger, "filing.record", c3), c3)
 	const f941 = {
 		form: "F941",
 		period: "2026Q1",
 		method: "CertifiedMail",
 		mailedOn: "2026-04-02",
-		tracking: "70201810000002650240"
+		tracking: "9400100000000000000003"
 	}
 	await twice(ledger, "filing.record", f941)
-	const amend = { period: "2026Q1", mailedOn: "2026-05-01", tracking: "9589071052704586360357" }
-	assert.deepEqual(await twice(ledger, "filing.amend", amend), amend)
-	assert.equal((await op(ledger, "filing.upgrade", f941)).outcome, "no-change")
-	await assert.rejects(op(ledger, "filing.upgrade", { ...f941, tracking: "70201810000002650241" }), {
-		code: "NotPrior"
+	const correction = { period: "2026Q1", mailedOn: "2026-05-01", tracking: "9400100000000000000004" }
+	assert.deepEqual(await twice(ledger, "filing.correct", correction), correction)
+	await assert.rejects(op(ledger, "filing.correct", { ...correction, tracking: "9400100000000000000005" }), {
+		code: "Corrected"
 	})
-	const move = { year: 2026, account: "Pretax", code: "G", gross: "10.00", taxable: "10.00" }
-	assert.deepEqual(await twice(ledger, "plan.distribution", move), move)
 
-	const status = await op(ledger, "status", { asOf: "2026-01-09" })
-	assert.equal(status.asOf, "2026-01-09")
+	const facts = await read(ledger)
+	const filed = (form: string) => facts.Filing.find((row) => row.form === form)?.id
+	const figures = facts.FiledFigures.filter((row) => row.filing === filed("F941"))
+	assert.equal(figures.length, 18)
+	assert.equal(figures.find((row) => row.line === "F941_16_3")?.value, 0n)
+	assert.equal(facts.FiledFigures.filter((row) => row.filing === filed("C3")).length, 7)
+	assert.deepEqual(facts.CorrectedFigures.map((row) => row.line).sort(), [
+		"F941_2",
+		"F941_3",
+		"F941_5a1",
+		"F941_5c1",
+		"F941_7"
+	])
+	assert.equal((await op(ledger, "status", { asOf: "2026-01-09" })).asOf, "2026-01-09")
 	assert.equal((await op(ledger, "report", { year: 2026, quarter: 1 })).period, "2026Q1")
+})
+
+test("policy.set replaces one jurisdiction's year whole", async () => {
+	const ledger = await ledger2026()
+	const raised = {
+		...federal(2026),
+		rates: { ...federal(2026).rates, SocialSecurity: { rate: "6.2", base: "190000.00" } }
+	}
+	assert.equal((await op(ledger, "policy.set", raised)).outcome, "committed")
+	const bands = (await read(ledger)).TaxBand
+	assert.equal(bands.length, 4)
+	assert.equal(bands.find((band) => band.tax === "SocialSecurity")?.wages.end, 19_000_000n)
+	assert.equal((await op(ledger, "policy.set", raised)).outcome, "no-change")
+	assert.equal((await op(ledger, "policy.set", texas(2026))).outcome, "no-change")
+	await assert.rejects(op(ledger, "policy.set", { ...texas(2027) }), { code: "LawRefused" })
+	await assert.rejects(
+		op(ledger, "policy.set", {
+			...federal(2026),
+			limits: { ...federal(2026).limits, additionsLimit: "60000.00" }
+		}),
+		{ code: "Over415c" }
+	)
 })
 
 test("an export imports into an identical ledger", async () => {
@@ -143,34 +175,25 @@ test("a refused import leaves no ledger behind", async () => {
 	assert.equal(existsSync(copy), false)
 })
 
-test("a grandfathered filing upgrades once, unless it has a 941-X", async () => {
-	const ledger = await ledger2026("2025-05-22")
-	const q2 = filingId("F941", quarterSpan(2026, 2))
-	const q1 = filingId("F941", quarterSpan(2026, 1))
-	await commit(ledger, [
-		...insert("Filing", { id: q1, form: "F941", period: quarterSpan(2026, 1), method: "Prior" }),
-		...insert("Prior", { filing: q1, legacy: "F941_2026Q1" }),
-		...insert("Filing", { id: q2, form: "F941", period: quarterSpan(2026, 2), method: "Prior" }),
-		...insert("Prior", { filing: q2, legacy: "F941_2026Q2" })
-	])
-	await op(ledger, "filing.amend", {
-		period: "2026Q2",
-		mailedOn: "2026-09-10",
-		tracking: "9589071052704586360357"
+test("an import attests only filings inside its history", async () => {
+	const ledger = await ledger2026()
+	await op(ledger, "filing.record", {
+		form: "C3",
+		period: "2026Q1",
+		method: "Electronic",
+		on: "2026-04-02",
+		confirmation: "1"
 	})
-	const how = { method: "CertifiedMail", mailedOn: "2026-04-20", tracking: "70201810000002650001" }
-	await assert.rejects(op(ledger, "filing.upgrade", { form: "F941", period: "2026Q2", ...how }), {
-		code: "Corrected"
-	})
-	await assert.rejects(op(ledger, "filing.upgrade", { form: "C3", period: "2026Q1", ...how }), {
-		code: "NotPrior"
-	})
-	const upgraded = await op(ledger, "filing.upgrade", { form: "F941", period: "2026Q1", ...how })
-	assert.equal(upgraded.outcome, "committed")
-	assert.equal(
-		(await op(ledger, "filing.upgrade", { form: "F941", period: "2026Q1", ...how })).outcome,
-		"no-change"
-	)
+	const { out } = await op(ledger, "export", { out: scratchPath("filed.json") })
+	const facts = JSON.parse(readFileSync(out as string, "utf8"))
+	facts.Filing = facts.Filing.map((row: { method: string }) => ({ ...row, method: "Attested" }))
+	facts.Electronic = []
+	const attested = scratchPath("attested.json")
+	writeFileSync(attested, JSON.stringify(facts))
+	await assert.rejects(op(freshLedger(), "import", { file: attested }), { code: "LawRefused" })
+	facts.History = [{ span: { start: facts.Filing[0].period.start, end: facts.Filing[0].period.end } }]
+	writeFileSync(attested, JSON.stringify(facts))
+	assert.equal((await op(freshLedger(), "import", { file: attested })).outcome, "committed")
 })
 
 test("the boundary refuses what the ledger can't hold", async () => {
@@ -203,12 +226,20 @@ test("the boundary refuses what the ledger can't hold", async () => {
 		},
 		"InvalidInput"
 	)
-	await refuses("filing.record", { form: "F941", period: "2026Q1", method: "Prior" }, "InvalidInput")
+	await refuses("filing.record", { form: "F941", period: "2026Q1", method: "Attested" }, "InvalidInput")
 	await refuses(
 		"filing.record",
 		{ form: "F941", period: "2026", method: "CertifiedMail", mailedOn: "2027-01-02", tracking: "1" },
 		"InvalidPeriod"
 	)
+	await refuses("tax.paid", { ...depositInput, account: "Federal940", period: "2026Q1" }, "InvalidPeriod")
+	await refuses(
+		"policy.set",
+		{ ...texas(2026), rates: { TexasUnemployment: { rate: "2.70001" } } },
+		"InvalidInput"
+	)
+	await refuses("policy.set", { ...texas(2026), rates: { Medicare: { rate: "1.45" } } }, "InvalidInput")
+	await refuses("plan.rollover", { account: "Roth", on: "2026-02-02", gross: "0.00" }, "InvalidInput")
 	await refuses("payroll.correct", { paidOn: "2026-01-09", gross: "2100.00" }, "GrossNotLatest")
 	await refuses("payroll.post", { paidOn: "2026-01-08", input: { by: "gross", gross: "1.00" } }, "Backdated")
 	await refuses(
@@ -219,10 +250,40 @@ test("the boundary refuses what the ledger can't hold", async () => {
 	await refuses("status", { asOf: "2026-02-30" }, "InvalidInput")
 	await refuses("nonsense", {}, "UnknownOp")
 })
+const depositInput = {
+	tracker: "270000000000002",
+	account: "Federal941",
+	kind: "Deposit",
+	period: "2026Q1",
+	amount: "1.00",
+	initiatedOn: "2026-02-10",
+	mercury: "061036010000002",
+	sentOn: "2026-02-11"
+}
 
 test("with no op, the command line lists the ops", async () => {
 	const listed = (await runtime.runPromise(cli([]))) as { op: string; summary: string }[]
-	assert.ok(listed.some((entry) => entry.op === "payroll.post"))
+	assert.deepEqual(
+		listed.map((entry) => entry.op),
+		[
+			"setup",
+			"policy.set",
+			"plan.set",
+			"election.set",
+			"payroll.quote",
+			"payroll.post",
+			"payroll.correct",
+			"transfer.record",
+			"tax.paid",
+			"plan.rollover",
+			"filing.record",
+			"filing.correct",
+			"status",
+			"report",
+			"export",
+			"import"
+		]
+	)
 	const exit = await runtime.runPromiseExit(cli(["status", "[]"]))
 	assert.ok(Exit.isFailure(exit))
 	assert.deepEqual(describeCause(exit.cause), [{ code: "InvalidJson", message: "Give one JSON object" }])

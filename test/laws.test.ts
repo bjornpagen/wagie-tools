@@ -1,20 +1,24 @@
 import assert from "node:assert/strict"
 import { before, test } from "node:test"
+import type { Uuid } from "@bjornpagen/bumbledb"
 import { parseDollars as $ } from "../src/core/boundary.ts"
 import { parseDate, point, quarterSpan, yearSpan } from "../src/core/time.ts"
-import { naturalId } from "../src/core/values.ts"
+import { MAX_U64, naturalId } from "../src/core/values.ts"
 import { type Edit, insert, remove } from "../src/db.ts"
 import { filingId, wageId } from "../src/ops.ts"
+import { formLines, type LineHandle, type TaxHandle } from "../src/schema.ts"
 import { achTrace, commit, judge, ledger2026, op, paid, read, sendMoney } from "./support.ts"
 
 /* Each case judges one bad change against a valid ledger; nothing commits. */
 
 let ledger: string
-let wage: { id: ReturnType<typeof wageId> }
+let wage: Uuid
 let netPay: string
 const c3 = filingId("C3", quarterSpan(2026, 1))
 const f941 = filingId("F941", quarterSpan(2026, 1))
-const prior = filingId("F941", quarterSpan(2025, 2))
+const attested = filingId("F941", quarterSpan(2025, 2))
+const figuresOf = (filing: Uuid, lines: readonly LineHandle[]) =>
+	insert("FiledFigures", ...lines.map((line) => ({ filing, line, value: 0n })))
 
 before(async () => {
 	ledger = await ledger2026()
@@ -34,21 +38,21 @@ before(async () => {
 		tracking: "9400100000000000000001"
 	})
 	await commit(ledger, [
-		...insert("Filing", { id: prior, form: "F941", period: quarterSpan(2025, 2), method: "Prior" }),
-		...insert("Prior", { filing: prior, legacy: "F941_2025Q2" }),
+		...insert("History", { span: yearSpan(2025) }),
+		...insert("Filing", { id: attested, form: "F941", period: quarterSpan(2025, 2), method: "Attested" }),
+		...figuresOf(attested, formLines.F941),
 		...insert("TaxPayment", {
 			tracker: "37834317",
 			account: "TexasUI",
 			kind: "Deposit",
 			period: quarterSpan(2025, 3),
 			amount: $("243.00"),
-			initiatedOn: parseDate("2025-10-20"),
+			initiatedOn: point(parseDate("2025-10-20")),
 			funding: "OutsideMercury"
-		}),
-		...insert("OutsideMercury", { payment: "37834317", legacy: "TWC_37834317" })
+		})
 	])
 	const facts = await read(ledger)
-	wage = facts.Wage[0] ?? assert.fail("no wage")
+	wage = facts.Wage[0]?.id ?? assert.fail("no wage")
 	netPay = facts.NetPay[0]?.transfer ?? assert.fail("no net pay")
 })
 
@@ -57,56 +61,85 @@ const refuses = async (edits: readonly Edit[], kind: "functionality" | "containm
 	assert.notEqual(laws, "admitted")
 	assert.match(laws, new RegExp(`^${kind}:`, "m"), laws)
 }
-const wageRow = (paidOn: string, start: string, end: string, roth = "0.00") => ({
-	id: wageId(parseDate(paidOn)),
-	paidOn: point(parseDate(paidOn)),
-	year: 2026n,
-	earnings: { start: $(start), end: $(end) },
-	fit: 0n,
-	ss: 0n,
-	medicare: 0n,
-	roth: $(roth)
-})
+/** A paycheck and its federal withholdings. */
+const paycheck = (
+	paidOn: string,
+	gross: string,
+	roth = "0.00",
+	taxes: readonly TaxHandle[] = ["FIT", "SocialSecurity", "Medicare"],
+	year = 2026n
+) => {
+	const id = wageId(parseDate(paidOn))
+	return [
+		...insert("Wage", { id, paidOn: point(parseDate(paidOn)), year, gross: $(gross), roth: $(roth) }),
+		...insert("Withholding", ...taxes.map((tax) => ({ wage: id, tax, amount: 0n })))
+	]
+}
 const transfer = (
 	kind: "NetPay" | "RothDeferral" | "AfterTax" | "Distribution" | "Tax",
 	mercury = sendMoney()
 ) => insert("Transfer", { mercury, sentOn: parseDate("2026-01-20"), kind })
-const payment = (tracker: string, funding: "Mercury" | "OutsideMercury" = "Mercury") =>
+const payment = (tracker: string, funding: "Mercury" | "OutsideMercury" = "Mercury", on = "2026-01-20") =>
 	insert("TaxPayment", {
 		tracker,
 		account: "Federal941",
 		kind: "Deposit",
 		period: quarterSpan(2026, 1),
 		amount: $("100.00"),
-		initiatedOn: parseDate("2026-01-20"),
+		initiatedOn: point(parseDate(on)),
 		funding
 	})
 
 test("the valid ledger admits a valid change", async () => {
-	assert.equal(await judge(ledger, insert("Wage", wageRow("2026-01-16", "2000.00", "3000.00"))), "admitted")
+	assert.equal(await judge(ledger, paycheck("2026-01-16", "1000.00")), "admitted")
+})
+
+test("one employer, one employee, one plan, each with its own TIN", async () => {
+	const employer = { role: "Employer" as const, name: "Another LLC", tin: "00-0000009", address: "x" }
+	await refuses(insert("Party", employer), "functionality")
+	const [owner] = (await read(ledger)).Party.filter((row) => row.role === "Employee")
+	await refuses(
+		[
+			...remove("Party", owner ?? assert.fail("no employee")),
+			...insert("Party", { role: "Employee", name: "Twin", tin: "00-0000001", address: "x" })
+		],
+		"functionality"
+	)
+})
+
+test("registered only with states, and wherever the owner works", async () => {
+	await refuses(insert("Registration", { state: "Federal", number: "1" }), "containment")
+	const [registration] = (await read(ledger)).Registration
+	await refuses(remove("Registration", registration ?? assert.fail("no registration")), "containment")
 })
 
 test("one paycheck per day", () =>
 	refuses(
-		insert("Wage", { ...wageRow("2026-01-09", "2000.00", "3000.00"), id: naturalId("another") }),
+		insert("Wage", {
+			id: naturalId("another"),
+			paidOn: point(parseDate("2026-01-09")),
+			year: 2026n,
+			gross: 1n,
+			roth: 0n
+		}),
 		"functionality"
 	))
 
-test("earnings never overlap", () =>
-	refuses(insert("Wage", wageRow("2026-01-16", "1999.99", "3000.00")), "functionality"))
-
 test("a paycheck is paid during employment, in its year, under an election", async () => {
-	await refuses(insert("Wage", wageRow("2026-01-01", "2000.00", "2100.00")), "containment")
-	await refuses(
-		insert("Wage", { ...wageRow("2026-01-16", "2000.00", "3000.00"), year: 2027n }),
-		"containment"
-	)
+	await refuses(paycheck("2026-01-01", "100.00"), "containment")
+	await refuses(paycheck("2026-01-16", "100.00", "0.00", undefined, 2027n), "containment")
 	const [election] = (await read(ledger)).Election
 	await refuses(remove("Election", election ?? assert.fail("no election")), "containment")
 })
 
+test("a paycheck pays at least a cent, never more Roth than gross", async () => {
+	await refuses(paycheck("2026-01-16", "0.00"), "capacity")
+	await refuses(paycheck("2026-01-16", "100.00", "100.01"), "capacity")
+	assert.equal(await judge(ledger, paycheck("2026-01-16", "100.00", "100.00")), "admitted")
+})
+
 test("Roth stays within the election, the election within 402(g)", async () => {
-	await refuses(insert("Wage", wageRow("2026-01-16", "2000.00", "30000.00", "24000.01")), "capacity")
+	await refuses(paycheck("2026-01-16", "30000.00", "24000.01"), "capacity")
 	const [election] = (await read(ledger)).Election
 	const old = election ?? assert.fail("no election")
 	await refuses(
@@ -134,20 +167,37 @@ test("elections together stay within 415(c)", () =>
 			afterTax: "47500.01",
 			signedOn: "2026-01-02"
 		}),
-		{
-			code: "Over415c"
-		}
+		{ code: "Over415c" }
 	))
 
-test("a year's wages stay under the ceiling", () =>
-	refuses(insert("Wage", wageRow("2026-01-16", "2000.00", "200000.01")), "capacity"))
+test("a year's wages stay under the ceiling", () => refuses(paycheck("2026-01-16", "198000.01"), "capacity"))
+
+test("every paycheck withholds each federal employee tax exactly once, and no employer tax", async () => {
+	await refuses(paycheck("2026-01-16", "100.00", "0.00", ["FIT", "SocialSecurity"]), "capacity")
+	await refuses(insert("Withholding", { wage, tax: "FederalUnemployment", amount: 0n }), "containment")
+	await refuses(insert("Withholding", { wage, tax: "FIT", amount: 2n }), "functionality")
+})
+
+test("every year prices each federal banded tax exactly once, and never FIT", async () => {
+	const band = (tax: "SocialSecurity" | "FIT", year = 2026n) => ({
+		year,
+		tax,
+		wages: { start: 0n, end: MAX_U64 },
+		rate: 1n
+	})
+	await refuses(insert("TaxBand", band("SocialSecurity")), "functionality")
+	await refuses(insert("TaxBand", band("FIT")), "containment")
+	await refuses(insert("TaxBand", band("SocialSecurity", 2027n)), "containment")
+	const medicare = (await read(ledger)).TaxBand.find((row) => row.tax === "Medicare")
+	await refuses(remove("TaxBand", medicare ?? assert.fail("no Medicare band")), "capacity")
+})
 
 test("Roth wires never exceed the paycheck's Roth", async () => {
 	const mercury = sendMoney()
 	await refuses(
 		[
 			...transfer("RothDeferral", mercury),
-			...insert("RothDeferral", { transfer: mercury, wage: wage.id, amount: 1n })
+			...insert("RothDeferral", { transfer: mercury, wage, amount: 1n })
 		],
 		"capacity"
 	)
@@ -158,10 +208,7 @@ test("every transfer has exactly its one arm", async () => {
 	await refuses(insert("Distribution", { transfer: sendMoney(), amount: 1n }), "containment")
 	const mercury = sendMoney()
 	await refuses(
-		[
-			...transfer("Distribution", mercury),
-			...insert("NetPay", { transfer: mercury, wage: wage.id, amount: 1n })
-		],
+		[...transfer("Distribution", mercury), ...insert("NetPay", { transfer: mercury, wage, amount: 1n })],
 		"containment"
 	)
 })
@@ -180,7 +227,7 @@ test("a Tracking ID names one transfer", () =>
 		"functionality"
 	))
 
-test("every tax payment is funded by exactly one debit or a legacy row", async () => {
+test("a Mercury payment has exactly one debit; history's may have none", async () => {
 	await refuses(payment("270000000000001"), "containment")
 	const [first, second] = [achTrace(), achTrace()]
 	await refuses(
@@ -193,53 +240,48 @@ test("every tax payment is funded by exactly one debit or a legacy row", async (
 		],
 		"functionality"
 	)
+	assert.equal(await judge(ledger, payment("39613547", "OutsideMercury", "2025-07-03")), "admitted")
+	await refuses(payment("39613548", "OutsideMercury"), "containment")
 })
 
-test("no op can grow the legacy sets", async () => {
+test("a form is filed only as its rules allow, with every line of it", async () => {
+	const id = filingId("F941", quarterSpan(2026, 2))
+	const filing = (method: "Electronic" | "Furnished") =>
+		insert("Filing", { id, form: "F941", period: quarterSpan(2026, 2), method })
 	await refuses(
 		[
-			...payment("39613547", "OutsideMercury"),
-			...insert("OutsideMercury", { payment: "39613547", legacy: "TWC_37834317" })
+			...filing("Electronic"),
+			...insert("Electronic", { filing: id, on: parseDate("2026-07-02"), confirmation: "1" }),
+			...figuresOf(id, formLines.F941)
 		],
-		"functionality"
+		"containment"
 	)
-	const another = filingId("F941", quarterSpan(2025, 3))
 	await refuses(
 		[
-			...insert("Filing", { id: another, form: "F941", period: quarterSpan(2025, 3), method: "Prior" }),
-			...insert("Prior", { filing: another, legacy: "F941_2025Q2" })
+			...filing("Furnished"),
+			...insert("Furnished", { filing: id, on: parseDate("2026-07-02") }),
+			...figuresOf(id, formLines.F941)
 		],
-		"functionality"
+		"containment"
 	)
+	const mailed = [
+		...insert("Filing", { id, form: "F941", period: quarterSpan(2026, 2), method: "CertifiedMail" }),
+		...insert("CertifiedMail", { filing: id, mailedOn: parseDate("2026-07-02"), tracking: "9400" })
+	]
+	assert.equal(await judge(ledger, [...mailed, ...figuresOf(id, formLines.F941)]), "admitted")
+	await refuses([...mailed, ...figuresOf(id, formLines.F941.slice(1))], "capacity")
+	await refuses([...mailed, ...figuresOf(id, [...formLines.F941.slice(1), "C3_tax"])], "containment")
 })
 
-test("a form is filed only as its rules allow, with every line", async () => {
+test("only history is attested", async () => {
 	const id = filingId("F941", quarterSpan(2026, 2))
 	await refuses(
 		[
-			...insert("Filing", { id, form: "F941", period: quarterSpan(2026, 2), method: "Electronic" }),
-			...insert("Electronic", { filing: id, on: parseDate("2026-07-02"), confirmation: "1" }),
-			...insert("FiledFigures", { filing: id, line: "F941_2", value: 1n })
+			...insert("Filing", { id, form: "F941", period: quarterSpan(2026, 2), method: "Attested" }),
+			...figuresOf(id, formLines.F941)
 		],
 		"containment"
 	)
-	await refuses(
-		[
-			...insert("Filing", { id, form: "F941", period: quarterSpan(2026, 2), method: "Furnished" }),
-			...insert("Furnished", { filing: id, on: parseDate("2026-07-02") }),
-			...insert("FiledFigures", { filing: id, line: "F941_2", value: 1n })
-		],
-		"containment"
-	)
-	const w2 = filingId("W2", yearSpan(2026))
-	await refuses(
-		[
-			...insert("Filing", { id: w2, form: "W2", period: yearSpan(2026), method: "Furnished" }),
-			...insert("Furnished", { filing: w2, on: parseDate("2027-01-20") })
-		],
-		"capacity"
-	)
-	await refuses(insert("FiledFigures", { filing: prior, line: "F941_2", value: 1n }), "capacity")
 })
 
 test("one filing per form and period", () =>
@@ -252,31 +294,30 @@ test("one filing per form and period", () =>
 				method: "Electronic"
 			}),
 			...insert("Electronic", { filing: naturalId("twin"), on: parseDate("2026-04-03"), confirmation: "2" }),
-			...insert("FiledFigures", { filing: naturalId("twin"), line: "C3_tax", value: 1n })
+			...figuresOf(naturalId("twin"), formLines.C3)
 		],
 		"functionality"
 	))
 
-test("a 941-X corrects a 941, with 941 lines", async () => {
-	const correction = (filing: typeof c3) =>
+test("a 941-X corrects a 941 and restates exactly its correctable lines", async () => {
+	const correction = (filing: Uuid) =>
 		insert("Correction", { filing, mailedOn: parseDate("2026-05-01"), tracking: "9400" })
-	await refuses(
-		[...correction(c3), ...insert("CorrectedFigures", { filing: c3, line: "F941_2", value: 1n })],
-		"containment"
-	)
-	await refuses(
-		[...correction(f941), ...insert("CorrectedFigures", { filing: f941, line: "C3_tax", value: 1n })],
-		"containment"
-	)
-	await refuses(correction(f941), "capacity")
-	assert.equal(
-		await judge(ledger, [
-			...correction(f941),
-			...insert("CorrectedFigures", { filing: f941, line: "F941_2", value: 1n })
-		]),
-		"admitted"
-	)
+	const restated = (filing: Uuid, lines: readonly LineHandle[]) =>
+		insert("CorrectedFigures", ...lines.map((line) => ({ filing, line, value: 1n })))
+	const five: LineHandle[] = ["F941_2", "F941_3", "F941_5a1", "F941_5c1", "F941_7"]
+	await refuses([...correction(c3), ...restated(c3, five)], "containment")
+	await refuses([...correction(f941), ...restated(f941, [...five.slice(1), "F941_12"])], "containment")
+	await refuses([...correction(f941), ...restated(f941, five.slice(1))], "capacity")
+	assert.equal(await judge(ledger, [...correction(f941), ...restated(f941, five)]), "admitted")
+})
+
+test("a sweep empties a hand-swept account and moves something", async () => {
+	const sweep = (account: "AfterTax" | "Roth", gross: bigint) =>
+		insert("Rollover", { account, on: parseDate("2026-02-02"), gross })
+	await refuses(sweep("AfterTax", 100n), "containment")
+	await refuses(sweep("Roth", 0n), "capacity")
+	assert.equal(await judge(ledger, sweep("Roth", 100n)), "admitted")
 })
 
 test("a recovery names real paychecks", () =>
-	refuses(insert("Recovery", { wage: naturalId("nobody"), recoveredBy: wage.id, amount: 1n }), "containment"))
+	refuses(insert("Recovery", { wage: naturalId("nobody"), recoveredBy: wage, amount: 1n }), "containment"))

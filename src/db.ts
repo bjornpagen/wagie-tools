@@ -27,13 +27,17 @@ export const backupOf = (ledger: string) =>
 
 /** The stored relations; rosters are ground facts of the schema itself. */
 export const stored = {
-	Business: S.Business,
-	Employee: S.Employee,
+	Party: S.Party,
+	Registration: S.Registration,
 	Employment: S.Employment,
+	Custody: S.Custody,
+	History: S.History,
 	TaxYear: S.TaxYear,
+	TaxBand: S.TaxBand,
 	PayPlan: S.PayPlan,
 	Election: S.Election,
 	Wage: S.Wage,
+	Withholding: S.Withholding,
 	Recovery: S.Recovery,
 	Transfer: S.Transfer,
 	NetPay: S.NetPay,
@@ -42,16 +46,14 @@ export const stored = {
 	Distribution: S.Distribution,
 	TaxDebit: S.TaxDebit,
 	TaxPayment: S.TaxPayment,
-	OutsideMercury: S.OutsideMercury,
 	Filing: S.Filing,
 	Electronic: S.Electronic,
 	CertifiedMail: S.CertifiedMail,
 	Furnished: S.Furnished,
-	Prior: S.Prior,
 	FiledFigures: S.FiledFigures,
 	Correction: S.Correction,
 	CorrectedFigures: S.CorrectedFigures,
-	PlanDistribution: S.PlanDistribution
+	Rollover: S.Rollover
 } as const
 export type Stored = typeof stored
 export type Name = keyof Stored

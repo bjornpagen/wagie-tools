@@ -1,19 +1,26 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { parseDollars as $ } from "../src/core/boundary.ts"
-import { parseDate, quarterSpan } from "../src/core/time.ts"
+import { parseDate, point } from "../src/core/time.ts"
 import { insert } from "../src/db.ts"
-import { commit, deposit, ledger2026, op, paid, sendMoney } from "./support.ts"
+import { commit, deposit, ledger2026, op, paid } from "./support.ts"
 
-type Forms = { [form: string]: { [line: string]: string | number } }
+type Form = {
+	names: { role: string; name: string }[]
+	account?: string
+	lines: { [line: string]: string | number }
+}
+type Forms = { [form: string]: Form }
+const forms = async (ledger: string, year: number, quarter?: number) =>
+	(await op(ledger, "report", quarter === undefined ? { year } : { year, quarter })).forms as Forms
 
-test("a quarter's 941 lines, line 7 carrying the fractions of cents", async () => {
+test("the 941 prices FICA on the quarter's totals; line 7 is the employee share's rounding", async () => {
 	const ledger = await ledger2026()
 	for (const paidOn of ["2026-01-09", "2026-01-16", "2026-01-23"])
 		await paid(ledger, paidOn, { by: "gross", gross: "1000.05" })
-	await deposit(ledger, "2026Q1", "459.03", "2026-02-10")
-	const { forms, totals } = await op(ledger, "report", { year: 2026, quarter: 1 })
-	assert.deepEqual((forms as Forms).F941, {
+	await deposit(ledger, "2026Q1", "459.04", "2026-02-10")
+	const { F941, C3 } = await forms(ledger, 2026, 1)
+	assert.deepEqual(F941?.lines, {
 		F941_1: 1,
 		F941_2: "3000.15",
 		F941_3: "0.03",
@@ -23,29 +30,97 @@ test("a quarter's 941 lines, line 7 carrying the fractions of cents", async () =
 		F941_5c2: "87.00",
 		F941_5e: "459.02",
 		F941_6: "459.05",
-		F941_7: "-0.02",
-		F941_10: "459.03",
-		F941_12: "459.03",
-		F941_13: "459.03",
+		F941_7: "-0.01", // withheld 229.50, the employee's share of 3,000.15 is 229.511475
+		F941_10: "459.04",
+		F941_12: "459.04",
+		F941_13: "459.04",
 		F941_14: "0.00",
 		F941_15: "0.00",
-		F941_16_1: "459.03",
+		F941_16_1: "459.04", // three checks of 153.01, and the quarter's cent
 		F941_16_2: "0.00",
 		F941_16_3: "0.00"
 	})
-	assert.deepEqual((forms as Forms).C3, {
+	assert.deepEqual(C3?.lines, {
 		C3_employees_1: 1,
 		C3_employees_2: 1,
 		C3_employees_3: 1,
 		C3_wages: "3000.15",
 		C3_taxable: "3000.15",
-		C3_rate: 270,
+		C3_rate: "2.7",
 		C3_tax: "81.00"
 	})
-	assert.equal((totals as { gross: string }).gross, "3000.15")
+	assert.equal(C3?.account, "00-000000-0")
+	assert.deepEqual(
+		F941?.names.map((party) => party.role),
+		["Employer"]
+	)
 })
 
-test("a 941-X shows the original, corrected and difference of each line", async () => {
+test("the last month with a paycheck absorbs the quarter's rounding", async () => {
+	const ledger = await ledger2026()
+	const check = { by: "gross", gross: "100.02" }
+	await paid(ledger, "2026-01-09", check)
+	await deposit(ledger, "2026Q1", "15.31", "2026-02-02")
+	await paid(ledger, "2026-02-06", check)
+	await deposit(ledger, "2026Q1", "15.31", "2026-03-02")
+	await paid(ledger, "2026-03-06", check)
+	const { F941 } = await forms(ledger, 2026, 1)
+	assert.equal(F941?.lines.F941_12, "45.94") // 0.03 + 37.21 + 8.70, while each check is 15.31
+	assert.deepEqual(
+		["F941_16_1", "F941_16_2", "F941_16_3"].map((line) => F941?.lines[line]),
+		["15.31", "15.31", "15.32"]
+	)
+	const march = (
+		(await op(ledger, "status", { asOf: "2026-04-01" })).blockers as { what: string; amount: string }[]
+	)
+		.filter((item) => item.what === "941 deposit")
+		.map((item) => item.amount)
+	assert.deepEqual(march, ["15.32"])
+})
+
+test("FUTA and Texas UI tax only the wages under their bases", async () => {
+	const ledger = await ledger2026()
+	for (const paidOn of ["2026-01-02", "2026-01-09", "2026-01-16", "2026-01-23", "2026-01-30"])
+		await paid(ledger, paidOn, { by: "gross", gross: "2000.00" })
+	const quarter = await forms(ledger, 2026, 1)
+	assert.equal(quarter.C3?.lines.C3_wages, "10000.00")
+	assert.equal(quarter.C3?.lines.C3_taxable, "9000.00")
+	assert.equal(quarter.C3?.lines.C3_tax, "243.00")
+	const year = await forms(ledger, 2026)
+	assert.deepEqual(year.F940?.lines, {
+		F940_3: "10000.00",
+		F940_5: "3000.00",
+		F940_7: "7000.00",
+		F940_8: "42.00",
+		F940_12: "42.00",
+		F940_13: "0.00",
+		F940_14: "42.00",
+		F940_15: "0.00"
+	})
+	assert.equal(year.W2?.lines.W2_4, "620.00")
+})
+
+test("the W-2 reports Roth in box 12 AA and wages including it, naming both parties", async () => {
+	const ledger = await ledger2026()
+	await paid(ledger, "2026-01-09", { by: "gross", gross: "2000.00", roth: "500.00" })
+	await paid(ledger, "2026-01-16", { by: "gross", gross: "2000.00", roth: "250.00" })
+	const { W2, W3 } = await forms(ledger, 2026)
+	assert.equal(W2?.lines.W2_1, "4000.00")
+	assert.equal(W2?.lines.W2_4, "248.00")
+	assert.equal(W2?.lines.W2_12AA, "750.00")
+	assert.equal(W2?.lines.W2_13, 1)
+	assert.equal(W3?.lines.W3_12a, "750.00")
+	assert.equal(W3?.lines.W3_c, 1)
+	assert.deepEqual(
+		W2?.names.map((party) => [party.role, party.name]),
+		[
+			["Employer", "Example Farm LLC"],
+			["Employee", "Pat Owner"]
+		]
+	)
+})
+
+test("a 941-X shows each line as filed and corrected, its tax, and line 27", async () => {
 	const ledger = await ledger2026()
 	await paid(ledger, "2026-01-09", { by: "gross", gross: "1000.00" })
 	await deposit(ledger, "2026Q1", "153.01", "2026-02-10")
@@ -57,123 +132,52 @@ test("a 941-X shows the original, corrected and difference of each line", async 
 		tracking: "9400100000000000000001"
 	})
 	await op(ledger, "payroll.correct", { paidOn: "2026-01-09", fit: "10.01" })
-	await op(ledger, "filing.amend", {
+	await op(ledger, "filing.correct", {
 		period: "2026Q1",
 		mailedOn: "2026-05-01",
 		tracking: "9400100000000000000002"
 	})
 	const { correction } = await op(ledger, "report", { year: 2026, quarter: 1 })
 	const { lines, ...mailed } = correction as { lines: { line: string }[] }
-	assert.deepEqual(mailed, { mailedOn: "2026-05-01", tracking: "9400100000000000000002" })
-	const line = (name: string) => lines.find((row) => row.line === name)
-	assert.deepEqual(line("F941_3"), {
-		line: "F941_3",
-		original: "0.01",
-		corrected: "10.01",
-		difference: "10.00"
-	})
-	assert.deepEqual(line("F941_12"), {
-		line: "F941_12",
-		original: "153.01",
-		corrected: "163.01",
-		difference: "10.00"
-	})
-	assert.deepEqual(line("F941_2"), {
-		line: "F941_2",
-		original: "1000.00",
-		corrected: "1000.00",
-		difference: "0.00"
-	})
-	await assert.rejects(
-		op(ledger, "filing.upgrade", {
-			form: "F941",
-			period: "2026Q1",
-			method: "CertifiedMail",
-			mailedOn: "2026-04-02",
-			tracking: "9400100000000000000003"
-		}),
-		{ code: "NotPrior" }
-	)
+	assert.deepEqual(mailed, { mailedOn: "2026-05-01", tracking: "9400100000000000000002", line27: "10.00" })
+	assert.deepEqual(lines, [
+		{ line: "F941_2", original: "1000.00", corrected: "1000.00", difference: "0.00", tax: "0.00" },
+		{ line: "F941_3", original: "0.01", corrected: "10.01", difference: "10.00", tax: "10.00" },
+		{ line: "F941_5a1", original: "1000.00", corrected: "1000.00", difference: "0.00", tax: "0.00" },
+		{ line: "F941_5c1", original: "1000.00", corrected: "1000.00", difference: "0.00", tax: "0.00" },
+		{ line: "F941_7", original: "0.00", corrected: "0.00", difference: "0.00", tax: "0.00" }
+	])
 })
 
-test("the W-2 reports Roth in box 12 AA and wages including it", async () => {
-	const ledger = await ledger2026()
-	await paid(ledger, "2026-01-09", { by: "gross", gross: "2000.00", roth: "500.00" })
-	await paid(ledger, "2026-01-16", { by: "gross", gross: "2000.00", roth: "250.00" })
-	const forms = (await op(ledger, "report", { year: 2026 })).forms as Forms
-	assert.equal(forms.W2?.W2_1, "4000.00")
-	assert.equal(forms.W2?.W2_4, "248.00")
-	assert.equal(forms.W2?.W2_12AA, "750.00")
-	assert.equal(forms.W2?.W2_13, 1)
-	assert.equal(forms.W3?.W3_12a, "750.00")
-	assert.equal(forms.W3?.W3_c, 1)
-})
-
-test("after-tax contributions imply a code G 1099-R; plan moves add their own", async () => {
-	const ledger = await ledger2026()
-	for (const amount of ["1000.00", "500.00"])
-		await op(ledger, "transfer.record", {
-			kind: "AfterTax",
-			year: 2026,
-			mercury: sendMoney(),
-			sentOn: "2026-02-01",
-			amount
-		})
-	await op(ledger, "transfer.record", {
-		kind: "Distribution",
-		mercury: sendMoney(),
-		sentOn: "2026-02-02",
-		amount: "8000.00"
-	})
-	await op(ledger, "plan.distribution", {
-		year: 2026,
-		account: "Roth",
-		code: "H",
-		gross: "2000.00",
-		taxable: "0.00"
-	})
-	await assert.rejects(
-		op(ledger, "plan.distribution", {
-			year: 2026,
-			account: "AfterTax",
-			code: "G",
-			gross: "1.00",
-			taxable: "0.00"
-		}),
-		{ code: "ImpliedConversion" }
-	)
-	const report = await op(ledger, "report", { year: 2026 })
-	const forms = report.forms as Forms
-	assert.deepEqual(forms.F1099R, {
-		F1099R_AfterTax_G_1: "1500.00",
-		F1099R_AfterTax_G_2a: "0.00",
-		F1099R_AfterTax_G_5: "1500.00",
-		F1099R_Roth_H_1: "2000.00",
-		F1099R_Roth_H_2a: "0.00"
-	})
-	assert.deepEqual(forms.F1096, { F1096_3: 2, F1096_5: "3500.00" })
-	assert.equal((report.distributions as { amount: string }).amount, "9500.00")
-})
-
-test("tax payments list their tracker and Tracking ID, or outside Mercury", async () => {
+test("the year shows its policy, and tax payments their tracker or outside Mercury", async () => {
 	const ledger = await ledger2026()
 	await deposit(ledger, "2026Q1", "100.00", "2026-02-10")
 	await commit(ledger, [
+		...insert("History", { span: { start: parseDate("2026-01-01"), end: parseDate("2026-05-01") } }),
 		...insert("TaxPayment", {
 			tracker: "37834317",
 			account: "TexasUI",
 			kind: "Deposit",
-			period: quarterSpan(2026, 1),
+			period: { start: parseDate("2026-01-01"), end: parseDate("2026-04-01") },
 			amount: $("243.00"),
-			initiatedOn: parseDate("2026-04-20"),
+			initiatedOn: point(parseDate("2026-04-20")),
 			funding: "OutsideMercury"
-		}),
-		...insert("OutsideMercury", { payment: "37834317", legacy: "TWC_37834317" })
+		})
 	])
-	const payments = (await op(ledger, "report", { year: 2026 })).taxPayments as {
-		tracker: string
-		mercury: string
-	}[]
+	const report = await op(ledger, "report", { year: 2026 })
+	assert.deepEqual(report.policy, {
+		deferralLimit: "24500.00",
+		additionsLimit: "72000.00",
+		compensationLimit: "360000.00",
+		wageCeiling: "200000.00",
+		bands: [
+			{ tax: "SocialSecurity", rate: "6.2", base: "184500.00" },
+			{ tax: "Medicare", rate: "1.45" },
+			{ tax: "FederalUnemployment", rate: "0.6", base: "7000.00" },
+			{ tax: "TexasUnemployment", rate: "2.7", base: "9000.00" }
+		]
+	})
+	const payments = report.taxPayments as { tracker: string; mercury: string }[]
 	assert.equal(payments.length, 2)
 	assert.match(payments[0]?.mercury ?? "", /^\d{15}$/)
 	assert.deepEqual(payments[1], {

@@ -1,42 +1,57 @@
-import { grossOf, paychecks } from "./check.ts"
-import { covers, quarterSpan, type Span, sameSpan, yearSpan } from "./core/time.ts"
-import { sum } from "./core/values.ts"
+import { paychecks } from "./check.ts"
+import { formatDollars } from "./core/boundary.ts"
+import { covers, quarterSpan, type Span, sameSpan, yearOf, yearSpan } from "./core/time.ts"
+import { MAX_U64, sum } from "./core/values.ts"
 import type { Facts } from "./db.ts"
-import { figures, formatLine, periodOf } from "./forms.ts"
-import type { FormHandle, LineHandle } from "./schema.ts"
+import { correction, figures, formatLine, periodOf } from "./forms.ts"
+import { sweeps } from "./plan.ts"
+import { Form, type FormHandle, Jurisdiction, type LineHandle, type Role } from "./schema.ts"
 
-/* Sums over stored facts, in the shapes the returns ask for. */
+/* A period's returns as the ledger computes them, headed by who they name,
+ * with the sums and rows behind them. */
+
+/** Who each form names, the filer first. */
+const named: { readonly [F in FormHandle]: readonly (typeof Role.handles)[number][] } = {
+	F941: ["Employer"],
+	F940: ["Employer"],
+	W2: ["Employer", "Employee"],
+	W3: ["Employer"],
+	C3: ["Employer"],
+	F1099R: ["Plan", "Employee"],
+	F1096: ["Plan"]
+}
 
 const lineValues = (values: ReadonlyMap<LineHandle, bigint>) =>
 	Object.fromEntries([...values].map(([line, value]) => [line, formatLine(line, value)]))
 
-/** A 941-X view: what the 941 said, what the correction says, and the ledger now. */
-const correction = (facts: Facts, span: Span) => {
+/** A 941-X: each correctable line as filed and as corrected, and the tax each
+ * difference carries; line 27 is their sum. */
+const corrected = (facts: Facts, span: Span) => {
 	const filing = facts.Filing.find((row) => row.form === "F941" && sameSpan(row.period, span))
-	const amended = filing && facts.Correction.find((row) => row.filing === filing.id)
-	if (!filing || !amended) return undefined
-	const of = (rows: Facts["FiledFigures"]) =>
-		new Map(rows.filter((row) => row.filing === filing.id).map((row) => [row.line, row.value] as const))
-	const original = of(facts.FiledFigures)
-	const corrected = of(facts.CorrectedFigures)
+	const mailed = filing && facts.Correction.find((row) => row.filing === filing.id)
+	if (!filing || !mailed) return undefined
+	const { rows, owed } = correction(facts, filing.id)
 	return {
-		mailedOn: amended.mailedOn,
-		tracking: amended.tracking,
-		lines: [...corrected].map(([line, value]) => ({
-			line,
-			original: original.has(line) ? formatLine(line, original.get(line) ?? 0n) : "not on file",
-			corrected: formatLine(line, value),
-			difference: original.has(line) ? formatLine(line, value - (original.get(line) ?? 0n)) : "unknown"
-		}))
+		mailedOn: mailed.mailedOn,
+		tracking: mailed.tracking,
+		lines: rows.map((row) => ({
+			line: row.line,
+			original: formatLine(row.line, row.original),
+			corrected: formatLine(row.line, row.corrected),
+			difference: formatLine(row.line, row.difference),
+			tax: formatDollars(row.tax)
+		})),
+		line27: formatDollars(owed)
 	}
 }
 
 export const report = (facts: Facts, year: number, quarter?: number) => {
 	const span = quarter === undefined ? yearSpan(year) : quarterSpan(year, quarter)
 	const period = periodOf(facts, span)
-	const forms: readonly FormHandle[] =
-		quarter === undefined ? ["F940", "W2", "W3", "F1099R", "F1096"] : ["F941", "C3"]
-	const checks = paychecks(facts).filter((check) => covers(span, check.wage.paidOn.start))
+	const forms = Form.handles.filter(
+		(form) => (Form.axioms[form].period === "Quarter") === (quarter !== undefined)
+	)
+	const party = (role: (typeof Role.handles)[number]) => facts.Party.find((row) => row.role === role)
 	const transfer = (mercury: string) => facts.Transfer.find((row) => row.mercury === mercury)
 	const sentIn = (mercury: string) => {
 		const found = transfer(mercury)
@@ -57,34 +72,75 @@ export const report = (facts: Facts, year: number, quarter?: number) => {
 		}))
 		.sort((a, b) => (a.sentOn < b.sentOn ? -1 : a.sentOn > b.sentOn ? 1 : a.mercury.localeCompare(b.mercury)))
 	const debit = (tracker: string) => facts.TaxDebit.find((row) => row.payment === tracker)
+	const limits = facts.TaxYear.find((row) => row.year === BigInt(year))
 	return {
 		period: span,
-		totals: {
-			count: BigInt(checks.length),
-			gross: sum(checks.map((check) => grossOf(check.wage))),
-			fit: sum(checks.map((check) => check.wage.fit)),
-			ss: sum(checks.map((check) => check.wage.ss)),
-			medicare: sum(checks.map((check) => check.wage.medicare)),
-			roth: sum(checks.map((check) => check.wage.roth)),
-			owedNet: sum(checks.map((check) => check.owedNet)),
-			sentNet: sum(checks.map((check) => check.sentNet))
+		policy: {
+			...(limits && {
+				deferralLimit: limits.deferralLimit,
+				additionsLimit: limits.additionsLimit,
+				compensationLimit: limits.compensationLimit,
+				wageCeiling: limits.wageCeiling
+			}),
+			bands: facts.TaxBand.filter((band) => band.year === BigInt(year)).map((band) => ({
+				tax: band.tax,
+				rate: band.rate,
+				...(band.wages.end === MAX_U64 ? {} : { base: band.wages.end })
+			}))
 		},
-		forms: Object.fromEntries(forms.map((form) => [form, lineValues(figures(form, period))])),
-		...(quarter === undefined ? {} : { correction: correction(facts, span) }),
-		paychecks: checks.map((check) => ({
-			paidOn: check.wage.paidOn.start,
-			earnings: check.wage.earnings,
-			fit: check.wage.fit,
-			ss: check.wage.ss,
-			medicare: check.wage.medicare,
-			roth: check.wage.roth,
-			net: check.net,
-			owedNet: check.owedNet,
-			sentNet: check.sentNet,
-			sentRoth: check.sentRoth
-		})),
+		totals: {
+			count: BigInt(period.checks.length),
+			gross: sum(period.checks.map((check) => check.gross)),
+			fit: sum(period.checks.map((check) => check.withheld.get("FIT") ?? 0n)),
+			ss: sum(period.checks.map((check) => check.withheld.get("SocialSecurity") ?? 0n)),
+			medicare: sum(period.checks.map((check) => check.withheld.get("Medicare") ?? 0n)),
+			roth: sum(period.checks.map((check) => check.roth)),
+			owedNet: sum(period.checks.map((check) => check.owedNet)),
+			sentNet: sum(period.checks.map((check) => check.sentNet))
+		},
+		forms: Object.fromEntries(
+			forms.map((form) => {
+				const state = Form.axioms[form].jurisdiction
+				const account = Jurisdiction.axioms[state].state
+					? facts.Registration.find((row) => row.state === state)?.number
+					: undefined
+				return [
+					form,
+					{
+						names: named[form].flatMap((role) => {
+							const found = party(role)
+							return found ? [{ role, name: found.name, tin: found.tin, address: found.address }] : []
+						}),
+						...(account === undefined ? {} : { account }),
+						lines: lineValues(figures(form, period))
+					}
+				]
+			})
+		),
+		...(quarter === undefined
+			? {
+					sweeps: sweeps(facts)
+						.filter((sweep) => yearOf(sweep.on) === year)
+						.map(({ account, on, gross, taxable, basis }) => ({ account, on, gross, taxable, basis }))
+				}
+			: { correction: corrected(facts, span) }),
+		paychecks: paychecks(facts)
+			.filter((check) => covers(span, check.wage.paidOn.start))
+			.map((check) => ({
+				paidOn: check.wage.paidOn.start,
+				gross: check.gross,
+				ytd: check.ytd,
+				fit: check.withheld.get("FIT") ?? 0n,
+				ss: check.withheld.get("SocialSecurity") ?? 0n,
+				medicare: check.withheld.get("Medicare") ?? 0n,
+				roth: check.roth,
+				net: check.net,
+				owedNet: check.owedNet,
+				sentNet: check.sentNet,
+				sentRoth: check.sentRoth
+			})),
 		distributions: { amount: sum(distributions.map((row) => row.amount)), transfers: distributions },
-		taxPayments: facts.TaxPayment.filter((row) => row.initiatedOn < span.end)
+		taxPayments: facts.TaxPayment.filter((row) => row.initiatedOn.start < span.end)
 			.map((row) => {
 				const mercury = debit(row.tracker)?.transfer
 				return {
@@ -93,7 +149,7 @@ export const report = (facts: Facts, year: number, quarter?: number) => {
 					kind: row.kind,
 					period: row.period,
 					amount: row.amount,
-					initiatedOn: row.initiatedOn,
+					initiatedOn: row.initiatedOn.start,
 					mercury: mercury ?? "outside Mercury",
 					...(mercury === undefined ? {} : { sentOn: transfer(mercury)?.sentOn ?? 0n })
 				}
