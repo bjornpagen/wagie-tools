@@ -61,10 +61,11 @@ while anything open by its day remains.
 
 ## Use
 
-Node 24 or newer.
+Node 24 or newer and pnpm (on macOS: `sudo port install nodejs24`, then
+`sudo port install pnpm`).
 
 ```sh
-pnpm install
+pnpm install --frozen-lockfile
 node src/cli.ts                     # the ops
 node src/cli.ts status              # what blocks payroll, what comes next
 node src/cli.ts payroll.quote '{"paidOn":"2026-10-09","input":{"by":"plan"}}'

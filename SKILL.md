@@ -22,6 +22,35 @@ node src/cli.ts                  # every op with a one-line summary
 wires and send-money transfers, a 15-digit ACH trace for IRS and TWC debits.
 The transaction UUID on a wire receipt is not a Tracking ID and is refused.
 
+**The machine.** Node 24+ and pnpm, from MacPorts. Install `nodejs24` first:
+pnpm's port accepts any `bin/node`, and would otherwise pull in `nodejs22`.
+
+```sh
+sudo port install nodejs24
+sudo port install pnpm
+pnpm install --frozen-lockfile
+```
+
+**The ledger** is `private/ledger/`, on this machine only. The copy that counts
+is the backup in Google Drive, `Payroll/Backups/Current/Wagie Tools -
+CURRENT.facts.tar.xz`. Start each session from it: move any existing
+`private/ledger/` aside to `private/ledger.bak-<day>/` (`import` needs a fresh
+ledger), then
+
+```sh
+tar -xJf "<downloaded archive>" -C private
+node src/cli.ts import '{"file":"private/Wagie Tools - CURRENT.facts.json"}'
+```
+
+Every write ends with a new backup (see Backup).
+
+**Who presses what.** Fill in Carry and Mercury forms completely, but stop at
+each one's last screen and show it to the owner: the owner says yes before a
+Carry form is submitted, and presses Send on every Mercury wire. Nothing else
+is needed as evidence: the ledger keeps no receipts, and the Tracking ID is the
+record. A task ends with its backup: never schedule or offer a follow-up
+check.
+
 **Start with `status`.** Its `blockers` are what stops payroll today, each with
 the op that clears it; `upcoming` is what opens later; the rest is the year so
 far (salary against target, Roth and after-tax room, Roth basis awaiting a
@@ -123,15 +152,31 @@ as `tracker`.
 
 ## Mega backdoor Roth
 
-Wire the after-tax contribution from Mercury to the Carry after-tax account,
-then record it with the plan's contribution year. It is an S-corp
+An after-tax contribution, converted to Roth inside the plan. It is an S-corp
 distribution, and Carry converts it to Roth as it settles, so the conversion
 goes on the 1099-R for the year the wire was sent, even when it counts toward
-the year before.
+the year before. Nothing is swept or rolled over to a Roth IRA.
 
-```sh
-node src/cli.ts transfer.record '{"kind":"AfterTax","year":2026,"mercury":"20261015MMQFMP4S000200","sentOn":"2026-10-15","amount":"5000.00"}'
-```
+1. `status`: no blockers, and `afterTax.room` covers the amount.
+2. Carry (app.carry.com): Solo 401k → Contributions → Contribute. Choose Mega
+   Backdoor Roth, the contribution year and the amount. Pay by wire, never by
+   a pull from a linked bank. Show the owner the type, year, amount, the
+   account it goes to (the after-tax account in `custody`) and the wire
+   instructions; submit on their yes.
+3. Mercury (app.mercury.com): a wire from the main operating checking to the
+   saved Carry recipient, for exactly the amount, with Carry's memo or
+   reference copied exactly. The saved recipient's bank, routing, account and
+   name must match Carry's instructions; if they don't, stop. Show the owner
+   the review screen; they press Send.
+4. Once it shows Sent, record it with its Tracking ID and sent day, then
+   `status` shows the room less, and the Roth basis awaiting a sweep more, by
+   the amount:
+
+   ```sh
+   node src/cli.ts transfer.record '{"kind":"AfterTax","year":2026,"mercury":"20261015MMQFMP4S000200","sentOn":"2026-10-15","amount":"5000.00"}'
+   ```
+
+5. Back up.
 
 A wire past `status`'s `afterTax.room` refuses: what the election leaves, and
 415(c), the year's pay with the salary target standing in for pay to come. A
@@ -238,9 +283,18 @@ recorded, the original 1096 stands as filed and leaves `mismatches`.
 
 ## Backup
 
+After every write:
+
 ```sh
 node src/cli.ts export        # private/Wagie Tools - CURRENT.facts.json
+tar -cJf "private/Wagie Tools - CURRENT.facts.tar.xz" -C private "Wagie Tools - CURRENT.facts.json"
 ```
+
+Upload the archive to Drive `Payroll/Backups/Current/` as `Wagie Tools -
+CURRENT.facts.tar.xz`, binary with no conversion. Download it back and check
+its SHA-256 matches the local file, then trash the previous one, so
+`Current/` holds exactly one file. An export is canonical: exporting the same
+ledger again gives the same bytes.
 
 `import '{"file":"…"}'` restores an export into a fresh ledger, and refuses
 anything `export` wouldn't write, leaving no ledger behind. An import is
