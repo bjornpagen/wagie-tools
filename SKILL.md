@@ -44,12 +44,20 @@ node src/cli.ts import '{"file":"private/Wagie Tools - CURRENT.facts.json"}'
 
 Every write ends with a new backup (see Backup).
 
-**Who presses what.** Fill in Carry and Mercury forms completely, but stop at
-each one's last screen and show it to the owner: the owner says yes before a
-Carry form is submitted, and presses Send on every Mercury wire. Nothing else
-is needed as evidence: the ledger keeps no receipts, and the Tracking ID is the
-record. A task ends with its backup: never schedule or offer a follow-up
-check.
+**Who presses what.** Claude works in the owner's Chrome. Sessions expire
+overnight: at the start, ask the owner to sign in to Carry and Mercury. Claude
+never types passwords, routing numbers or account numbers, and Claude Code's
+auto mode may block other writes there too (removing a recipient, a street
+address). When either happens, give the owner the exact field and value to
+paste, and carry on with the rest. Fill in Carry and Mercury forms completely,
+but stop at each one's last screen and show it to the owner: the owner says
+yes before a Carry form is submitted, and presses Send on every Mercury wire.
+
+**What a task never includes.** The ledger and its one backup are the whole
+record. So: no notes files, no receipts or confirmation PDFs, no dated copies
+in `Backups/Old/`, no scratch-ledger round trip (an export is canonical, and
+the tests prove it imports back identically), no sweep to a Roth IRA unless
+asked, and no follow-up check: a task ends with its backup.
 
 **Start with `status`.** Its `blockers` are what stops payroll today, each with
 the op that clears it; `upcoming` is what opens later; the rest is the year so
@@ -158,27 +166,37 @@ goes on the 1099-R for the year the wire was sent, even when it counts toward
 the year before. Nothing is swept or rolled over to a Roth IRA.
 
 1. `status`: no blockers, and `afterTax.room` covers the amount.
-2. Carry (app.carry.com): Solo 401k → Contributions → Contribute. Choose Mega
-   Backdoor Roth, the contribution year and the amount. Pay by wire, never by
-   a pull from a linked bank. Show the owner the type, year, amount, the
-   account it goes to (the after-tax account in `custody`) and the wire
-   instructions; submit on their yes.
+2. Carry (app.carry.com): Accounts → Solo 401k → Deposit. Set To to "Solo
+   401k Mega Backdoor Roth" (it defaults to Roth), From to "Domestic Wire
+   Transfer" (never a linked bank), the tax year and the amount; the amount
+   Carry shows available should equal `afterTax.room`. Continue to "Confirm
+   your deposit", which reads To "Solo 401k After-Tax", Transfer To "Solo 401k
+   Roth". Show the owner; on their yes, Continue. The Wire Details page that
+   follows has the bank, routing, account, beneficiary, FBO (the after-tax
+   account in `custody`) and a memo with a code unique to this deposit;
+   Confirm finishes. Copy the memo from this deposit's page every time.
 3. Mercury (app.mercury.com): a wire from the main operating checking to the
-   Carry recipient for the after-tax account, for exactly the amount, with
-   Carry's memo copied exactly. Carry's after-tax and Roth accounts take wires
-   at different DriveWealth account numbers, so Mercury keeps one recipient per
-   Carry account, nicknamed for it: "Carry (Solo 401k Mega Backdoor Roth
-   after-tax, …)" and "Carry (Solo 401k Roth deferral, …)". The recipient's
-   bank, routing, account and name must match Carry's instructions; if they
-   don't, stop. Claude never types routing or account numbers: when a
-   recipient needs them, the owner pastes them in, and Claude checks them on
-   the review screen. Show the owner the review screen; they press Send (or
-   "Schedule wire" after the day's cutoff).
-4. Once it shows Sent (a scheduled wire, the next business day), record it
-   with its Tracking ID and sent day; until then there is nothing to record or
-   back up. Then
-   `status` shows the room less, and the Roth basis awaiting a sweep more, by
-   the amount:
+   Carry recipient for the after-tax account. Carry's after-tax and Roth
+   accounts take wires at different DriveWealth account numbers, so Mercury
+   keeps one recipient per Carry account, nicknamed for it: "Carry (Solo 401k
+   Mega Backdoor Roth after-tax, …)" and "Carry (Solo 401k Roth deferral, …)".
+   Ignore Mercury's offer to merge them as duplicates. Payments → Recipients →
+   the after-tax one → Send money:
+   - Recipient: Wire. A recipient made without bank details gets them here,
+     pasted by the owner.
+   - Amount: exactly the amount, from the main checking.
+   - Wire purpose: Other, "Solo 401(k) after-tax retirement plan
+     contribution, <employer>".
+   - Details: replace the default memo "via mercury.com" with Carry's memo,
+     exactly (74 characters at most).
+   - Review: bank, routing, account, beneficiary, amount and memo must match
+     Carry's Wire Details page; if anything doesn't, stop. The owner presses
+     Send, or "Schedule wire" after the day's cutoff.
+4. Once it shows Sent (a scheduled wire, the next business day), record it.
+   Until then there is nothing to record or back up. The Tracking ID is in
+   the transaction's detail panel, under "Transaction tracking number"; its
+   date is the sent day. Then `status` shows the room less, and the Roth basis
+   awaiting a sweep more, by the amount:
 
    ```sh
    node src/cli.ts transfer.record '{"kind":"AfterTax","year":2026,"mercury":"20261015MMQFMP4S000200","sentOn":"2026-10-15","amount":"5000.00"}'
@@ -299,10 +317,11 @@ tar -cJf "private/Wagie Tools - CURRENT.facts.tar.xz" -C private "Wagie Tools - 
 ```
 
 Upload the archive to Drive `Payroll/Backups/Current/` as `Wagie Tools -
-CURRENT.facts.tar.xz`, binary with no conversion. Download it back and check
-its SHA-256 matches the local file, then trash the previous one, so
-`Current/` holds exactly one file. An export is canonical: exporting the same
-ledger again gives the same bytes.
+CURRENT.facts.tar.xz` (the Drive connector takes it as base64, with content
+type `application/x-xz` and conversion off). Download it back and check its
+SHA-256 matches the local file, then trash the previous one, so `Current/`
+holds exactly one file. Nothing else in Drive changes. An export is
+canonical: exporting the same ledger again gives the same bytes.
 
 `import '{"file":"…"}'` restores an export into a fresh ledger, and refuses
 anything `export` wouldn't write, leaving no ledger behind. An import is
