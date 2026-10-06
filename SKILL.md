@@ -164,11 +164,19 @@ the year before. Nothing is swept or rolled over to a Roth IRA.
    account it goes to (the after-tax account in `custody`) and the wire
    instructions; submit on their yes.
 3. Mercury (app.mercury.com): a wire from the main operating checking to the
-   saved Carry recipient, for exactly the amount, with Carry's memo or
-   reference copied exactly. The saved recipient's bank, routing, account and
-   name must match Carry's instructions; if they don't, stop. Show the owner
-   the review screen; they press Send.
-4. Once it shows Sent, record it with its Tracking ID and sent day, then
+   Carry recipient for the after-tax account, for exactly the amount, with
+   Carry's memo copied exactly. Carry's after-tax and Roth accounts take wires
+   at different DriveWealth account numbers, so Mercury keeps one recipient per
+   Carry account, nicknamed for it: "Carry (Solo 401k Mega Backdoor Roth
+   after-tax, …)" and "Carry (Solo 401k Roth deferral, …)". The recipient's
+   bank, routing, account and name must match Carry's instructions; if they
+   don't, stop. Claude never types routing or account numbers: when a
+   recipient needs them, the owner pastes them in, and Claude checks them on
+   the review screen. Show the owner the review screen; they press Send (or
+   "Schedule wire" after the day's cutoff).
+4. Once it shows Sent (a scheduled wire, the next business day), record it
+   with its Tracking ID and sent day; until then there is nothing to record or
+   back up. Then
    `status` shows the room less, and the Roth basis awaiting a sweep more, by
    the amount:
 
