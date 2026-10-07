@@ -105,8 +105,8 @@ together stay within the year's 415(c) limit.
    ```
 
 3. Post it with the same input: `payroll.post`. It prints the wires to send.
-4. Send both wires from Mercury: net pay to the owner, the Roth deferral to
-   the recipient "Carry (Solo 401k Roth deferral, …)".
+4. Send both wires from Mercury: net pay to the owner; the Roth deferral to
+   Carry as in the mega backdoor Roth's steps 2–3, with To "Solo 401k Roth".
 5. Once they show Sent, record each with its Tracking ID:
 
    ```sh
@@ -148,15 +148,16 @@ An after-tax contribution that Carry converts to Roth inside the plan.
    - Wire Details: the bank, routing, account, beneficiary, FBO (the after-tax
      account in `custody`) and a memo with a code unique to this deposit.
      Confirm.
-3. Mercury (app.mercury.com): Payments → Recipients → "Carry (Solo 401k Mega
-   Backdoor Roth after-tax, …)" → Send money. (Carry's after-tax and Roth
-   accounts take wires at different account numbers, so each has its own
-   recipient; never merge them.)
-   - Recipient: Wire. If the recipient has no bank details, the owner pastes
-     them here from Carry's Wire Details.
+3. Mercury (app.mercury.com): Payments → Recipients → the Carry recipient
+   whose account number is the one on Carry's Wire Details → Send money.
+   Carry recipients are named by that number, "Carry (DriveWealth ••5768)";
+   the memo, not the account, decides which Carry account the money reaches.
+   If no recipient has the number, create one; the owner pastes the routing
+   and account on the Recipient step.
+   - Recipient: Wire.
    - Amount: exactly the amount, from the main checking.
-   - Wire purpose: Other, "Solo 401(k) after-tax retirement plan
-     contribution, <employer>".
+   - Wire purpose: Other, "Solo 401(k) retirement plan contribution,
+     <employer>".
    - Details: replace the memo "via mercury.com" with Carry's memo, exactly.
    - Review: bank, routing, account, beneficiary, amount and memo must match
      Carry's Wire Details; if anything doesn't, stop. The owner presses Send
