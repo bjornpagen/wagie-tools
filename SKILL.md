@@ -23,6 +23,13 @@ CSV export's `Tracking ID` column). It is `YYYYMMDDMMQFMP4S######` for wires
 and send-money transfers, a 15-digit ACH trace for IRS and TWC debits. A
 transaction UUID is refused.
 
+**Waiting for a wire.** A sent wire shows Pending until Mercury gives it its
+Tracking ID, usually within 10 minutes. Wait with a background timer, never a
+foreground sleep: 10 minutes, then ×1.5 each time (15, 22, 33, 50), checking
+the transaction's detail panel each time. Record and back up as soon as it has
+its ID. A scheduled wire goes out the next business day around 13:00 UTC;
+check then. This is part of the task, not a follow-up check.
+
 **The machine.** Node 24+ and pnpm, from MacPorts, `nodejs24` first:
 
 ```sh
@@ -150,7 +157,7 @@ An after-tax contribution that Carry converts to Roth inside the plan.
      Confirm.
 3. Mercury (app.mercury.com): Payments → Recipients → the Carry recipient
    whose account number is the one on Carry's Wire Details → Send money.
-   Carry recipients are named by that number, "Carry (DriveWealth ••5768)";
+   Carry recipients are named by that number, "Carry (DriveWealth ••1234)";
    the memo, not the account, decides which Carry account the money reaches.
    If no recipient has the number, create one; the owner pastes the routing
    and account on the Recipient step.
