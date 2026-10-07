@@ -20,6 +20,8 @@ const swept: { [on: string]: unknown } = {}
 before(async () => {
 	ledger = await ledger2026()
 	await paid(ledger, "2026-01-09", { by: "gross", gross: "2000.00", roth: "500.00" })
+	// The Roth deferral can leave the plan only once the owner has left the job.
+	await op(ledger, "employment.end", { lastDay: "2026-01-31" })
 	await afterTax("2026-01-20", "1000.00")
 	swept.february = await sweep("Roth", "2026-02-02", "1600.00")
 	await afterTax("2026-02-10", "700.00")
@@ -91,10 +93,81 @@ test("basis sent since the last sweep awaits the next one", async () => {
 	assert.deepEqual(status.rothBasis, { awaiting: "100.00" })
 })
 
-test("the after-tax account is never swept by hand, and a sweep records once", async () => {
-	await assert.rejects(sweep("AfterTax", "2026-05-01", "10.00"), { code: "ImpliedConversion" })
+test("a sweep records once", async () => {
 	assert.equal((await sweep("Roth", "2026-04-01", "250.00")).outcome, "no-change")
 	await assert.rejects(sweep("Roth", "2026-04-01", "251.00"), { code: "LawRefused" })
+})
+
+test("an after-tax rollover names the wires it carried, each once, and only an after-tax rollover does", async () => {
+	const own = await ledger2026()
+	const wire = async (sentOn: string, amount: string) => {
+		const mercury = sendMoney()
+		await op(own, "transfer.record", { kind: "AfterTax", year: 2026, mercury, sentOn, amount })
+		return mercury
+	}
+	const first = await wire("2026-03-02", "1000.00")
+	const later = await wire("2026-03-20", "500.00")
+	const roll = (on: string, gross: string, transfers?: string[]) =>
+		op(own, "plan.rollover", { account: "AfterTax", on, gross, ...(transfers ? { transfers } : {}) })
+	await assert.rejects(roll("2026-03-10", "1000.00"), { code: "WiresRequired" })
+	await assert.rejects(roll("2026-03-10", "1000.00", [sendMoney()]), { code: "NotAfterTax" })
+	await assert.rejects(roll("2026-03-10", "1500.00", [first, later]), { code: "SentAfterRollover" })
+	await assert.rejects(roll("2026-03-10", "999.99", [first]), { code: "GrossBelowBasis" })
+	await assert.rejects(
+		op(own, "plan.rollover", { account: "Roth", on: "2026-03-10", gross: "10.00", transfers: [first] }),
+		{ code: "NoWiresForSweep" }
+	)
+	const rolled = await roll("2026-03-10", "1000.25", [first])
+	assert.deepEqual(rolled, {
+		outcome: "committed",
+		account: "AfterTax",
+		on: "2026-03-10",
+		gross: "1000.25",
+		transfers: [first],
+		taxable: "0.25",
+		basis: "1000.00",
+		converted: "0.00"
+	})
+	assert.equal((await roll("2026-03-10", "1000.25", [first])).outcome, "no-change")
+	await assert.rejects(roll("2026-03-25", "1500.00", [first, later]), { code: "AlreadyCarried" })
+})
+
+test("a carried wire never becomes Roth basis, and its rollover goes on the after-tax 1099-R", async () => {
+	const own = await ledger2026()
+	const wire = async (sentOn: string, amount: string) => {
+		const mercury = sendMoney()
+		await op(own, "transfer.record", { kind: "AfterTax", year: 2026, mercury, sentOn, amount })
+		return mercury
+	}
+	const carried = await wire("2026-01-20", "1000.00")
+	await op(own, "plan.rollover", {
+		account: "AfterTax",
+		on: "2026-02-02",
+		gross: "1000.50",
+		transfers: [carried]
+	})
+	await wire("2026-02-10", "500.00") // converted in the plan, as before
+	const status = await op(own, "status", { asOf: "2026-02-10" })
+	assert.deepEqual(status.rothBasis, { awaiting: "500.00" })
+	// The Roth account holds only converted after-tax money: it may be swept while employed.
+	const roth = await op(own, "plan.rollover", { account: "Roth", on: "2026-03-02", gross: "600.00" })
+	assert.deepEqual([roth.basis, roth.converted], ["500.00", "500.00"])
+	const { forms } = await op(own, "report", { year: 2026 })
+	const lines = (forms as { F1099R: { lines: { [line: string]: string | number } } }).F1099R.lines
+	assert.deepEqual(
+		[lines.F1099R_AfterTax_G_1, lines.F1099R_AfterTax_G_2a, lines.F1099R_AfterTax_G_5],
+		["1500.50", "0.50", "1500.00"]
+	)
+	assert.deepEqual([lines.F1099R_Roth_H_1, lines.F1099R_Roth_H_5], ["600.00", "500.00"])
+})
+
+test("the Roth account holding Roth deferrals is swept only once the owner has left the job", async () => {
+	const own = await ledger2026()
+	await paid(own, "2026-01-09", { by: "gross", gross: "2000.00", roth: "500.00" })
+	const sweepRoth = () => op(own, "plan.rollover", { account: "Roth", on: "2026-02-02", gross: "500.00" })
+	await assert.rejects(sweepRoth(), { code: "RothDeferralsLocked" })
+	await op(own, "employment.end", { lastDay: "2026-01-31" })
+	assert.equal((await sweepRoth()).outcome, "committed")
 })
 
 test("plan activity makes the 1099-R and 1096 due", async () => {
@@ -258,6 +331,7 @@ test("box 11 dates a Roth deferral by its paycheck, however late the wire", asyn
 			sentOn: wire.kind === "RothDeferral" ? "2027-01-04" : "2026-12-31",
 			amount: wire.amount
 		})
+	await op(own, "employment.end", { lastDay: "2027-01-31" })
 	await op(own, "plan.rollover", { account: "Roth", on: "2027-02-01", gross: "100.00" })
 	const { forms } = await op(own, "report", { year: 2027 })
 	assert.equal(

@@ -309,8 +309,9 @@ export const Method = closed("Method", ["Electronic", "CertifiedMail", "Furnishe
 export const DistributionCode = closed("DistributionCode", ["G", "H"])
 /** The plan's accounts and the one way money leaves each: its 1099-R code;
  * `taxed` when the move into a Roth is income (pretax money); `implied` when
- * Carry converts every deposit as it settles, so its 1099-R follows from the
- * AfterTax transfers and it is never swept by hand. */
+ * Carry converts each deposit into the Roth account as it settles, unless a
+ * rollover carries it to a Roth IRA first, so its conversions follow from the
+ * AfterTax transfers. */
 export const PlanAccount = closed(
 	"PlanAccount",
 	["Pretax", "AfterTax", "Roth"],
@@ -434,11 +435,16 @@ export const CorrectedFigures = relation("CorrectedFigures", {
 
 // ── The plan's books ────────────────────────────────────────────────────────
 
-/** A whole-account sweep of a plan account into the owner's Roth IRA. Roth
- * basis enters the plan only as RothDeferral and AfterTax wires, so the basis a
- * sweep carries is derived from the wires sent since the previous sweep and is
- * never stored; a partial sweep cannot be written down. */
+/** A direct rollover of a plan account into the owner's Roth IRA. A Pretax or
+ * Roth sweep empties its account: Roth basis enters the plan only as
+ * RothDeferral and AfterTax wires, so the basis it carries is derived from the
+ * wires sent since the previous sweep and is never stored. An AfterTax
+ * rollover names the wires it carried (Carried); gross past their sum is
+ * earnings. */
 export const Rollover = relation("Rollover", { account: closedId(PlanAccount), on: i64, gross: u64 })
+/** An after-tax wire an AfterTax rollover carried to a Roth IRA before Carry
+ * converted it: it never becomes Roth account basis. */
+export const Carried = relation("Carried", { transfer: str, account: closedId(PlanAccount), on: i64 })
 
 export const relations = {
 	Role,
@@ -482,7 +488,8 @@ export const relations = {
 	FiledFigures,
 	Correction,
 	CorrectedFigures,
-	Rollover
+	Rollover,
+	Carried
 }
 
 // ── Laws ───────────────────────────────────────────────────────────────────
@@ -534,6 +541,7 @@ export const ledger = schema("WagieTools", relations, [
 	key(Correction, ["filing", "mailedOn"]),
 	key(CorrectedFigures, ["filing", "mailedOn", "line"]),
 	key(Rollover, ["account", "on"]),
+	key(Carried, ["transfer"]),
 
 	// The rosters' columns name rosters.
 	contained(on(Form, "jurisdiction"), on(Jurisdiction, "id")),
@@ -692,8 +700,14 @@ export const ledger = schema("WagieTools", relations, [
 		within: within(1n, "*")
 	}),
 
-	// The plan's books: only hand-swept accounts are swept, never for nothing.
-	contained(on(Rollover, "account"), on(select(PlanAccount, { implied: false }), "id")),
+	// The plan's books: a rollover moves something; a carried wire is an
+	// after-tax wire, carried once, by an after-tax rollover. That such a
+	// rollover carries at least one wire is plan.rollover's to check: no key of
+	// Rollover is its day alone.
+	contained(on(Rollover, "account"), on(PlanAccount, "id")),
+	contained(on(Carried, "transfer"), on(AfterTax, "transfer")),
+	contained(on(Carried, "account"), on(select(PlanAccount, { implied: true }), "id")),
+	contained(on(Carried, ["account", "on"]), on(Rollover, ["account", "on"])),
 	capacity(on(Rollover, ["account", "on"]), {
 		from: on(Rollover, ["account", "on"]),
 		weight: weigh("gross"),

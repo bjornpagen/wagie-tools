@@ -368,7 +368,7 @@ test("1099-R obligations come only with plan activity", async () => {
 	const forms = async () =>
 		(await blockers(ledger, "2027-01-02")).filter((what) => what === "File F1099R" || what === "File F1096")
 	assert.deepEqual(await forms(), [])
-	await op(ledger, "plan.rollover", { account: "Roth", on: "2026-02-01", gross: "400.00" })
+	await op(ledger, "plan.rollover", { account: "Pretax", on: "2026-02-01", gross: "400.00" })
 	assert.deepEqual(await forms(), ["File F1099R", "File F1096"])
 })
 

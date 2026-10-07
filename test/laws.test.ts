@@ -333,12 +333,36 @@ test("each correction restates at least one correctable line of the return it co
 	)
 })
 
-test("a sweep empties a hand-swept account and moves something", async () => {
-	const sweep = (account: "AfterTax" | "Roth", gross: bigint) =>
-		insert("Rollover", { account, on: parseDate("2026-02-02"), gross })
-	await refuses(sweep("AfterTax", 100n), "containment")
+test("a rollover moves something; a carried wire is an after-tax wire, carried once, by an after-tax rollover", async () => {
+	const on = parseDate("2026-02-02")
+	const sweep = (account: "Pretax" | "AfterTax" | "Roth", gross: bigint, day = on) =>
+		insert("Rollover", { account, on: day, gross })
 	await refuses(sweep("Roth", 0n), "capacity")
 	assert.equal(await judge(ledger, sweep("Roth", 100n)), "admitted")
+	const mercury = sendMoney()
+	const wire = [
+		...transfer("AfterTax", mercury),
+		...insert("AfterTax", { transfer: mercury, year: 2026n, amount: $("100.00") })
+	]
+	const carried = (account: "AfterTax" | "Roth", transfer = mercury, day = on) =>
+		insert("Carried", { transfer, account, on: day })
+	assert.equal(
+		await judge(ledger, [...wire, ...sweep("AfterTax", $("100.00")), ...carried("AfterTax")]),
+		"admitted"
+	)
+	await refuses([...sweep("AfterTax", $("100.00")), ...carried("AfterTax", netPay)], "containment")
+	await refuses([...wire, ...carried("AfterTax")], "containment")
+	await refuses([...wire, ...sweep("Roth", $("100.00")), ...carried("Roth")], "containment")
+	await refuses(
+		[
+			...wire,
+			...sweep("AfterTax", $("100.00")),
+			...sweep("AfterTax", $("100.00"), parseDate("2026-02-03")),
+			...carried("AfterTax"),
+			...carried("AfterTax", mercury, parseDate("2026-02-03"))
+		],
+		"functionality"
+	)
 })
 
 test("a recovery names real paychecks", () =>

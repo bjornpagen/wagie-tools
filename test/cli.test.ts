@@ -80,12 +80,20 @@ test("each write round-trips and an identical re-run is no change", async () => 
 		sentOn: "2026-02-11"
 	}
 	assert.deepEqual(await twice(ledger, "tax.paid", payment), payment)
-	const sweep = { account: "Roth", on: "2026-02-02", gross: "1150.00" }
-	assert.deepEqual(await twice(ledger, "plan.rollover", sweep), {
-		...sweep,
-		taxable: "0.00",
-		basis: "1100.00",
-		converted: "1000.00"
+	await assert.rejects(op(ledger, "plan.rollover", { account: "Roth", on: "2026-02-02", gross: "1150.00" }), {
+		code: "RothDeferralsLocked"
+	})
+	const rollover = {
+		account: "AfterTax",
+		on: "2026-02-02",
+		gross: "1000.10",
+		transfers: [(wires[2] as { mercury: string }).mercury]
+	}
+	assert.deepEqual(await twice(ledger, "plan.rollover", rollover), {
+		...rollover,
+		taxable: "0.10",
+		basis: "1000.00",
+		converted: "0.00"
 	})
 
 	const c3 = {
@@ -183,6 +191,20 @@ test("an export imports into an identical ledger", async () => {
 	const ledger = await ledger2026()
 	await paid(ledger, "2026-01-09", { by: "gross", gross: "2000.00", roth: "500.00" })
 	await deposit(ledger, "2026Q1", "306.01", "2026-02-10")
+	const afterTax = sendMoney()
+	await op(ledger, "transfer.record", {
+		kind: "AfterTax",
+		year: 2026,
+		mercury: afterTax,
+		sentOn: "2026-02-03",
+		amount: "800.00"
+	})
+	await op(ledger, "plan.rollover", {
+		account: "AfterTax",
+		on: "2026-02-05",
+		gross: "800.00",
+		transfers: [afterTax]
+	})
 	const exported = await op(ledger, "export", {})
 	assert.equal(exported.out, ledger.replace(/ledger-\d+$/, "Wagie Tools - CURRENT.facts.json"))
 	const copy = freshLedger()

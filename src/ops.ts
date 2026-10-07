@@ -401,24 +401,66 @@ const taxPaid = (request: typeof TaxPaidInput.Type) => (): Db.Plan<object> => {
 const RolloverInput = Schema.Struct({
 	account: Schema.Literals(S.PlanAccount.handles),
 	on: Day,
-	gross: PositiveMoney
+	gross: PositiveMoney,
+	transfers: Schema.optional(Schema.NonEmptyArray(MercuryTrackingId))
 })
-/** A whole-account sweep into the owner's Roth IRA. What it carries, and what
- * the 1099-R reports for it, follow from the wires since the last sweep. */
+/** A direct rollover into the owner's Roth IRA. A Pretax or Roth sweep empties
+ * its account, and what it carries follows from the wires since the last
+ * sweep; the Roth account can't be swept while it holds Roth deferrals and the
+ * owner still works for the employer. An AfterTax rollover names the after-tax
+ * wires it carried before Carry converted them. */
 const rollover =
 	(request: typeof RolloverInput.Type) =>
 	(facts: Facts): Db.Plan<object> => {
-		if (S.PlanAccount.axioms[request.account].implied)
-			refuse(
-				"ImpliedConversion",
-				`Carry converts the ${request.account} account as deposits settle; its 1099-R follows from its transfers`
-			)
-		const row = { account: request.account, on: request.on, gross: request.gross }
-		const others = facts.Rollover.filter((old) => old.account !== row.account || old.on !== row.on)
-		const swept = sweeps({ ...facts, Rollover: [...others, row] }).find(
-			(sweep) => sweep.account === row.account && sweep.on === row.on
-		)
-		return { edits: Db.insert("Rollover", row), result: { ...request, ...swept } }
+		const { account, on, gross, transfers } = request
+		const row = { account, on, gross }
+		const carried: { transfer: string; account: typeof account; on: bigint }[] = []
+		if (S.PlanAccount.axioms[account].implied) {
+			if (transfers === undefined)
+				refuse("WiresRequired", "Name the after-tax wires this rollover carried, by Tracking ID")
+			const sentOn = new Map(facts.Transfer.map((transfer) => [transfer.mercury, transfer.sentOn]))
+			const amounts = new Map(facts.AfterTax.map((wire) => [wire.transfer, wire.amount]))
+			for (const transfer of new Set(transfers)) {
+				const amount = amounts.get(transfer)
+				if (amount === undefined) refuse("NotAfterTax", `${transfer} is not a recorded after-tax wire`)
+				const earlier = facts.Carried.find((wire) => wire.transfer === transfer && wire.on !== on)
+				if (earlier) refuse("AlreadyCarried", `${transfer} was already carried out of the plan`)
+				if ((sentOn.get(transfer) ?? 0n) > on)
+					refuse("SentAfterRollover", `${transfer} was sent after the rollover`)
+				carried.push({ transfer, account, on })
+			}
+			const basis = sum(carried.map((wire) => amounts.get(wire.transfer) ?? 0n))
+			if (basis > gross)
+				refuse("GrossBelowBasis", `The wires carried ${formatDollars(basis)}, more than the rollover's gross`)
+		} else {
+			if (transfers !== undefined)
+				refuse("NoWiresForSweep", `A ${account} sweep empties its account; it names no wires`)
+			if (account === "Roth" && stateOn(facts, on) !== undefined) {
+				const since = facts.Rollover.filter((old) => old.account === "Roth" && old.on < on)
+					.map((old) => old.on)
+					.reduce<bigint | undefined>((last, day) => (last === undefined ? day : max(last, day)), undefined)
+				const sentOn = new Map(facts.Transfer.map((transfer) => [transfer.mercury, transfer.sentOn]))
+				const deferred = facts.RothDeferral.some((wire) => {
+					const sent = sentOn.get(wire.transfer) ?? 0n
+					return (since === undefined || sent > since) && sent <= on
+				})
+				if (deferred)
+					refuse(
+						"RothDeferralsLocked",
+						"The Roth account holds Roth deferrals, which can't leave the plan before severance from employment or age 59½"
+					)
+			}
+		}
+		const others = facts.Rollover.filter((old) => old.account !== account || old.on !== on)
+		const swept = sweeps({
+			...facts,
+			Rollover: [...others, row],
+			Carried: [...facts.Carried.filter((wire) => wire.on !== on), ...carried]
+		}).find((sweep) => sweep.account === account && sweep.on === on)
+		return {
+			edits: [...Db.insert("Rollover", row), ...carried.flatMap((wire) => Db.insert("Carried", wire))],
+			result: { ...request, ...swept }
+		}
 	}
 
 // ── filings ────────────────────────────────────────────────────────────────
@@ -868,7 +910,7 @@ export const ops: { readonly [name: string]: Op } = {
 		writing(taxPaid)
 	),
 	"plan.rollover": op(
-		"Record a whole-account sweep of a plan account into the Roth IRA",
+		"Record a rollover into the Roth IRA: a whole-account sweep, or after-tax wires",
 		RolloverInput,
 		writing(rollover)
 	),

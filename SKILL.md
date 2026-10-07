@@ -142,7 +142,12 @@ as `tracker`.
 
 ## Mega backdoor Roth
 
-An after-tax contribution that Carry converts to Roth inside the plan.
+An after-tax contribution that goes on to the owner's Roth IRA. Carry's Mega
+Backdoor destination (Contributions → Change Election) must be **Roth IRA**:
+money that reaches the Solo 401k Roth account stays there with the Roth
+deferrals until the owner leaves the job or turns 59½. Never transfer
+after-tax money to "Solo 401k Roth", and never transfer the Carry Roth IRA out
+in full: that closes it for good.
 
 1. `status`: no blockers, and `afterTax.room` covers the amount.
 2. Carry (app.carry.com): Accounts → Solo 401k → Deposit.
@@ -151,7 +156,8 @@ An after-tax contribution that Carry converts to Roth inside the plan.
    - The tax year and the amount. The amount Carry shows available must equal
      `afterTax.room`.
    - Continue: "Confirm your deposit" reads To "Solo 401k After-Tax", Transfer
-     To "Solo 401k Roth". Show the owner; on their yes, Continue.
+     To "Roth IRA". If it says "Solo 401k Roth", stop and fix the destination
+     first. Show the owner; on their yes, Continue.
    - Wire Details: the bank, routing, account, beneficiary, FBO (the after-tax
      account in `custody`) and a memo with a code unique to this deposit.
      Confirm.
@@ -176,21 +182,34 @@ An after-tax contribution that Carry converts to Roth inside the plan.
    node src/cli.ts transfer.record '{"kind":"AfterTax","year":2026,"mercury":"20261015MMQFMP4S000200","sentOn":"2026-10-15","amount":"5000.00"}'
    ```
 
-   `status` then shows `afterTax.room` less, and `rothBasis.awaiting` more,
-   by the amount.
+   `status` then shows `afterTax.room` less by the amount.
 5. Back up.
+6. When Carry shows the money moved to the Roth IRA (Roth IRA → Activity: a
+   transfer from Solo 401k After-Tax, Successful), record the day it
+   completed, its gross and the after-tax wires it carried. Gross past the
+   wires is earnings, taxable on the after-tax 1099-R.
+
+   ```sh
+   node src/cli.ts plan.rollover '{"account":"AfterTax","on":"2026-10-21","gross":"5000.00","transfers":["20261015MMQFMP4S000200"]}'
+   ```
+
+   Back up. If after-tax money ever sits in the after-tax account bound for
+   "Solo 401k Roth", move it first: Transfer → Transfer within Carry → From
+   Solo 401k After-Tax, full balance → To Roth IRA. The owner submits.
 
 A contribution counts toward a year only if sent in it or by January 30 of the
 next.
 
 ## Rollover
 
-Every rollover sweeps a whole account into the owner's Roth IRA. Record it
-with the day and the amount that left. The after-tax account is never swept:
-Carry converts it.
+`plan.rollover` records money leaving the plan for the owner's Roth IRA: the
+day and the gross. A Pretax or Roth rollover sweeps the whole account; an
+AfterTax rollover names its wires (see Mega backdoor Roth). The Roth account
+can't be swept while it holds Roth deferrals and the owner still works for the
+employer (`RothDeferralsLocked`).
 
 ```sh
-node src/cli.ts plan.rollover '{"account":"Roth","on":"2026-11-02","gross":"25000.00"}'
+node src/cli.ts plan.rollover '{"account":"Pretax","on":"2026-11-02","gross":"25000.00"}'
 ```
 
 ## Distribution

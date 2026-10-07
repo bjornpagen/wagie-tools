@@ -53,7 +53,8 @@ export const stored = {
 	FiledFigures: S.FiledFigures,
 	Correction: S.Correction,
 	CorrectedFigures: S.CorrectedFigures,
-	Rollover: S.Rollover
+	Rollover: S.Rollover,
+	Carried: S.Carried
 } as const
 export type Stored = typeof stored
 export type Name = keyof Stored

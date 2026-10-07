@@ -47,9 +47,11 @@ never stored.
   line 7 carrying the rounding of the employee share, and each month of line 16
   its paychecks' tax, the last month absorbing the quarter's cent.
 - **The plan's books.** Roth basis enters only as Roth deferral and after-tax
-  wires; Carry converts after-tax deposits to Roth as they settle. A rollover
-  is a whole-account sweep into the owner's Roth IRA, and the basis it carries
-  is the wires since the last sweep. The 1099-R follows.
+  wires; Carry converts after-tax deposits to Roth as they settle, unless an
+  after-tax rollover carries them to the owner's Roth IRA first. A Pretax or
+  Roth rollover is a whole-account sweep, and the basis it carries is the wires
+  since the last sweep; the Roth account stays put while it holds Roth
+  deferrals and the owner is employed. The 1099-R follows.
 - **History** is the span the ledger did not record. Only an import writes it,
   and only inside it may a filing be attested or a payment have been made
   outside Mercury.
